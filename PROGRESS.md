@@ -10,7 +10,7 @@
 | :---: | :--- | :---: | :---: | :---: |
 | **0** | Cimientos, Gobernanza y Estructura Cargo | Sesión 0 | `[COMPLETADO]` | 1 / 1 |
 | **1** | Dominio Puro y Gestión Multi-Centro | Sesión 1 | `[COMPLETADO]` | 34 / 34 |
-| **2** | Adaptador LanceDB y los 6 Esquemas Arrow | Sesión 2 | `[NO INICIADO]` | - |
+| **2** | Adaptador LanceDB y los 6 Esquemas Arrow | Sesión 2 | `[COMPLETADO]` | 46 / 46 |
 | **3** | Motor Analítico DataFusion y Grafo Petgraph | Sesión 3 | `[NO INICIADO]` | - |
 | **4** | Embeddings Locales y Búsqueda Híbrida | Sesión 4 | `[NO INICIADO]` | - |
 | **5** | Pipeline de Ingesta y Destilación Claude Headless | Sesión 5 | `[NO INICIADO]` | - |
@@ -40,10 +40,10 @@
 - [x] Tests unitarios TDD de dominio al 100% (sin I/O ni dependencias pesadas).
 
 ### Fase 2: Adaptador LanceDB y los 6 Esquemas Arrow
-- [ ] Definición estricta de esquemas Apache Arrow para las 6 tablas (`01` a `06`).
-- [ ] Implementación de repositorios sobre LanceDB (`.lance`).
-- [ ] Mecanismo transaccional de control de versiones (`vigente = false` para versiones previas al insertar nueva revisión).
-- [ ] Tests de integración TDD en directorio temporal (`tempfile`).
+- [x] Definición estricta de esquemas Apache Arrow para las 6 tablas (`01` a `06`).
+- [x] Implementación de repositorios sobre LanceDB (`.lance`).
+- [x] Mecanismo transaccional de control de versiones (`vigente = false` para versiones previas al insertar nueva revisión).
+- [x] Tests de integración TDD en directorio temporal (`tempfile`).
 
 ### Fase 3: Motor Analítico DataFusion y Grafo Petgraph
 - [ ] Configuración de `SessionContext` de Apache DataFusion con registro dinámico de centros activos.
@@ -117,4 +117,22 @@
   * Proceder con la **Fase 2: Adaptador LanceDB y los 6 Esquemas Arrow**.
   * Diseñar e implementar los esquemas de Apache Arrow para las 6 tablas (`01_doc_catalog`, `02_doc_chunks`, `03_operational_matrix`, `04_double_entry_tables`, `05_hierarchical_sections`, `06_reference_graph`).
   * Implementar el adaptador `LanceDbCenterRegistry` y repositorios sobre LanceDB (`.lance`) con tests de integración temporales (`tempfile`).
+
+### Sesión 2 (2026-10-16)
+* **Objetivo:** Fase 2 — Adaptador LanceDB y los 6 Esquemas Arrow.
+* **Acciones realizadas:**
+  * Definición tipada y rigurosa de los 6 esquemas Apache Arrow en `src/infrastructure/storage/schemas.rs` (`01_doc_catalog`, `02_doc_chunks`, `03_operational_matrix`, `04_double_entry_tables`, `05_double_entry_cells`, `06_reference_graph`), con dimensión de embeddings en 1024 (`FixedSizeList`) y campo de versionado `vigente: Boolean`.
+  * Definición del puerto de aplicación `LakehouseStorePort` en `src/application/ports/lakehouse_store.rs`.
+  * Implementación del adaptador `LanceDbStore` sobre LanceDB (`.lance`) en `src/infrastructure/storage/lancedb_store.rs`: inicialización idempotente, inserción atómica de lotes `RecordBatch` y control transaccional de versiones (`retirar_vigencia_documento`).
+  * Sincronización asíncrona de inicialización mediante `tokio::sync::Mutex` y control de existencia ante llamadas concurrentes multihilo.
+  * Implementación de la suite de pruebas de integración en `tests/integration_lancedb_store.rs`: inicialización de las 6 tablas, inserción de lotes heterogéneos, conteo y verificación de invalidación selectiva de vigencia.
+  * Implementación de la suite de pruebas adversariales en `tests/adversarial_storage_tests.rs`: rechazo de esquemas corruptos, rechazo de dimensiones vectoriales incompatibles, control de errores en tablas inexistentes, idempotencia de invalidación y resistencia a carreras concurrentes multihilo.
+  * Alineación de dependencias de Arrow a la versión 53 unificando LanceDB y DataFusion sin duplicidad de crates.
+  * Verificación rigurosa: 46 / 46 tests pasando (28 unitarios + 9 adversariales de dominio + 5 adversariales de almacenamiento + 4 de integración al 100%), `cargo clippy -- -D warnings` (0 advertencias) y `cargo fmt --check` (100% formateado).
+* **Notas para la Sesión 3:**
+  * Proceder con la **Fase 3: Motor Analítico DataFusion y Grafo Petgraph**.
+  * Configurar `SessionContext` dinámico con registro y desregistro de tablas según centros activos.
+  * Implementar el servicio determinista `TableLookupService` para resolución de celdas cruzadas (rangos numéricos y categorías).
+  * Implementar el servicio `GraphTraversalService` para hidratación y linaje normativo en memoria con `petgraph`.
+
 

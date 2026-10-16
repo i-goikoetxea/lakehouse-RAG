@@ -499,6 +499,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "35b0f9c0c3582dd55db0f136d3b44bfa0189df07adcf7dc7f2f2e74db0f52eb8"
 dependencies = [
  "bitflags 2.13.2",
+ "serde",
 ]
 
 [[package]]
@@ -506,9 +507,6 @@ name = "arrow-schema"
 version = "54.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cfaf5e440be44db5413b75b72c2a87c1f8f0627117d110264048f2969b99e9"
-dependencies = [
- "serde",
-]
 
 [[package]]
 name = "arrow-select"
@@ -4180,9 +4178,9 @@ name = "lakehouse_rag"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "arrow 54.2.1",
- "arrow-array 54.2.1",
- "arrow-schema 54.3.1",
+ "arrow 53.4.1",
+ "arrow-array 53.4.1",
+ "arrow-schema 53.4.1",
  "async-trait",
  "chrono",
  "crossterm",

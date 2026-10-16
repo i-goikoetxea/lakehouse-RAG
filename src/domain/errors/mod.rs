@@ -21,6 +21,9 @@ pub enum DomainError {
 
     #[error("Error de validación de entidad: '{0}'")]
     ValidationError(String),
+
+    #[error("Error de almacenamiento en Lakehouse: '{0}'")]
+    StorageError(String),
 }
 
 #[cfg(test)]

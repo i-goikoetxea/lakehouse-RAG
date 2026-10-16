@@ -29,9 +29,9 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 petgraph = { version = "0.7", features = ["serde-1"] }
 
 # Lakehouse, Motor Analítico y Vectorial
-arrow = { version = "54", features = ["prettyprint", "json"] }
-arrow-array = "54"
-arrow-schema = { version = "54", features = ["serde"] }
+arrow = { version = "53", features = ["prettyprint", "json"] }
+arrow-array = "53"
+arrow-schema = { version = "53", features = ["serde"] }
 datafusion = "45"
 lancedb = "0.15"
 fastembed = "4"
