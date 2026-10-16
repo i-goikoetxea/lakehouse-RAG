@@ -90,4 +90,12 @@ Antes de finalizar la sesión, el agente **DEBE**:
    * Marcar las tareas completadas (`- [x]`).
    * Actualizar el estado de la fase (`[COMPLETADO]`).
    * Añadir una entrada a la **Bitácora de Sesiones** indicando: cambios realizados, tests añadidos y notas explícitas para la siguiente sesión.
-4. Informar al usuario del estado alcanzado y solicitar confirmación para la siguiente fase.
+4. Informar al usuario del estado alcanzado y solicitar aprobación explícita de la fase.
+5. **Git Commit, Merge y Push Remoto (Innegociable):**
+   * Tras la aprobación explícita del usuario sobre la fase, realizar commit semántico (`git commit -m "feat(phase-X): ..."`).
+   * Si se trabajó en rama temática de fase, realizar el merge correspondiente.
+   * Realizar push inmediato al repositorio remoto en GitHub:
+     ```powershell
+     git push origin main
+     ```
+
