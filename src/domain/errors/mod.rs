@@ -36,6 +36,15 @@ pub enum DomainError {
 
     #[error("Error en búsqueda híbrida: '{0}'")]
     SearchError(String),
+
+    #[error("Error en parser de documentos: '{0}'")]
+    ParserError(String),
+
+    #[error("Error en destilación LLM: '{0}'")]
+    LlmDistillationError(String),
+
+    #[error("Error en pipeline de ingesta documental: '{0}'")]
+    IngestionError(String),
 }
 
 #[cfg(test)]

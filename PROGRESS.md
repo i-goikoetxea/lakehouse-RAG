@@ -13,7 +13,7 @@
 | **2** | Adaptador LanceDB y los 6 Esquemas Arrow | Sesión 2 | `[COMPLETADO]` | 46 / 46 |
 | **3** | Motor Analítico DataFusion y Grafo Petgraph | Sesión 3 | `[COMPLETADO]` | 61 / 61 |
 | **4** | Embeddings Locales y Búsqueda Híbrida | Sesión 4 | `[COMPLETADO]` | 70 / 70 |
-| **5** | Pipeline de Ingesta y Destilación Claude Headless | Sesión 5 | `[NO INICIADO]` | - |
+| **5** | Pipeline de Ingesta y Destilación Claude Headless | Sesión 5 | `[COMPLETADO]` | 88 / 88 |
 | **6** | Servidor de Herramientas Data Lake y Agente | Sesión 6 | `[NO INICIADO]` | - |
 | **7** | Interfaz de Usuario TUI (Ratatui) y Chat | Sesión 7 | `[NO INICIADO]` | - |
 | **8** | Auditoría Adversarial E2E y Criterios DoD | Sesión 8 | `[NO INICIADO]` | - |
@@ -57,10 +57,10 @@
 - [x] Tests TDD de vectorización y scoring de relevancia híbrida.
 
 ### Fase 5: Pipeline de Ingesta y Destilación Claude Headless
-- [ ] Parser documental preservando jerarquía estructural de títulos y tablas.
-- [ ] Invocador de Claude Headless (`claude -p`) con salida estructurada JSON Schema para desnormalización.
-- [ ] Orquestador de ingesta atómica hacia LanceDB.
-- [ ] Tests TDD con fixtures de documentos técnicos de muestra.
+- [x] Parser documental preservando jerarquía estructural de títulos y tablas.
+- [x] Invocador de Claude Headless (`claude -p`) con salida estructurada JSON Schema para desnormalización.
+- [x] Orquestador de ingesta atómica hacia LanceDB.
+- [x] Tests TDD con fixtures de documentos técnicos de muestra.
 
 ### Fase 6: Servidor de Herramientas Data Lake y Agente
 - [ ] Implementación de las 5 Tools:
@@ -160,11 +160,20 @@
   * Implementación de la suite de pruebas de integración en `tests/integration_hybrid_search.rs`: recuperación y ordenamiento RRF sobre LanceDB temporal, aislamiento estricto entre centros (`planta_norte` vs `planta_sur`), filtrado de vigencia documental y modulación de ponderación de pesos vectorial/BM25.
   * Implementación de la suite de pruebas adversariales en `tests/adversarial_embeddings_tests.rs`: rechazo de `centro_id` vacío o de espacios en blanco, manejo seguro de consultas vacías, neutralización de 8 vectores de inyección hostil (SQL, bytes nulos, path traversal, scripts), resistencia ante extremos de `top_k` (0 y 10,000) y rechazo de vectores con dimensiones incongruentes.
   * Verificación rigurosa: 70 / 70 tests pasando (37 unitarios + 9 adversariales de dominio + 5 adversariales de almacenamiento + 5 adversariales de query + 5 adversariales de embeddings + 4 integración LanceDB + 4 integración DataFusion/Petgraph + 4 integración híbrida al 100%), `cargo clippy --all-targets -- -D warnings` (0 advertencias) y `cargo fmt --check` (100% formateado).
-* **Notas para la Sesión 5:**
-  * Proceder con la **Fase 5: Pipeline de Ingesta y Destilación Claude Headless**.
-  * Implementar el parser documental preservando jerarquía estructural de títulos y tablas.
-  * Implementar el invocador de Claude Headless (`claude -p`) con salida estructurada JSON Schema para desnormalización.
-  * Desarrollar el orquestador de ingesta atómica hacia LanceDB en las tablas aplicables.
-
-
-
+### Sesión 5 (2026-10-16)
+* **Objetivo:** Fase 5 — Pipeline de Ingesta y Destilación Claude Headless.
+* **Acciones realizadas:**
+  * Ampliación de errores de dominio en `DomainError`: `ParserError`, `LlmDistillationError`, `IngestionError`.
+  * Definición de DTOs tipados en `src/application/dtos/ingestion.rs` con soporte de serialización, deserialización y generación automática de JSON Schema vía `schemars` (`DistilledDocumentPackage`, `DistilledCatalog`, `DistilledOperationalTuple`, `DistilledDoubleEntryTable`, `DistilledCell`, `DistilledReferenceEdge`, `ChunkToIngest`).
+  * Definición de puertos en `src/application/ports/`: `DocumentParserPort` y `LlmDistillerPort` con validador de esquema JSON.
+  * Implementación del adaptador `MarkdownParser` en `src/infrastructure/parsers/markdown_parser.rs`: extracción de jerarquía estructural (H1-H4), códigos de sección normalizados, tablas Markdown completas con encabezados, filas y notas al pie, y resistencia ante formatos Windows CRLF.
+  * Implementación del adaptador mock determinista `MockDistiller` en `src/infrastructure/llm/mock_distiller.rs` para pruebas offline continuas de alta velocidad y programación de fallos.
+  * Implementación del adaptador `ClaudeHeadlessDistiller` en `src/infrastructure/llm/claude_headless_distiller.rs`: invocación asíncrona mediante subproceso con `claude -p`, inyección de esquema JSON estricto, limpieza de wrappers markdown (````json...````) y manejo robusto de errores/timeouts.
+  * Implementación del orquestador atómico `DocumentIngestionService` en `src/application/use_cases/document_ingestion_service.rs`: parseo estructural, destilación LLM, cálculo SHA-256, invalidación previa de vigencia por `DocId`, vectorización de fragmentos con `EmbeddingEnginePort` y persistencia transaccional de lotes `RecordBatch` hacia las tablas correspondientes de `LanceDbStore`.
+  * Implementación de la suite de integración en `tests/integration_ingestion_pipeline.rs`: persistencia E2E en las 6 tablas con fixture industrial complejo, control de revisiones e invalidación de versiones anteriores y coexistencia multi-centro.
+  * Implementación de la suite adversarial en `tests/adversarial_ingestion_tests.rs`: neutralización de inyecciones de escape de prompt / scripts hostiles, manejo controlado de fallos en LLM, absorción de tablas rotas/asimétricas, resistencia a DoS con payloads masivos y rechazo estricto de dimensiones incompatibles de embeddings.
+  * Verificación rigurosa: 88 / 88 tests pasando (48 unitarios + 9 adversariales de dominio + 5 adversariales de almacenamiento + 5 adversariales de query + 5 adversariales de embeddings + 5 adversariales de ingesta + 4 integración LanceDB + 4 integración DataFusion/Petgraph + 4 integración híbrida + 3 integración ingesta al 100%), `cargo clippy --all-targets -- -D warnings` (0 advertencias) y `cargo fmt --check` (100% formateado).
+* **Notas para la Sesión 6:**
+  * Proceder con la **Fase 6: Servidor de Herramientas Data Lake y Agente**.
+  * Implementar las 5 herramientas operativas: `inspect_lakehouse_catalog`, `query_operational_matrix`, `lookup_double_entry_table`, `execute_athena_sql`, `traverse_normative_graph`.
+  * Implementar el selector dinámico de modelos Claude (`sonnet`, `opus`, `haiku`) y el wrapper asíncrono con streaming y parsing de eventos JSON de tools.
