@@ -1,0 +1,388 @@
+//! Pruebas de Integración para Búsqueda Híbrida (Vectorial + BM25 + Filtros Arrow + RRF)
+
+use std::sync::Arc;
+
+use arrow_array::{BooleanArray, FixedSizeListArray, Float32Array, RecordBatch, StringArray};
+use arrow_schema::{DataType, Field};
+use tempfile::tempdir;
+
+use lakehouse_rag::application::ports::embedding_engine::EmbeddingEnginePort;
+use lakehouse_rag::application::ports::hybrid_search::{HybridSearchParams, HybridSearchPort};
+use lakehouse_rag::application::ports::lakehouse_store::{LakehouseStorePort, TABLA_DOC_CHUNKS};
+use lakehouse_rag::application::use_cases::hybrid_search_service::HybridSearchService;
+use lakehouse_rag::infrastructure::embeddings::mock_engine::MockEmbeddingEngine;
+use lakehouse_rag::infrastructure::storage::lancedb_store::LanceDbStore;
+use lakehouse_rag::infrastructure::storage::schemas::{DIMENSION_EMBEDDINGS, schema_doc_chunks};
+
+/// Datos de prueba para crear un lote de chunks
+struct TestChunkFixture<'a> {
+    chunk_id: &'a str,
+    doc_id: &'a str,
+    centro_id: &'a str,
+    seccion: &'a str,
+    contenido: &'a str,
+    vector: Vec<f32>,
+    vigente: bool,
+}
+
+/// Crea un RecordBatch con fragmentos vectorizados para tests
+fn crear_lote_chunks(chunks: Vec<TestChunkFixture<'_>>) -> RecordBatch {
+    let mut chunk_ids = Vec::new();
+    let mut doc_ids = Vec::new();
+    let mut centros = Vec::new();
+    let mut secciones = Vec::new();
+    let mut contenidos = Vec::new();
+    let mut vigentes = Vec::new();
+    let mut flat_vectors: Vec<f32> = Vec::new();
+
+    for c in chunks {
+        chunk_ids.push(c.chunk_id);
+        doc_ids.push(c.doc_id);
+        centros.push(c.centro_id);
+        secciones.push(c.seccion);
+        contenidos.push(c.contenido);
+        vigentes.push(c.vigente);
+        flat_vectors.extend(c.vector);
+    }
+
+    let item_field = Arc::new(Field::new("item", DataType::Float32, true));
+    let valores_vector = Arc::new(Float32Array::from(flat_vectors));
+    let array_vector = Arc::new(FixedSizeListArray::new(
+        item_field,
+        DIMENSION_EMBEDDINGS,
+        valores_vector,
+        None,
+    ));
+
+    RecordBatch::try_new(
+        schema_doc_chunks(),
+        vec![
+            Arc::new(StringArray::from(chunk_ids)),
+            Arc::new(StringArray::from(doc_ids)),
+            Arc::new(StringArray::from(centros)),
+            Arc::new(StringArray::from(secciones)),
+            Arc::new(StringArray::from(contenidos)),
+            array_vector,
+            Arc::new(BooleanArray::from(vigentes)),
+        ],
+    )
+    .expect("Construir RecordBatch chunks")
+}
+
+#[tokio::test]
+async fn test_integration_busqueda_hibrida_recupera_chunk_relevante_por_rrf() {
+    let tmp = tempdir().expect("Crear tempdir");
+    let store = Arc::new(
+        LanceDbStore::conectar(tmp.path())
+            .await
+            .expect("Conectar store"),
+    );
+    store
+        .inicializar_tablas()
+        .await
+        .expect("Inicializar tablas");
+
+    let engine = Arc::new(MockEmbeddingEngine::new(Some(
+        DIMENSION_EMBEDDINGS as usize,
+    )));
+
+    let t1 = "Procedimiento de inspección y calibración de válvula de alivio de presión en calderas de vapor";
+    let t2 = "Plan de mantenimiento preventivo y lubricación de cintas transportadoras de mineral";
+    let t3 = "Protocolo de seguridad operacional en reactores químicos de alta temperatura";
+
+    let v1 = engine.generate_embedding(t1).await.unwrap();
+    let v2 = engine.generate_embedding(t2).await.unwrap();
+    let v3 = engine.generate_embedding(t3).await.unwrap();
+
+    let batch = crear_lote_chunks(vec![
+        TestChunkFixture {
+            chunk_id: "CHK-001",
+            doc_id: "DOC-CAL-01",
+            centro_id: "planta_central",
+            seccion: "Sección 4.2: Válvulas de Alivio",
+            contenido: t1,
+            vector: v1,
+            vigente: true,
+        },
+        TestChunkFixture {
+            chunk_id: "CHK-002",
+            doc_id: "DOC-MEC-02",
+            centro_id: "planta_central",
+            seccion: "Sección 1.1: Cintas",
+            contenido: t2,
+            vector: v2,
+            vigente: true,
+        },
+        TestChunkFixture {
+            chunk_id: "CHK-003",
+            doc_id: "DOC-QUI-03",
+            centro_id: "planta_central",
+            seccion: "Sección 3.5: Reactores",
+            contenido: t3,
+            vector: v3,
+            vigente: true,
+        },
+    ]);
+
+    store
+        .insertar_lote(TABLA_DOC_CHUNKS, batch)
+        .await
+        .expect("Insertar chunks");
+
+    let hybrid_service = HybridSearchService::new(store.clone(), engine.clone());
+
+    let params = HybridSearchParams {
+        query: "calibracion valvula alivio presion caldera".to_string(),
+        centro_id: "planta_central".to_string(),
+        top_k: 3,
+        solo_vigentes: true,
+        peso_vectorial: 0.6,
+        peso_bm25: 0.4,
+        rrf_k: 60.0,
+    };
+
+    let hits = hybrid_service
+        .hybrid_search(&params)
+        .await
+        .expect("Ejecutar búsqueda híbrida");
+
+    assert!(!hits.is_empty(), "Debe retornar al menos 1 resultado");
+    assert_eq!(hits[0].chunk_id, "CHK-001");
+    assert_eq!(hits[0].doc_id, "DOC-CAL-01");
+    assert!(
+        hits[0].score_hibrido > 0.0,
+        "Score híbrido debe ser positivo"
+    );
+    assert!(
+        hits[0].score_vectorial > 0.0,
+        "Score vectorial debe ser positivo"
+    );
+    assert!(hits[0].score_bm25 > 0.0, "Score BM25 debe ser positivo");
+}
+
+#[tokio::test]
+async fn test_integration_aislamiento_estricto_multi_centro() {
+    let tmp = tempdir().expect("Crear tempdir");
+    let store = Arc::new(
+        LanceDbStore::conectar(tmp.path())
+            .await
+            .expect("Conectar store"),
+    );
+    store
+        .inicializar_tablas()
+        .await
+        .expect("Inicializar tablas");
+
+    let engine = Arc::new(MockEmbeddingEngine::new(Some(
+        DIMENSION_EMBEDDINGS as usize,
+    )));
+
+    let texto = "Manual de contingencias ante derrames de sustancias peligrosas";
+    let v_norte = engine.generate_embedding(texto).await.unwrap();
+    let v_sur = engine.generate_embedding(texto).await.unwrap();
+
+    let batch = crear_lote_chunks(vec![
+        TestChunkFixture {
+            chunk_id: "CHK-NORTE-1",
+            doc_id: "DOC-NORTE",
+            centro_id: "planta_norte",
+            seccion: "Emergencias",
+            contenido: texto,
+            vector: v_norte,
+            vigente: true,
+        },
+        TestChunkFixture {
+            chunk_id: "CHK-SUR-1",
+            doc_id: "DOC-SUR",
+            centro_id: "planta_sur",
+            seccion: "Emergencias",
+            contenido: texto,
+            vector: v_sur,
+            vigente: true,
+        },
+    ]);
+
+    store
+        .insertar_lote(TABLA_DOC_CHUNKS, batch)
+        .await
+        .expect("Insertar chunks");
+
+    let hybrid_service = HybridSearchService::new(store.clone(), engine.clone());
+
+    // Búsqueda orientada a planta_norte
+    let params_norte = HybridSearchParams {
+        query: "contingencias sustancias peligrosas".to_string(),
+        centro_id: "planta_norte".to_string(),
+        top_k: 10,
+        solo_vigentes: true,
+        ..Default::default()
+    };
+
+    let hits_norte = hybrid_service
+        .hybrid_search(&params_norte)
+        .await
+        .expect("Búsqueda norte");
+
+    assert_eq!(hits_norte.len(), 1);
+    assert_eq!(hits_norte[0].centro_id, "planta_norte");
+    assert_eq!(hits_norte[0].chunk_id, "CHK-NORTE-1");
+
+    // Verificar que ninguna fila de planta_sur se filtre
+    assert!(hits_norte.iter().all(|h| h.centro_id == "planta_norte"));
+}
+
+#[tokio::test]
+async fn test_integration_filtrado_estricto_por_vigencia() {
+    let tmp = tempdir().expect("Crear tempdir");
+    let store = Arc::new(
+        LanceDbStore::conectar(tmp.path())
+            .await
+            .expect("Conectar store"),
+    );
+    store
+        .inicializar_tablas()
+        .await
+        .expect("Inicializar tablas");
+
+    let engine = Arc::new(MockEmbeddingEngine::new(Some(
+        DIMENSION_EMBEDDINGS as usize,
+    )));
+
+    let texto_rev1 = "Especificación técnica de motores eléctricos versión preliminar";
+    let texto_rev2 = "Especificación técnica de motores eléctricos versión vigente definitiva";
+
+    let v1 = engine.generate_embedding(texto_rev1).await.unwrap();
+    let v2 = engine.generate_embedding(texto_rev2).await.unwrap();
+
+    let batch = crear_lote_chunks(vec![
+        TestChunkFixture {
+            chunk_id: "CHK-REV1",
+            doc_id: "DOC-MOT-V1",
+            centro_id: "planta_alfa",
+            seccion: "Motores",
+            contenido: texto_rev1,
+            vector: v1,
+            vigente: false, // NO VIGENTE (derogado)
+        },
+        TestChunkFixture {
+            chunk_id: "CHK-REV2",
+            doc_id: "DOC-MOT-V2",
+            centro_id: "planta_alfa",
+            seccion: "Motores",
+            contenido: texto_rev2,
+            vector: v2,
+            vigente: true, // VIGENTE
+        },
+    ]);
+
+    store
+        .insertar_lote(TABLA_DOC_CHUNKS, batch)
+        .await
+        .expect("Insertar chunks");
+
+    let hybrid_service = HybridSearchService::new(store.clone(), engine.clone());
+
+    // Consulta con solo_vigentes = true
+    let params_vigentes = HybridSearchParams {
+        query: "motores electricos especificacion".to_string(),
+        centro_id: "planta_alfa".to_string(),
+        top_k: 10,
+        solo_vigentes: true,
+        ..Default::default()
+    };
+
+    let hits_vigentes = hybrid_service
+        .hybrid_search(&params_vigentes)
+        .await
+        .expect("Búsqueda solo vigentes");
+
+    assert_eq!(hits_vigentes.len(), 1);
+    assert_eq!(hits_vigentes[0].chunk_id, "CHK-REV2");
+    assert!(hits_vigentes[0].vigente);
+
+    // Consulta con solo_vigentes = false
+    let params_todos = HybridSearchParams {
+        query: "motores electricos especificacion".to_string(),
+        centro_id: "planta_alfa".to_string(),
+        top_k: 10,
+        solo_vigentes: false,
+        ..Default::default()
+    };
+
+    let hits_todos = hybrid_service
+        .hybrid_search(&params_todos)
+        .await
+        .expect("Búsqueda todos");
+
+    assert_eq!(hits_todos.len(), 2);
+}
+
+#[tokio::test]
+async fn test_integration_ponderacion_pesos_rrf() {
+    let tmp = tempdir().expect("Crear tempdir");
+    let store = Arc::new(
+        LanceDbStore::conectar(tmp.path())
+            .await
+            .expect("Conectar store"),
+    );
+    store
+        .inicializar_tablas()
+        .await
+        .expect("Inicializar tablas");
+
+    let engine = Arc::new(MockEmbeddingEngine::new(Some(
+        DIMENSION_EMBEDDINGS as usize,
+    )));
+
+    let t1 = "Procedimiento especial código ISO-9001 calidad total";
+    let v1 = engine.generate_embedding(t1).await.unwrap();
+
+    let batch = crear_lote_chunks(vec![TestChunkFixture {
+        chunk_id: "CHK-W1",
+        doc_id: "DOC-W",
+        centro_id: "planta_peso",
+        seccion: "Calidad",
+        contenido: t1,
+        vector: v1,
+        vigente: true,
+    }]);
+
+    store
+        .insertar_lote(TABLA_DOC_CHUNKS, batch)
+        .await
+        .expect("Insertar chunks");
+
+    let hybrid_service = HybridSearchService::new(store.clone(), engine.clone());
+
+    // 100% vectorial, 0% BM25
+    let params_vec_only = HybridSearchParams {
+        query: "calidad total ISO-9001".to_string(),
+        centro_id: "planta_peso".to_string(),
+        top_k: 1,
+        solo_vigentes: true,
+        peso_vectorial: 1.0,
+        peso_bm25: 0.0,
+        rrf_k: 60.0,
+    };
+    let hits_vec = hybrid_service
+        .hybrid_search(&params_vec_only)
+        .await
+        .unwrap();
+    assert_eq!(hits_vec.len(), 1);
+
+    // 0% vectorial, 100% BM25
+    let params_bm25_only = HybridSearchParams {
+        query: "calidad total ISO-9001".to_string(),
+        centro_id: "planta_peso".to_string(),
+        top_k: 1,
+        solo_vigentes: true,
+        peso_vectorial: 0.0,
+        peso_bm25: 1.0,
+        rrf_k: 60.0,
+    };
+    let hits_bm25 = hybrid_service
+        .hybrid_search(&params_bm25_only)
+        .await
+        .unwrap();
+    assert_eq!(hits_bm25.len(), 1);
+}

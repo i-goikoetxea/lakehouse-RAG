@@ -12,7 +12,7 @@
 | **1** | Dominio Puro y Gestión Multi-Centro | Sesión 1 | `[COMPLETADO]` | 34 / 34 |
 | **2** | Adaptador LanceDB y los 6 Esquemas Arrow | Sesión 2 | `[COMPLETADO]` | 46 / 46 |
 | **3** | Motor Analítico DataFusion y Grafo Petgraph | Sesión 3 | `[COMPLETADO]` | 61 / 61 |
-| **4** | Embeddings Locales y Búsqueda Híbrida | Sesión 4 | `[NO INICIADO]` | - |
+| **4** | Embeddings Locales y Búsqueda Híbrida | Sesión 4 | `[COMPLETADO]` | 70 / 70 |
 | **5** | Pipeline de Ingesta y Destilación Claude Headless | Sesión 5 | `[NO INICIADO]` | - |
 | **6** | Servidor de Herramientas Data Lake y Agente | Sesión 6 | `[NO INICIADO]` | - |
 | **7** | Interfaz de Usuario TUI (Ratatui) y Chat | Sesión 7 | `[NO INICIADO]` | - |
@@ -52,9 +52,9 @@
 - [x] Tests TDD de consultas SQL deterministas y aislamiento estricto de centros.
 
 ### Fase 4: Embeddings Locales y Búsqueda Híbrida
-- [ ] Adaptador de embeddings locales con `fastembed` (BGE-M3 / multilingual).
-- [ ] Búsqueda híbrida combinada: Vectorial (`IVF-PQ`/`HNSW`) + Filtros Arrow + BM25 Full-Text Search.
-- [ ] Tests TDD de vectorización y scoring de relevancia híbrida.
+- [x] Adaptador de embeddings locales con `fastembed` (BGE-M3 / multilingual).
+- [x] Búsqueda híbrida combinada: Vectorial (`IVF-PQ`/`HNSW`) + Filtros Arrow + BM25 Full-Text Search.
+- [x] Tests TDD de vectorización y scoring de relevancia híbrida.
 
 ### Fase 5: Pipeline de Ingesta y Destilación Claude Headless
 - [ ] Parser documental preservando jerarquía estructural de títulos y tablas.
@@ -148,9 +148,23 @@
   * Verificación rigurosa: 61 / 61 tests pasando (34 unitarios + 9 adversariales de dominio + 5 adversariales de almacenamiento + 5 adversariales de query + 4 de integración LanceDB + 4 de integración DataFusion/Petgraph al 100%), `cargo clippy -- -D warnings` (0 advertencias) y `cargo fmt --check` (100% formateado).
 * **Notas para la Sesión 4:**
   * Proceder con la **Fase 4: Embeddings Locales y Búsqueda Híbrida**.
-  * Implementar el adaptador de embeddings locales con `fastembed` (BGE-M3 / multilingual).
-  * Desarrollar el servicio de búsqueda híbrida combinada: Vectorial (`IVF-PQ` / `HNSW` de LanceDB) + Filtros columnares Arrow + BM25 Full-Text Search.
-  * Implementar tests TDD unitarios, de integración y suite adversarial de vectorización y scoring de relevancia híbrida.
+
+### Sesión 4 (2026-10-16)
+* **Objetivo:** Fase 4 — Embeddings Locales y Búsqueda Híbrida.
+* **Acciones realizadas:**
+  * Ampliación de errores tipados en `DomainError`: variantes `EmbeddingError` y `SearchError`.
+  * Definición de contratos y puertos en `src/application/ports/`: `EmbeddingEnginePort` y `HybridSearchPort` junto a sus DTOs de transferencia (`SearchHit`, `HybridSearchParams`).
+  * Implementación del motor en memoria determinista `MockEmbeddingEngine` con hash criptográfico y normalización L2 para ejecución de suites ultrarrápidas y offline.
+  * Implementación del adaptador de infraestructura `FastEmbedEngine` encapsulando `fastembed::TextEmbedding` (ONNX Runtime) y offload seguro a hilos bloqueantes con `tokio::task::spawn_blocking`.
+  * Implementación del orquestador de búsqueda híbrida `HybridSearchService` en `src/application/use_cases/hybrid_search_service.rs`: búsqueda vectorial KNN/L2 en LanceDB (`_distance`), extracción léxica BM25 (Robertson-Spärck Jones IDF con normalización min-max) y fusión balanceada vía Reciprocal Rank Fusion (RRF) con filtrado estricto de `centro_id` y `vigente`.
+  * Implementación de la suite de pruebas de integración en `tests/integration_hybrid_search.rs`: recuperación y ordenamiento RRF sobre LanceDB temporal, aislamiento estricto entre centros (`planta_norte` vs `planta_sur`), filtrado de vigencia documental y modulación de ponderación de pesos vectorial/BM25.
+  * Implementación de la suite de pruebas adversariales en `tests/adversarial_embeddings_tests.rs`: rechazo de `centro_id` vacío o de espacios en blanco, manejo seguro de consultas vacías, neutralización de 8 vectores de inyección hostil (SQL, bytes nulos, path traversal, scripts), resistencia ante extremos de `top_k` (0 y 10,000) y rechazo de vectores con dimensiones incongruentes.
+  * Verificación rigurosa: 70 / 70 tests pasando (37 unitarios + 9 adversariales de dominio + 5 adversariales de almacenamiento + 5 adversariales de query + 5 adversariales de embeddings + 4 integración LanceDB + 4 integración DataFusion/Petgraph + 4 integración híbrida al 100%), `cargo clippy --all-targets -- -D warnings` (0 advertencias) y `cargo fmt --check` (100% formateado).
+* **Notas para la Sesión 5:**
+  * Proceder con la **Fase 5: Pipeline de Ingesta y Destilación Claude Headless**.
+  * Implementar el parser documental preservando jerarquía estructural de títulos y tablas.
+  * Implementar el invocador de Claude Headless (`claude -p`) con salida estructurada JSON Schema para desnormalización.
+  * Desarrollar el orquestador de ingesta atómica hacia LanceDB en las tablas aplicables.
 
 
 

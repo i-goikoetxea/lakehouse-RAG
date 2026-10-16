@@ -30,6 +30,12 @@ pub enum DomainError {
 
     #[error("Error en grafo normativo: '{0}'")]
     GraphError(String),
+
+    #[error("Error en motor de embeddings: '{0}'")]
+    EmbeddingError(String),
+
+    #[error("Error en búsqueda híbrida: '{0}'")]
+    SearchError(String),
 }
 
 #[cfg(test)]
