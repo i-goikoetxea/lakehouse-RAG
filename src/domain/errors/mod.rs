@@ -45,6 +45,12 @@ pub enum DomainError {
 
     #[error("Error en pipeline de ingesta documental: '{0}'")]
     IngestionError(String),
+
+    #[error("Error al ejecutar herramienta del Lakehouse: '{0}'")]
+    ToolExecutionError(String),
+
+    #[error("Error en agente o modelo de lenguaje: '{0}'")]
+    AgentError(String),
 }
 
 #[cfg(test)]

@@ -14,7 +14,7 @@
 | **3** | Motor Analítico DataFusion y Grafo Petgraph | Sesión 3 | `[COMPLETADO]` | 61 / 61 |
 | **4** | Embeddings Locales y Búsqueda Híbrida | Sesión 4 | `[COMPLETADO]` | 70 / 70 |
 | **5** | Pipeline de Ingesta y Destilación Claude Headless | Sesión 5 | `[COMPLETADO]` | 88 / 88 |
-| **6** | Servidor de Herramientas Data Lake y Agente | Sesión 6 | `[NO INICIADO]` | - |
+| **6** | Servidor de Herramientas Data Lake y Agente | Sesión 6 | `[COMPLETADO]` | 108 / 108 |
 | **7** | Interfaz de Usuario TUI (Ratatui) y Chat | Sesión 7 | `[NO INICIADO]` | - |
 | **8** | Auditoría Adversarial E2E y Criterios DoD | Sesión 8 | `[NO INICIADO]` | - |
 
@@ -63,14 +63,14 @@
 - [x] Tests TDD con fixtures de documentos técnicos de muestra.
 
 ### Fase 6: Servidor de Herramientas Data Lake y Agente
-- [ ] Implementación de las 5 Tools:
+- [x] Implementación de las 5 Tools:
   - `inspect_lakehouse_catalog`
   - `query_operational_matrix`
   - `lookup_double_entry_table`
   - `execute_athena_sql`
   - `traverse_normative_graph`
-- [ ] Selector dinámico de modelos Claude (`sonnet`, `opus`, `haiku`) y wrapper asíncrono con streaming.
-- [ ] Tests TDD de ejecución de tools y parsing de eventos JSON.
+- [x] Selector dinámico de modelos Claude (`sonnet`, `opus`, `haiku`) y wrapper asíncrono con streaming.
+- [x] Tests TDD de ejecución de tools y parsing de eventos JSON.
 
 ### Fase 7: Interfaz de Usuario TUI (Ratatui) y Chat
 - [ ] Estructura de estado de aplicación (`AppState`) reactiva y desacoplada.
@@ -173,7 +173,21 @@
   * Implementación de la suite de integración en `tests/integration_ingestion_pipeline.rs`: persistencia E2E en las 6 tablas con fixture industrial complejo, control de revisiones e invalidación de versiones anteriores y coexistencia multi-centro.
   * Implementación de la suite adversarial en `tests/adversarial_ingestion_tests.rs`: neutralización de inyecciones de escape de prompt / scripts hostiles, manejo controlado de fallos en LLM, absorción de tablas rotas/asimétricas, resistencia a DoS con payloads masivos y rechazo estricto de dimensiones incompatibles de embeddings.
   * Verificación rigurosa: 88 / 88 tests pasando (48 unitarios + 9 adversariales de dominio + 5 adversariales de almacenamiento + 5 adversariales de query + 5 adversariales de embeddings + 5 adversariales de ingesta + 4 integración LanceDB + 4 integración DataFusion/Petgraph + 4 integración híbrida + 3 integración ingesta al 100%), `cargo clippy --all-targets -- -D warnings` (0 advertencias) y `cargo fmt --check` (100% formateado).
-* **Notas para la Sesión 6:**
-  * Proceder con la **Fase 6: Servidor de Herramientas Data Lake y Agente**.
-  * Implementar las 5 herramientas operativas: `inspect_lakehouse_catalog`, `query_operational_matrix`, `lookup_double_entry_table`, `execute_athena_sql`, `traverse_normative_graph`.
-  * Implementar el selector dinámico de modelos Claude (`sonnet`, `opus`, `haiku`) y el wrapper asíncrono con streaming y parsing de eventos JSON de tools.
+### Sesión 6 (2026-10-16)
+* **Objetivo:** Fase 6 — Servidor de Herramientas Data Lake y Agente.
+* **Acciones realizadas:**
+  * Ampliación de errores de dominio en `DomainError`: variantes `ToolExecutionError` y `AgentError`.
+  * Definición tipada de DTOs en `src/application/dtos/tools.rs` y `src/application/dtos/agent.rs` con esquemas JSON Schema (`InspectCatalogParams`, `QueryOperationalMatrixParams`, `LookupDoubleEntryTableParams`, `ExecuteAthenaSqlParams`, `TraverseNormativeGraphParams`, `ToolCall`, `ToolResult`, `ClaudeModel`, `AgentMessage`, `AgentTurnOutput`, `AgentExecutionEvent`).
+  * Definición de contratos y puertos en `src/application/ports/`: `ToolServerPort` y `AgentRunnerPort`.
+  * Implementación del servicio de herramientas operativas `LakehouseToolService` en `src/application/use_cases/lakehouse_tool_service.rs` resolviendo de forma determinista las 5 herramientas operativas sobre `DataFusionEngine`, `TableLookupService` y `PetgraphEngine` con serialización Arrow `ArrayWriter` a JSON y calificación de aislamiento por centro.
+  * Implementación del orquestador del ciclo de vida del agente `AgentOrchestrator` en `src/application/use_cases/agent_orchestrator.rs`: bucle de razonamiento y herramientas con protección estricta contra bucles infinitos (`max_steps`), inyección de System Prompt con aislamiento de centro y emisión reactiva de eventos para UI (`EventCallback`).
+  * Implementación del adaptador mock determinista `MockAgentRunner` en `src/infrastructure/llm/mock_agent_runner.rs` para pruebas de alta velocidad, simulación de respuestas programadas, heurística basada en intenciones y control de errores.
+  * Implementación del adaptador de producción `ClaudeAgentRunner` en `src/infrastructure/llm/claude_agent_runner.rs`: integración con subproceso CLI `claude -p`, selector dinámico de modelos (`sonnet`, `opus`, `haiku`), extracción y parseo seguro de solicitudes de herramientas (`tool_calls` o `tool_use`) y manejo de timeouts.
+  * Implementación de la suite de integración en `tests/integration_agent_tools.rs`: ejecución E2E de las 5 herramientas sobre datos reales en memoria y orquestación completa del ciclo agente -> herramienta -> síntesis final.
+  * Implementación de la suite adversarial en `tests/adversarial_agent_tools_tests.rs`: neutralización de inyecciones SQL destructivas (`DROP`, `DELETE`, `INSERT`), bloqueo estricto anti-cross-center en consultas `execute_athena_sql`, tolerancia a argumentos JSON corruptos o mal tipados, sanitización ante inyecciones en filtros WHERE de la matriz operativa y corte seguro ante bucles infinitos de herramientas (`max_steps`).
+  * Verificación rigurosa: 108 / 108 tests pasando (61 unitarios + 9 adversariales de dominio + 5 adversariales de almacenamiento + 5 adversariales de query + 5 adversariales de embeddings + 5 adversariales de ingesta + 5 adversariales de agent/tools + 4 integración LanceDB + 4 integración DataFusion/Petgraph + 4 integración híbrida + 3 integración ingesta + 2 integración agent/tools al 100%), `cargo clippy --all-targets -- -D warnings` (0 advertencias) y `cargo fmt --check` (100% formateado).
+* **Notas para la Sesión 7:**
+  * Proceder con la **Fase 7: Interfaz de Usuario TUI (Ratatui) y Chat**.
+  * Diseñar la estructura de estado reactiva desacoplada `AppState` en `src/presentation/tui/`.
+  * Implementar Vista 1: Gestor de Centros de Conocimiento (CRUD, activación/conmutación de centro, visualización de estadísticas de ingesta).
+  * Implementar Vista 2: Consola de Chat interactiva con conmutador rápido de modelo Claude (`sonnet`, `opus`, `haiku`) y renderizado en vivo del panel de observabilidad de herramientas (Tools/SQL ejecutadas en tiempo real).
