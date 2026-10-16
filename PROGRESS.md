@@ -11,7 +11,7 @@
 | **0** | Cimientos, Gobernanza y Estructura Cargo | Sesión 0 | `[COMPLETADO]` | 1 / 1 |
 | **1** | Dominio Puro y Gestión Multi-Centro | Sesión 1 | `[COMPLETADO]` | 34 / 34 |
 | **2** | Adaptador LanceDB y los 6 Esquemas Arrow | Sesión 2 | `[COMPLETADO]` | 46 / 46 |
-| **3** | Motor Analítico DataFusion y Grafo Petgraph | Sesión 3 | `[NO INICIADO]` | - |
+| **3** | Motor Analítico DataFusion y Grafo Petgraph | Sesión 3 | `[COMPLETADO]` | 61 / 61 |
 | **4** | Embeddings Locales y Búsqueda Híbrida | Sesión 4 | `[NO INICIADO]` | - |
 | **5** | Pipeline de Ingesta y Destilación Claude Headless | Sesión 5 | `[NO INICIADO]` | - |
 | **6** | Servidor de Herramientas Data Lake y Agente | Sesión 6 | `[NO INICIADO]` | - |
@@ -46,10 +46,10 @@
 - [x] Tests de integración TDD en directorio temporal (`tempfile`).
 
 ### Fase 3: Motor Analítico DataFusion y Grafo Petgraph
-- [ ] Configuración de `SessionContext` de Apache DataFusion con registro dinámico de centros activos.
-- [ ] Implementación determinista de `lookup_double_entry_table` para cruce de rangos numéricos y categorías.
-- [ ] Servicio de hidratación de subgrafos normativos en memoria con `petgraph`.
-- [ ] Tests TDD de consultas SQL deterministas y aislamiento estricto de centros.
+- [x] Configuración de `SessionContext` de Apache DataFusion con registro dinámico de centros activos.
+- [x] Implementación determinista de `lookup_double_entry_table` para cruce de rangos numéricos y categorías.
+- [x] Servicio de hidratación de subgrafos normativos en memoria con `petgraph`.
+- [x] Tests TDD de consultas SQL deterministas y aislamiento estricto de centros.
 
 ### Fase 4: Embeddings Locales y Búsqueda Híbrida
 - [ ] Adaptador de embeddings locales con `fastembed` (BGE-M3 / multilingual).
@@ -134,5 +134,23 @@
   * Configurar `SessionContext` dinámico con registro y desregistro de tablas según centros activos.
   * Implementar el servicio determinista `TableLookupService` para resolución de celdas cruzadas (rangos numéricos y categorías).
   * Implementar el servicio `GraphTraversalService` para hidratación y linaje normativo en memoria con `petgraph`.
+
+### Sesión 3 (2026-10-16)
+* **Objetivo:** Fase 3 — Motor Analítico DataFusion y Grafo Petgraph.
+* **Acciones realizadas:**
+  * Definición de los contratos y puertos de aplicación: `AnalyticalEnginePort` (consultas SQL deterministas y aislamiento por centro), `TableLookupPort` (resolución de tablas cruzadas) y `GraphEnginePort` (recorridos y linaje normativo).
+  * Implementación del caso de uso `TableLookupService` en `src/application/use_cases/table_lookup_service.rs` con soporte de hidratación directa desde `RecordBatch` de Apache Arrow (`05_double_entry_cells`) y evaluación de límites inclusivos/exclusivos y categorías.
+  * Implementación del adaptador `PetgraphEngine` en `src/infrastructure/query_engine/petgraph_engine.rs` con grafo dirigido en memoria `DiGraph<DocId, AristaGrafo>`, hidratación desde `RecordBatch` (`06_reference_graph`), cálculo de norma prevalente por derogación sucesiva, extracción de linaje y detección de ciclos vía algoritmo de Tarjan.
+  * Implementación del adaptador `DataFusionEngine` en `src/infrastructure/query_engine/datafusion_engine.rs` encapsulando `SessionContext` de Apache DataFusion 44, validación estricta de seguridad contra sentencias DDL/DML mutables, y aislamiento estricto de tablas por centro de conocimiento.
+  * Configuración de perfiles `[profile.dev]` y `[profile.test]` con `debug = 1` en `Cargo.toml` para resolver el límite de PDB de MSVC en Windows y optimizar el tiempo de enlace.
+  * Implementación de la suite de pruebas de integración en `tests/integration_query_engine.rs`: agregaciones SQL y filtros WHERE sobre la matriz operativa, aislamiento entre centros `planta_alfa` y `planta_beta`, resolución exacta de celdas en límites frontera continuos, y resolución de prevalencia normativa y linaje documental.
+  * Implementación de la suite de pruebas adversariales en `tests/adversarial_query_tests.rs`: neutralización de 15 variantes de inyecciones SQL destructivas y sintaxis inválida, verificación de contención anti-cross-contamination, resistencia de tablas de doble entrada a `NaN`, infinitos y extremos de punto flotante, y contención segura de paradojas de derogación circular reportando `DomainError::GraphError` sin desbordamiento de pila.
+  * Verificación rigurosa: 61 / 61 tests pasando (34 unitarios + 9 adversariales de dominio + 5 adversariales de almacenamiento + 5 adversariales de query + 4 de integración LanceDB + 4 de integración DataFusion/Petgraph al 100%), `cargo clippy -- -D warnings` (0 advertencias) y `cargo fmt --check` (100% formateado).
+* **Notas para la Sesión 4:**
+  * Proceder con la **Fase 4: Embeddings Locales y Búsqueda Híbrida**.
+  * Implementar el adaptador de embeddings locales con `fastembed` (BGE-M3 / multilingual).
+  * Desarrollar el servicio de búsqueda híbrida combinada: Vectorial (`IVF-PQ` / `HNSW` de LanceDB) + Filtros columnares Arrow + BM25 Full-Text Search.
+  * Implementar tests TDD unitarios, de integración y suite adversarial de vectorización y scoring de relevancia híbrida.
+
 
 

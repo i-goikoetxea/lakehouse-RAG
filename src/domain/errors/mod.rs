@@ -24,6 +24,12 @@ pub enum DomainError {
 
     #[error("Error de almacenamiento en Lakehouse: '{0}'")]
     StorageError(String),
+
+    #[error("Error en motor analítico o consulta: '{0}'")]
+    QueryError(String),
+
+    #[error("Error en grafo normativo: '{0}'")]
+    GraphError(String),
 }
 
 #[cfg(test)]
