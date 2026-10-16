@@ -9,7 +9,7 @@
 | Fase | Título de la Fase | Sesión | Estado | Tests Pasando |
 | :---: | :--- | :---: | :---: | :---: |
 | **0** | Cimientos, Gobernanza y Estructura Cargo | Sesión 0 | `[COMPLETADO]` | 1 / 1 |
-| **1** | Dominio Puro y Gestión Multi-Centro | Sesión 1 | `[NO INICIADO]` | - |
+| **1** | Dominio Puro y Gestión Multi-Centro | Sesión 1 | `[COMPLETADO]` | 34 / 34 |
 | **2** | Adaptador LanceDB y los 6 Esquemas Arrow | Sesión 2 | `[NO INICIADO]` | - |
 | **3** | Motor Analítico DataFusion y Grafo Petgraph | Sesión 3 | `[NO INICIADO]` | - |
 | **4** | Embeddings Locales y Búsqueda Híbrida | Sesión 4 | `[NO INICIADO]` | - |
@@ -32,12 +32,12 @@
 - [x] Verificación de compilación base (`cargo check`), tests (`cargo test`), linter (`cargo clippy -- -D warnings`) y formato (`cargo fmt --check`).
 
 ### Fase 1: Dominio Puro y Gestión Multi-Centro
-- [ ] Entidades de dominio: `CentroConocimiento`, `CenterManifest`, `DocumentoCatalogo`.
-- [ ] Value Objects tipados: `DocId`, `NivelPrelacion` (1 a 5), `RangoNumerico` (evaluación `>=, <=, >, <`), `FaseOperativa`.
-- [ ] Modelado de `TuplaOperativa`, `CeldaDobleEntrada` y `AristaGrafo`.
-- [ ] Errores de dominio tipados (`DomainError`).
-- [ ] Puertos de repositorio para registro de centros (`CenterRegistryPort`).
-- [ ] Tests unitarios TDD de dominio al 100% (sin I/O ni dependencias pesadas).
+- [x] Entidades de dominio: `CentroConocimiento`, `CenterManifest`, `DocumentoCatalogo`.
+- [x] Value Objects tipados: `DocId`, `NivelPrelacion` (1 a 5), `RangoNumerico` (evaluación `>=, <=, >, <`), `FaseOperativa`.
+- [x] Modelado de `TuplaOperativa`, `CeldaDobleEntrada` y `AristaGrafo`.
+- [x] Errores de dominio tipados (`DomainError`).
+- [x] Puertos de repositorio para registro de centros (`CenterRegistryPort`).
+- [x] Tests unitarios TDD de dominio al 100% (sin I/O ni dependencias pesadas).
 
 ### Fase 2: Adaptador LanceDB y los 6 Esquemas Arrow
 - [ ] Definición estricta de esquemas Apache Arrow para las 6 tablas (`01` a `06`).
@@ -101,3 +101,20 @@
 * **Notas para la Sesión 1:**
   * Comenzar con la **Fase 1: Dominio Puro y Gestión Multi-Centro**.
   * Desarrollar bajo TDD estricto las entidades y Value Objects: `CentroConocimiento`, `CenterManifest`, `DocId`, `NivelPrelacion`, `RangoNumerico`, `TuplaOperativa`, `CeldaDobleEntrada` y `AristaGrafo`.
+
+### Sesión 1 (2026-10-16)
+* **Objetivo:** Fase 1 — Dominio Puro y Gestión Multi-Centro.
+* **Acciones realizadas:**
+  * Implementación de Value Objects y entidades de Centro de Conocimiento: `CenterId`, `CenterManifest`, `CentroConocimiento`.
+  * Implementación de catálogo de documentos: `DocId`, `NivelPrelacion` (validación 1..=5, jerarquía de prelación) y `DocumentoCatalogo` con control de vigencia.
+  * Modelado de matriz operacional técnica: `FaseOperativa` y `TuplaOperativa`.
+  * Modelado de tablas cruzadas y rangos numéricos: `LimiteRango`, `RangoNumerico` (evaluación determinista con límites abiertos, cerrados y semiabiertos) y `CeldaDobleEntrada` con matching bidireccional.
+  * Modelado de grafo normativo: `TipoRelacionNormativa` y `AristaGrafo` con peso de prelación.
+  * Definición del puerto de aplicación `CenterRegistryPort` y verificación de contrato en memoria con `InMemoryCenterRegistry`.
+  * Generación del plan adversarial e implementación de la suite en `tests/adversarial_domain_tests.rs`: blindaje de `DocId` contra path traversal/caracteres nulos/DoS, blindaje de `RangoNumerico` contra `NaN` e infinitos con evaluación precisa en epsilon, blindaje de `AristaGrafo` contra autoderogación y pesos no finitos, y protección contra strings abusivos en `TuplaOperativa`.
+  * Verificación rigurosa: 34 tests pasando (25 unitarios + 9 adversariales al 100%), `cargo clippy -- -D warnings` (0 advertencias) y `cargo fmt --check` (100% formateado).
+* **Notas para la Sesión 2:**
+  * Proceder con la **Fase 2: Adaptador LanceDB y los 6 Esquemas Arrow**.
+  * Diseñar e implementar los esquemas de Apache Arrow para las 6 tablas (`01_doc_catalog`, `02_doc_chunks`, `03_operational_matrix`, `04_double_entry_tables`, `05_hierarchical_sections`, `06_reference_graph`).
+  * Implementar el adaptador `LanceDbCenterRegistry` y repositorios sobre LanceDB (`.lance`) con tests de integración temporales (`tempfile`).
+

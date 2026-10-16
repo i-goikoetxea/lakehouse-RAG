@@ -60,6 +60,7 @@ Toda funcionalidad debe construirse siguiendo el ciclo **Rojo $\rightarrow$ Verd
 ### Pirámide de Pruebas:
 * **Unitarias (`src/domain/` y `src/application/`):** Rápidas, en memoria, sin tocar disco.
 * **Integración (`tests/`):** Pruebas de adaptadores (`LanceDB`, `DataFusion`, `FastEmbed`) usando directorios temporales (`tempfile`).
+* **Pruebas Adversariales de Seguridad y Resiliencia (`tests/adversarial_*`):** Al cierre de cada fase, es obligatorio diseñar y ejecutar una suite adversarial específica (inyecciones, caos de tipos, valores frontera extremos, paradojas lógicas y DoS) para garantizar la robustez del componente antes de su aprobación.
 * **End-to-End (`tests/acceptance_*`):** Validación de los criterios de aceptación completos.
 
 ---

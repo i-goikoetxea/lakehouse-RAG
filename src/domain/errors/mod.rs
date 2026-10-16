@@ -2,19 +2,25 @@
 
 use thiserror::Error;
 
-#[derive(Debug, Error, PartialEq)]
+#[derive(Debug, Error, PartialEq, Clone, Eq)]
 pub enum DomainError {
     #[error("Identificador de centro inválido: '{0}'")]
     InvalidCenterId(String),
 
+    #[error("Identificador de documento inválido: '{0}'")]
+    InvalidDocId(String),
+
     #[error("Nivel de prelación fuera de rango: {0} (debe estar entre 1 y 5)")]
     InvalidPrelacionLevel(i8),
 
-    #[error("Rango numérico inválido: min ({0}) > max ({1})")]
-    InvalidRange(f64, f64),
+    #[error("Rango numérico inválido: {0}")]
+    InvalidRange(String),
 
     #[error("Conflicto de versiones: el documento '{0}' ya existe con una revisión vigente")]
     VersionConflict(String),
+
+    #[error("Error de validación de entidad: '{0}'")]
+    ValidationError(String),
 }
 
 #[cfg(test)]
@@ -29,10 +35,16 @@ mod tests {
             "Nivel de prelación fuera de rango: 6 (debe estar entre 1 y 5)"
         );
 
-        let range_err = DomainError::InvalidRange(20.0, 10.0);
+        let range_err = DomainError::InvalidRange("min (20) > max (10)".to_string());
         assert_eq!(
             range_err.to_string(),
             "Rango numérico inválido: min (20) > max (10)"
+        );
+
+        let doc_err = DomainError::InvalidDocId("".to_string());
+        assert_eq!(
+            doc_err.to_string(),
+            "Identificador de documento inválido: ''"
         );
     }
 }
