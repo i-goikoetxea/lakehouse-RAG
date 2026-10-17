@@ -224,6 +224,8 @@ const SEPARADORES_DE_ROLES: [char; 16] = [
     '\u{FF5C}', '\u{FF0C}', '\u{FF06}', '\u{FF0B}',
 ];
 /// Palabras que indican que el campo de responsable describe también la ejecución
+/// Longitud máxima de cada pieza de una sigla compuesta (`QA/QC`)
+const MAX_LONGITUD_PIEZA_SIGLA: usize = 4;
 const MARCAS_DE_EJECUCION: [&str; 4] = ["EJECUTOR", "EJECUTA", "EJECUTANTE", "REALIZA"];
 /// Conjunciones que, seguidas de un cargo, unen dos roles distintos
 const CONJUNCIONES: [&str; 5] = ["Y", "E", "O", "U", "MAS"];
@@ -391,8 +393,28 @@ fn tokens_de(rol: &str) -> Vec<String> {
 }
 
 /// Separadores de lista o una conjunción seguida de otro cargo (`Jefe … y Responsable …`)
+/// Sigla compuesta (`QA/QC`, `I+D`): piezas cortas en mayúsculas unidas por un separador.
+/// No delata dos roles distintos, así que su separador no cuenta.
+fn es_sigla_compuesta(palabra: &str) -> bool {
+    let piezas: Vec<&str> = palabra
+        .split(|c| SEPARADORES_DE_ROLES.contains(&c))
+        .collect();
+    piezas.len() > 1
+        && piezas.iter().all(|pieza| {
+            !pieza.is_empty()
+                && pieza.chars().count() <= MAX_LONGITUD_PIEZA_SIGLA
+                && pieza
+                    .chars()
+                    .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
+        })
+}
+
 fn rol_parece_multiple(rol: &str) -> bool {
-    if rol.chars().any(|c| SEPARADORES_DE_ROLES.contains(&c)) {
+    let tiene_separador = rol
+        .split_whitespace()
+        .filter(|palabra| !es_sigla_compuesta(palabra))
+        .any(|palabra| palabra.chars().any(|c| SEPARADORES_DE_ROLES.contains(&c)));
+    if tiene_separador {
         return true;
     }
     let tokens = tokens_de(rol);
@@ -581,6 +603,27 @@ mod tests {
                 "{responsable}"
             );
             assert_eq!(hito.calidad_extraccion(), CalidadExtraccion::Revisar);
+        }
+    }
+
+    #[test]
+    fn test_siglas_con_barra_no_son_roles_fusionados() {
+        for (responsable, fusionado) in [
+            ("Inspector QA/QC", false),
+            ("Responsable I+D/QA", false),
+            ("Inspector QA/QC / Jefe de Obra", true),
+            ("Almacenero/Jefe de Producción", true),
+            ("QA/Jefe", true),
+        ] {
+            let mut borrador = borrador_custodia();
+            borrador.rol_responsable = responsable.to_string();
+            let hito = HitoOperativo::new(borrador).unwrap();
+            assert_eq!(
+                hito.alertas_calidad()
+                    .contains(&AlertaExtraccion::RolesFusionados),
+                fusionado,
+                "{responsable}"
+            );
         }
     }
 

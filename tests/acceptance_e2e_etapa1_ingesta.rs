@@ -18,9 +18,9 @@
 //!   Variables opcionales: `ETAPA1_CLAUDE_TIMEOUT_S` (por defecto 600) y `ETAPA1_CLAUDE_MODEL` (por defecto `sonnet`).
 //!   Los paquetes JSON destilados por Claude se vuelcan en `target/validacion_etapa1/`.
 //!
-//! Los tests `hallazgo_*` describen el comportamiento correcto. Los que la Fase 10 arregló
-//! (H1 esquemas, H3, H4, H5 y H9) ya corren en la suite normal; los pendientes (H7, H8) siguen
-//! con `#[ignore]` y en rojo a propósito.
+//! Los tests `hallazgo_*` describen el comportamiento correcto. La Fase 10 arregló H1 (esquemas),
+//! H3, H4, H5 y H9; la Fase 11, H2 (vocabularios y roles), H7 (breadcrumb) y H8 (notas de tabla).
+//! Todos corren ya en la suite normal.
 
 use std::collections::BTreeSet;
 use std::path::PathBuf;
@@ -29,14 +29,14 @@ use std::time::{Duration, Instant};
 
 use arrow::compute::concat_batches;
 use arrow_array::{
-    Array, BooleanArray, FixedSizeListArray, Float32Array, Float64Array, Int32Array, RecordBatch,
-    StringArray,
+    Array, BooleanArray, FixedSizeListArray, Float32Array, Float64Array, Int32Array, ListArray,
+    RecordBatch, StringArray,
 };
 use async_trait::async_trait;
 use futures::StreamExt;
 use lakehouse_rag::application::dtos::ingestion::{
-    DistilledCatalog, DistilledCell, DistilledDocumentPackage, DistilledDoubleEntryTable,
-    DistilledOperationalTuple, DistilledReferenceEdge, ParsedDocument,
+    AristaDestilada, CatalogoDestilado, CeldaDestilada, DistilledDocumentPackage, EjeDestilado,
+    HitoDestilado, LimitesDestilados, ParsedDocument, TablaDestilada,
 };
 use lakehouse_rag::application::dtos::lakehouse_filas::LoteIngesta;
 use lakehouse_rag::application::ports::document_parser::DocumentParserPort;
@@ -84,7 +84,7 @@ const RELACIONES_SPEC: [&str; 6] = TipoRelacionNormativa::VALORES_CANONICOS;
 
 /// Comprobaciones que fallan por hallazgos ya documentados (ver tests `hallazgo_*`).
 /// La variante con mocks las excluye para no romper la suite normal.
-/// Fase 10: H1 (esquemas), H3 (vigencia del grafo) y H4 (IDs) ya no fallan.
+/// Fase 10: H1 (esquemas), H3 (vigencia del grafo) y H4 (IDs) ya no fallan; Fase 11: H2, H7 y H8.
 const HALLAZGOS_CONOCIDOS: [&str; 0] = [];
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -877,6 +877,147 @@ async fn verificar_derogacion(
     );
 }
 
+/// Filas con valor no nulo en una columna (vectorial, de lista o de texto)
+fn filas_no_nulas(lote: &RecordBatch, columna: &str) -> usize {
+    lote.column_by_name(columna)
+        .map(|c| c.len() - c.null_count())
+        .unwrap_or(0)
+}
+
+/// Longitud de cada lista de una columna `List<Utf8>`
+fn longitudes_lista(lote: &RecordBatch, columna: &str) -> Vec<usize> {
+    let lista = lote
+        .column_by_name(columna)
+        .and_then(|c| c.as_any().downcast_ref::<ListArray>().cloned())
+        .expect("Columna List<Utf8>");
+    (0..lista.len()).map(|i| lista.value(i).len()).collect()
+}
+
+fn no_vacios(valores: &[Option<String>]) -> usize {
+    valores
+        .iter()
+        .filter(|v| v.as_deref().is_some_and(|t| !t.trim().is_empty()))
+        .count()
+}
+
+/// Columnas v2 de la 03 y la 04 rellenas por la ingesta (H1/H2; comprobaciones 9, 29 y 30)
+async fn verificar_columnas_v2(
+    store: &LanceDbStore,
+    doc_id: &str,
+    registro_custodia_esperado: &str,
+    informe: &mut InformeVerificacion,
+) {
+    let filtro = format!("doc_id = '{doc_id}' AND vigente = true");
+    let matriz = leer_filas(store, TABLA_MATRIZ_OPERATIVA, Some(&filtro)).await;
+    let fases = columna_texto(&matriz, "fase_operativa");
+    let registros = columna_texto(&matriz, "registro_codigo");
+    let registros_custodia: Vec<Option<String>> = (0..matriz.num_rows())
+        .filter(|i| fases[*i].as_deref() == Some("CUSTODIA"))
+        .map(|i| registros[i].clone())
+        .collect();
+    informe.anotar(
+        "custodia_registro_columna",
+        !registros_custodia.is_empty()
+            && registros_custodia
+                .iter()
+                .all(|r| r.as_deref() == Some(registro_custodia_esperado)),
+        format!(
+            "CUSTODIA → registro_codigo={registros_custodia:?} (esperado {registro_custodia_esperado})"
+        ),
+    );
+
+    let filas = matriz.num_rows();
+    let con_ejecutor = no_vacios(&columna_texto(&matriz, "rol_ejecutor"));
+    let con_objeto = no_vacios(&columna_texto(&matriz, "objeto_alcance"));
+    let con_chunk = filas_no_nulas(&matriz, "chunk_origen_id");
+    informe.anotar(
+        "matriz_columnas_v2_pobladas",
+        filas > 0 && con_ejecutor == filas && con_chunk == filas && con_objeto == filas,
+        format!(
+            "{filas} hitos: rol_ejecutor={con_ejecutor}, chunk_origen_id={con_chunk}, objeto_alcance={con_objeto}"
+        ),
+    );
+
+    let tablas = leer_filas(store, TABLA_CATALOGO_TABLAS, Some(&filtro)).await;
+    let total_tablas = tablas.num_rows();
+    let vectores_hito = filas_no_nulas(&matriz, "vector_hito");
+    let vectores_tabla = filas_no_nulas(&tablas, "vector_tabla");
+    informe.anotar(
+        "vectores_hito_tabla_poblados",
+        filas > 0 && vectores_hito == filas && total_tablas > 0 && vectores_tabla == total_tablas,
+        format!(
+            "vector_hito {vectores_hito}/{filas}, vector_tabla {vectores_tabla}/{total_tablas}"
+        ),
+    );
+
+    let unidades_x = filas_no_nulas(&tablas, "eje_x_unidad");
+    let salidas = columna_texto(&tablas, "valor_salida_nombre");
+    let instrucciones = columna_texto(&tablas, "instrucciones_uso_sql");
+    let sql_autogenerado = instrucciones.iter().all(|s| {
+        s.as_deref()
+            .is_some_and(|t| t.contains("05_celdas_doble_entrada"))
+    });
+    informe.anotar(
+        "tabla_04_unidades_salida_sql",
+        total_tablas > 0
+            && unidades_x == total_tablas
+            && no_vacios(&salidas) == total_tablas
+            && sql_autogenerado,
+        format!("eje_x_unidad={unidades_x}/{total_tablas}, valor_salida_nombre={salidas:?}"),
+    );
+}
+
+/// Breadcrumb jerárquico y vínculos de los chunks (H7, comprobación 33)
+async fn verificar_chunks_v2(
+    store: &LanceDbStore,
+    doc_id: &str,
+    informe: &mut InformeVerificacion,
+) {
+    let filtro = format!("doc_id = '{doc_id}' AND vigente = true");
+    let chunks = leer_filas(store, TABLA_CHUNKS_NORMATIVA, Some(&filtro)).await;
+    let breadcrumbs: Vec<String> = columna_texto(&chunks, "breadcrumb_jerarquia")
+        .into_iter()
+        .flatten()
+        .collect();
+    let custodia = breadcrumbs.iter().find(|b| b.contains("CUSTODIA"));
+    informe.anotar(
+        "chunks_breadcrumb_jerarquico",
+        custodia.is_some_and(|b| {
+            b.starts_with(DOC_ID_ESPERADO) && b.contains(" > 2. Secuencia Operativa > ")
+        }),
+        format!("breadcrumb de CUSTODIA = {custodia:?}"),
+    );
+    let con_hitos = longitudes_lista(&chunks, "hitos_vinculados")
+        .iter()
+        .filter(|n| **n > 0)
+        .count();
+    let con_tablas = longitudes_lista(&chunks, "tablas_vinculadas")
+        .iter()
+        .filter(|n| **n > 0)
+        .count();
+    informe.anotar(
+        "chunks_vinculos_hitos_tablas",
+        con_hitos >= 3 && con_tablas >= 1,
+        format!("chunks con hitos_vinculados={con_hitos}, con tablas_vinculadas={con_tablas}"),
+    );
+}
+
+/// Título y notas al pie multilínea de la Tabla 4-A en el parser (H8, comprobación 34)
+async fn verificar_parser_tabla(nombre_fixture: &str, informe: &mut InformeVerificacion) {
+    let parsed = MarkdownParser::new()
+        .parse(nombre_fixture, &leer_fixture(nombre_fixture))
+        .await
+        .expect("Parseo del fixture");
+    let tabla = parsed.tablas.first();
+    let titulo = tabla.map(|t| t.titulo.clone()).unwrap_or_default();
+    let notas = tabla.and_then(|t| t.notas.clone()).unwrap_or_default();
+    informe.anotar(
+        "parser_tabla_titulo_y_notas",
+        titulo.contains("4-A") && notas.contains("(*)") && notas.contains("(1)"),
+        format!("título={titulo:?}, notas={notas:?}"),
+    );
+}
+
 async fn verificar_vectores(
     store: &LanceDbStore,
     doc_id: &str,
@@ -1129,7 +1270,10 @@ async fn ejecutar_bateria_completa(pipeline: &PipelineEtapa1) -> InformeVerifica
 
     let doc_id = reporte_rev03.doc_id.clone();
     verificar_conteos(&pipeline.store, &reporte_rev03, &mut informe).await;
+    verificar_parser_tabla(FIXTURE_REV03, &mut informe).await;
     verificar_matriz_anti_fusion(&pipeline.store, &doc_id, "FOR-ALM-02", &mut informe).await;
+    verificar_columnas_v2(&pipeline.store, &doc_id, "FOR-ALM-02", &mut informe).await;
+    verificar_chunks_v2(&pipeline.store, &doc_id, &mut informe).await;
     verificar_celdas_doble_entrada(&pipeline.store, &doc_id, "100", &mut informe).await;
     verificar_grafo(&pipeline.store, &doc_id, &mut informe).await;
     verificar_vectores(
@@ -1168,6 +1312,13 @@ async fn ejecutar_bateria_completa(pipeline: &PipelineEtapa1) -> InformeVerifica
         &mut informe,
     )
     .await;
+    verificar_columnas_v2(
+        &pipeline.store,
+        &reporte_rev04.doc_id,
+        "FOR-ALM-05",
+        &mut informe,
+    )
+    .await;
     verificar_celdas_doble_entrada(&pipeline.store, &reporte_rev04.doc_id, "125", &mut informe)
         .await;
     informe
@@ -1177,50 +1328,68 @@ async fn ejecutar_bateria_completa(pipeline: &PipelineEtapa1) -> InformeVerifica
 // Paquetes "oro" para la variante con mocks (lo que Claude debería devolver)
 // ─────────────────────────────────────────────────────────────────────────────
 
-fn tupla_oro(
+fn hito_oro(
+    seccion: &str,
     fase: &str,
     ejecutor: &str,
     responsable: &str,
     registro: &str,
-) -> DistilledOperationalTuple {
-    DistilledOperationalTuple {
-        seccion: "2".to_string(),
+) -> HitoDestilado {
+    HitoDestilado {
+        orden_secuencia: 0,
         fase_operativa: fase.to_string(),
+        objeto_alcance: "Tubería de acero al carbono".to_string(),
+        rol_ejecutor: ejecutor.to_string(),
         rol_responsable: responsable.to_string(),
-        accion: format!("Ejecuta: {ejecutor}"),
-        parametro_control: "Criterio de aceptación de la fase".to_string(),
-        tolerancia_criterio: "Según PO-ALM-03".to_string(),
-        condicion_aplicacion: "Siempre".to_string(),
-        // El DTO v1 no tiene `registro_codigo`: el código del registro solo cabe aquí (Fase 11).
-        referencia_normativa: registro.to_string(),
+        registro_codigo: Some(registro.to_string()),
+        registro_nombre: Some(format!("Registro {registro}")),
+        criterio_aceptacion: "Criterio de aceptación de la fase".to_string(),
+        condicion_aplicacion: (fase == "CUSTODIA")
+            .then(|| "Solo cuando el acopio supera 7 días naturales".to_string()),
+        seccion_origen: seccion.to_string(),
+    }
+}
+
+type RangoOro = (Option<f64>, Option<f64>, bool, bool);
+
+fn limites_oro(rango: RangoOro) -> LimitesDestilados {
+    LimitesDestilados {
+        categoria: None,
+        min: rango.0,
+        min_inclusivo: rango.2,
+        max: rango.1,
+        max_inclusivo: rango.3,
     }
 }
 
 fn celda_oro(
-    rango_espesor: (Option<f64>, Option<f64>, bool, bool),
-    rango_ce: (Option<f64>, Option<f64>, bool, bool),
+    rango_espesor: RangoOro,
+    rango_ce: RangoOro,
     valor: &str,
     nota: Option<&str>,
-) -> DistilledCell {
-    DistilledCell {
-        rango_x_min: rango_espesor.0,
-        rango_x_max: rango_espesor.1,
-        x_inclusivo_min: rango_espesor.2,
-        x_inclusivo_max: rango_espesor.3,
-        categoria_x: None,
-        rango_y_min: rango_ce.0,
-        rango_y_max: rango_ce.1,
-        y_inclusivo_min: rango_ce.2,
-        y_inclusivo_max: rango_ce.3,
-        categoria_y: None,
+) -> CeldaDestilada {
+    CeldaDestilada {
+        eje_x: limites_oro(rango_espesor),
+        eje_y: limites_oro(rango_ce),
+        eje_z: None,
         valor_resultado: valor.to_string(),
-        unidad_medida: "°C".to_string(),
-        notas_especificas: nota.map(str::to_string),
+        unidad_medida: Some("°C".to_string()),
+        nota_pie_condicion: nota.map(str::to_string),
+    }
+}
+
+fn arista_oro(origen: &str, destino: &str, relacion: &str, destino_tipo: &str) -> AristaDestilada {
+    AristaDestilada {
+        origen_tipo: origen.to_string(),
+        tipo_relacion: relacion.to_string(),
+        destino_id: destino.to_string(),
+        destino_tipo: destino_tipo.to_string(),
+        contexto: None,
     }
 }
 
 fn paquete_oro(
-    version: i32,
+    version: i64,
     registro_custodia: &str,
     valor_cruce: &str,
 ) -> DistilledDocumentPackage {
@@ -1258,72 +1427,83 @@ fn paquete_oro(
         }
     }
 
-    let mut aristas: Vec<DistilledReferenceEdge> = [
-        ("UNE-EN 1090-2", "SUBORDINADO_A_NORMA"),
-        ("UNE-EN ISO 15614-1", "SUBORDINADO_A_NORMA"),
-        ("PO-CAL-01", "SUBORDINADO_A_NORMA"),
-        ("PCC-01", "SUBORDINADO_A_NORMA"),
-        ("FOR-ALM-01", "EXIGE_LLENAR_REGISTRO"),
-        (registro_custodia, "EXIGE_LLENAR_REGISTRO"),
-        ("PPI-MAT-09", "EXIGE_LLENAR_REGISTRO"),
-    ]
-    .into_iter()
-    .map(|(destino, relacion)| DistilledReferenceEdge {
-        doc_destino_id: destino.to_string(),
-        tipo_relacion: relacion.to_string(),
-        peso_prelacion: 1.0,
-        contexto_cita: None,
-    })
-    .collect();
+    let mut aristas: Vec<AristaDestilada> =
+        ["UNE-EN 1090-2", "UNE-EN ISO 15614-1", "PO-CAL-01", "PCC-01"]
+            .into_iter()
+            .map(|destino| arista_oro("DOCUMENTO", destino, "SUBORDINADO_A_NORMA", "DOCUMENTO"))
+            .collect();
+    for registro in ["FOR-ALM-01", registro_custodia, "PPI-MAT-09"] {
+        aristas.push(arista_oro(
+            "HITO_OPERATIVO",
+            registro,
+            "EXIGE_LLENAR_REGISTRO",
+            "REGISTRO",
+        ));
+    }
     if version == 4 {
-        aristas.push(DistilledReferenceEdge {
-            doc_destino_id: DOC_ID_ESPERADO.to_string(),
-            tipo_relacion: "DEROGA_A".to_string(),
-            peso_prelacion: 1.0,
-            contexto_cita: Some("Sustitución íntegra".to_string()),
-        });
+        let mut deroga = arista_oro("DOCUMENTO", "PO-ALM-03 Rev. 03", "DEROGA_A", "DOCUMENTO");
+        deroga.contexto = Some("Sustitución íntegra".to_string());
+        aristas.push(deroga);
     }
 
     DistilledDocumentPackage {
-        catalogo: DistilledCatalog {
+        catalogo: CatalogoDestilado {
             doc_id: DOC_ID_ESPERADO.to_string(),
             titulo:
                 "Procedimiento de Recepción, Custodia e Inspección de Tubería de Acero al Carbono"
                     .to_string(),
-            tipo_documental: "PROCEDIMIENTO_OBRA".to_string(),
-            emisor: "Dirección de Calidad de Obra".to_string(),
-            fecha_emision: if version == 3 {
+            tipo_documento: "PROCEDIMIENTO_OBRA".to_string(),
+            revision: format!("Rev. {version:02}"),
+            version_num: version,
+            fecha_vigor: if version == 3 {
                 "2026-03-01"
             } else {
                 "2026-09-15"
             }
             .to_string(),
-            nivel_prelacion: 2,
-            version,
+            emisor: "Dirección de Calidad de Obra".to_string(),
         },
-        tuplas_operativas: vec![
-            tupla_oro("RECEPCION", "Almacenero", "Jefe de Almacén", "FOR-ALM-01"),
-            tupla_oro(
+        hitos: vec![
+            hito_oro(
+                "2.1",
+                "RECEPCION",
+                "Almacenero",
+                "Jefe de Almacén",
+                "FOR-ALM-01",
+            ),
+            hito_oro(
+                "2.2",
                 "CUSTODIA",
                 "Auxiliar de Almacén",
                 "Jefe de Producción",
                 registro_custodia,
             ),
-            tupla_oro(
+            hito_oro(
+                "2.3",
                 "INSPECCION",
                 "Técnico de Calidad",
                 "Inspector QA/QC",
                 "PPI-MAT-09",
             ),
         ],
-        tablas_doble_entrada: vec![DistilledDoubleEntryTable {
-            nombre_tabla: "Tabla 4-A Temperatura mínima de precalentamiento (°C)".to_string(),
-            coordenada_x_nombre: "espesor_nominal_mm".to_string(),
-            coordenada_y_nombre: "carbono_equivalente_pct".to_string(),
-            nota_pie: Some(format!("{nota_asterisco}. {nota_uno}")),
+        tablas: vec![TablaDestilada {
+            tabla_id: "4-A".to_string(),
+            titulo: "Temperatura mínima de precalentamiento (°C)".to_string(),
+            eje_x: EjeDestilado {
+                nombre: "espesor_nominal_mm".to_string(),
+                tipo: "RANGO_NUMERICO".to_string(),
+                unidad: Some("mm".to_string()),
+            },
+            eje_y: EjeDestilado {
+                nombre: "carbono_equivalente_pct".to_string(),
+                tipo: "RANGO_NUMERICO".to_string(),
+                unidad: Some("%".to_string()),
+            },
+            valor_salida_nombre: "temperatura_precalentamiento_min_c".to_string(),
+            seccion_origen: Some("3.1".to_string()),
             celdas,
         }],
-        aristas_referencia: aristas,
+        aristas,
     }
 }
 
@@ -1413,7 +1593,7 @@ async fn mock_pipeline_rev03_y_rev04_sobre_lancedb_en_disco() {
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[tokio::test]
-#[ignore = "requiere descargar el modelo ONNX de FastEmbed (~1,3 GB la primera vez)"]
+#[ignore = "requiere descargar el modelo ONNX multilingüe de FastEmbed (~2,2 GB la primera vez)"]
 async fn real_fastembed_genera_vectores_de_dimension_1024() {
     configurar_cache_fastembed();
     let inicio = Instant::now();
@@ -1449,7 +1629,7 @@ async fn real_fastembed_genera_vectores_de_dimension_1024() {
 }
 
 #[tokio::test]
-#[ignore = "invoca la CLI real de Claude con la configuración por defecto de producción (timeout 60 s)"]
+#[ignore = "invoca la CLI real de Claude con la configuración por defecto de producción (timeout 300 s)"]
 async fn real_claude_destilador_con_configuracion_por_defecto() {
     let distiller = ClaudeHeadlessDistiller::new(ClaudeHeadlessConfig::default());
     let parsed = MarkdownParser::new()
@@ -1472,12 +1652,12 @@ async fn real_claude_destilador_con_configuracion_por_defecto() {
         Ok(paquete) => {
             volcar_paquete_json(&directorio_volcados(), "default_config_rev03", paquete);
             println!(
-                "✅ doc_id={}, version={}, tuplas={}, tablas={}, aristas={}",
+                "✅ doc_id={}, version={}, hitos={}, tablas={}, aristas={}",
                 paquete.catalogo.doc_id,
-                paquete.catalogo.version,
-                paquete.tuplas_operativas.len(),
-                paquete.tablas_doble_entrada.len(),
-                paquete.aristas_referencia.len()
+                paquete.catalogo.version_num,
+                paquete.hitos.len(),
+                paquete.tablas.len(),
+                paquete.aristas.len()
             );
         }
         Err(e) => {
@@ -1617,8 +1797,8 @@ async fn hallazgo_esquemas_cumplen_la_especificacion() {
     assert!(informe.fallidas_excepto(&[]).is_empty());
 }
 
+/// H7 arreglado en la Fase 11: `PilaEncabezados` en el parser.
 #[tokio::test]
-#[ignore = "HALLAZGO H7 (Fase 11): breadcrumb_jerarquia guarda solo el título de su sección, no H1 > H2 > H3"]
 async fn hallazgo_chunks_guardan_breadcrumb_jerarquico() {
     let pipeline = montar_pipeline(distiller_oro(), embeddings_mock(), None).await;
     ingerir_cronometrado(&pipeline, FIXTURE_REV03)
@@ -1640,8 +1820,8 @@ async fn hallazgo_chunks_guardan_breadcrumb_jerarquico() {
     );
 }
 
+/// H8 arreglado en la Fase 11: título tras línea en blanco y notas multilínea.
 #[tokio::test]
-#[ignore = "HALLAZGO H8: el parser pierde el título de la tabla si hay línea en blanco y solo capta notas que empiezan por '*' o 'Nota:'"]
 async fn hallazgo_parser_captura_notas_al_pie_de_la_tabla() {
     let parsed = MarkdownParser::new()
         .parse(FIXTURE_REV03, &leer_fixture(FIXTURE_REV03))
@@ -1652,24 +1832,41 @@ async fn hallazgo_parser_captura_notas_al_pie_de_la_tabla() {
         notas.contains("(*)") && notas.contains("(1)"),
         "notas={notas:?}"
     );
+    assert!(parsed.tablas[0].titulo.starts_with("Tabla 4-A"));
 }
 
-/// H9 arreglado en las Fases 9 y 10: `DocId` con charset estricto rechaza la comilla antes de
-/// escribir nada, y además todos los predicados del almacén escapan sus literales.
+/// H9 arreglado en las Fases 9 a 11: el `doc_id` libre del LLM se canonicaliza
+/// (`PO-ALM-03'B` → `PO-ALM-03-B`), así que ninguna comilla llega al almacén; uno sin
+/// alfanuméricos se rechaza antes de escribir nada.
 #[tokio::test]
-async fn hallazgo_doc_id_con_comilla_se_rechaza_sin_escribir_nada() {
+async fn hallazgo_doc_id_con_comilla_se_neutraliza_y_el_vacio_se_rechaza() {
     let distiller = MockDistiller::new();
     let mut rev_a = paquete_oro(3, "FOR-ALM-02", "100");
     rev_a.catalogo.doc_id = "PO-ALM-03'B".to_string();
     distiller.registrar_respuesta(FIXTURE_REV03, rev_a);
+    let mut rev_b = paquete_oro(4, "FOR-ALM-05", "125");
+    rev_b.catalogo.doc_id = "'' ; --".to_string();
+    distiller.registrar_respuesta(FIXTURE_REV04, rev_b);
 
     let pipeline = montar_pipeline(Arc::new(distiller), embeddings_mock(), None).await;
-    let error = ingerir_cronometrado(&pipeline, FIXTURE_REV03)
+    let reporte = ingerir_cronometrado(&pipeline, FIXTURE_REV03)
+        .await
+        .unwrap();
+    assert_eq!(reporte.doc_id, "PO-ALM-03-B");
+
+    let mut antes = Vec::new();
+    for tabla in TODAS_LAS_TABLAS {
+        antes.push(pipeline.store.contar_registros(tabla).await.unwrap());
+    }
+    let error = ingerir_cronometrado(&pipeline, FIXTURE_REV04)
         .await
         .unwrap_err();
     assert!(matches!(error, DomainError::InvalidDocId(_)), "{error:?}");
-    for tabla in TODAS_LAS_TABLAS {
+    for (tabla, filas_antes) in TODAS_LAS_TABLAS.iter().zip(antes) {
         let filas = pipeline.store.contar_registros(tabla).await.unwrap();
-        assert_eq!(filas, 0, "{tabla} tiene filas tras rechazar el doc_id");
+        assert_eq!(
+            filas, filas_antes,
+            "{tabla} tiene filas de la ingesta rechazada"
+        );
     }
 }

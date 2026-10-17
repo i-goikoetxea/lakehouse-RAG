@@ -6,8 +6,8 @@ use std::sync::Arc;
 use chrono::NaiveDate;
 
 use lakehouse_rag::application::dtos::ingestion::{
-    DistilledCatalog, DistilledCell, DistilledDocumentPackage, DistilledDoubleEntryTable,
-    DistilledOperationalTuple, DistilledReferenceEdge,
+    AristaDestilada, CatalogoDestilado, CeldaDestilada, DistilledDocumentPackage, EjeDestilado,
+    HitoDestilado, LimitesDestilados, TablaDestilada,
 };
 use lakehouse_rag::application::dtos::lakehouse_filas::{
     ClaveDocumental, EjeTabla, FilaArista, FilaCatalogo, FilaCelda, FilaChunk, FilaHito, FilaTabla,
@@ -257,66 +257,112 @@ pub async fn confirmar_revision(
     store.confirmar_ingesta(&ingest_id, &doc()).await.unwrap()
 }
 
+pub fn hito_destilado(
+    fase: &str,
+    ejecutor: &str,
+    responsable: &str,
+    registro: Option<&str>,
+) -> HitoDestilado {
+    HitoDestilado {
+        orden_secuencia: 0,
+        fase_operativa: fase.to_string(),
+        objeto_alcance: "Tubería de acero al carbono".to_string(),
+        rol_ejecutor: ejecutor.to_string(),
+        rol_responsable: responsable.to_string(),
+        registro_codigo: registro.map(str::to_string),
+        registro_nombre: registro.map(|_| "Registro de la fase".to_string()),
+        criterio_aceptacion: "Sin daños".to_string(),
+        condicion_aplicacion: None,
+        seccion_origen: "2".to_string(),
+    }
+}
+
+pub fn eje_destilado(nombre: &str, unidad: &str) -> EjeDestilado {
+    EjeDestilado {
+        nombre: nombre.to_string(),
+        tipo: "RANGO_NUMERICO".to_string(),
+        unidad: Some(unidad.to_string()),
+    }
+}
+
+pub fn limites(
+    min: Option<f64>,
+    max: Option<f64>,
+    min_inc: bool,
+    max_inc: bool,
+) -> LimitesDestilados {
+    LimitesDestilados {
+        categoria: None,
+        min,
+        min_inclusivo: min_inc,
+        max,
+        max_inclusivo: max_inc,
+    }
+}
+
+pub fn arista_destilada(destino: &str, relacion: &str) -> AristaDestilada {
+    AristaDestilada {
+        origen_tipo: "DOCUMENTO".to_string(),
+        tipo_relacion: relacion.to_string(),
+        destino_id: destino.to_string(),
+        destino_tipo: "DOCUMENTO".to_string(),
+        contexto: None,
+    }
+}
+
+pub fn catalogo_destilado(version: i64, fecha_vigor: &str) -> CatalogoDestilado {
+    CatalogoDestilado {
+        doc_id: DOC.to_string(),
+        titulo: "Recepción de tubería".to_string(),
+        tipo_documento: "PROCEDIMIENTO_OBRA".to_string(),
+        revision: format!("Rev. {version:02}"),
+        version_num: version,
+        fecha_vigor: fecha_vigor.to_string(),
+        emisor: "Calidad".to_string(),
+    }
+}
+
 pub fn paquete_revision(
-    version: i32,
-    fecha_emision: &str,
+    version: i64,
+    fecha_vigor: &str,
     registro_custodia: &str,
 ) -> DistilledDocumentPackage {
-    let tupla = |fase: &str, responsable: &str, registro: &str| DistilledOperationalTuple {
-        seccion: "2".to_string(),
-        fase_operativa: fase.to_string(),
-        rol_responsable: responsable.to_string(),
-        accion: "Verificar".to_string(),
-        parametro_control: "Estado".to_string(),
-        tolerancia_criterio: "Sin daños".to_string(),
-        condicion_aplicacion: String::new(),
-        referencia_normativa: registro.to_string(),
-    };
-    let celda = |min: f64, max: f64, valor: &str| DistilledCell {
-        rango_x_min: Some(min),
-        rango_x_max: Some(max),
-        x_inclusivo_min: false,
-        x_inclusivo_max: true,
-        categoria_x: None,
-        rango_y_min: Some(0.40),
-        rango_y_max: Some(0.45),
-        y_inclusivo_min: true,
-        y_inclusivo_max: true,
-        categoria_y: None,
+    let celda = |min: f64, max: f64, valor: &str| CeldaDestilada {
+        eje_x: limites(Some(min), Some(max), false, true),
+        eje_y: limites(Some(0.40), Some(0.45), true, true),
+        eje_z: None,
         valor_resultado: valor.to_string(),
-        unidad_medida: "°C".to_string(),
-        notas_especificas: None,
-    };
-    let arista = |destino: &str, relacion: &str| DistilledReferenceEdge {
-        doc_destino_id: destino.to_string(),
-        tipo_relacion: relacion.to_string(),
-        peso_prelacion: 1.0,
-        contexto_cita: None,
+        unidad_medida: Some("°C".to_string()),
+        nota_pie_condicion: None,
     };
     DistilledDocumentPackage {
-        catalogo: DistilledCatalog {
-            doc_id: DOC.to_string(),
-            titulo: "Recepción de tubería".to_string(),
-            tipo_documental: "PROCEDIMIENTO_OBRA".to_string(),
-            emisor: "Calidad".to_string(),
-            fecha_emision: fecha_emision.to_string(),
-            nivel_prelacion: 2,
-            version,
-        },
-        tuplas_operativas: vec![
-            tupla("RECEPCIÓN", "Jefe de Almacén", "FOR-ALM-01"),
-            tupla("Fase 2 — CUSTODIA", "Jefe de Producción", registro_custodia),
+        catalogo: catalogo_destilado(version, fecha_vigor),
+        hitos: vec![
+            hito_destilado(
+                "RECEPCIÓN",
+                "Almacenero",
+                "Jefe de Almacén",
+                Some("FOR-ALM-01"),
+            ),
+            hito_destilado(
+                "Fase 2 — CUSTODIA",
+                "Auxiliar de Almacén",
+                "Jefe de Producción",
+                Some(registro_custodia),
+            ),
         ],
-        tablas_doble_entrada: vec![DistilledDoubleEntryTable {
-            nombre_tabla: "Tabla 4-A".to_string(),
-            coordenada_x_nombre: "espesor_nominal_mm".to_string(),
-            coordenada_y_nombre: "carbono_equivalente_pct".to_string(),
-            nota_pie: None,
+        tablas: vec![TablaDestilada {
+            tabla_id: "4-A".to_string(),
+            titulo: "Tabla 4-A".to_string(),
+            eje_x: eje_destilado("espesor_nominal_mm", "mm"),
+            eje_y: eje_destilado("carbono_equivalente_pct", "%"),
+            valor_salida_nombre: "temperatura_min_c".to_string(),
+            seccion_origen: None,
             celdas: vec![celda(0.0, 20.0, "50"), celda(20.0, 40.0, "100 (*)")],
         }],
-        aristas_referencia: vec![
-            arista("UNE-EN 1090-2", "SUBORDINADO_A_NORMA"),
-            arista(registro_custodia, "EXIGE_LLENAR_REGISTRO"),
+        aristas: vec![
+            arista_destilada("UNE-EN 1090-2", "SUBORDINADO_A_NORMA"),
+            arista_destilada(registro_custodia, "EXIGE_LLENAR_REGISTRO"),
         ],
     }
 }

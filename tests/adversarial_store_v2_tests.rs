@@ -72,11 +72,13 @@ async fn adv_ingest_id_malicioso_se_rechaza_y_el_escape_neutraliza_comillas() {
 }
 
 #[tokio::test]
-async fn adv_doc_id_con_comilla_se_rechaza_antes_de_escribir() {
+async fn adv_doc_id_sin_alfanumericos_se_rechaza_antes_de_escribir() {
     let (_dir, store) = store_temporal().await;
     let distiller = MockDistiller::new();
     let mut paquete = distiller_paquete_v3();
-    paquete.catalogo.doc_id = "PO-ALM-03'B".to_string();
+    // Fase 11: el doc_id libre se canonicaliza (`PO-ALM-03'B` → `PO-ALM-03-B`); solo uno sin
+    // ningún alfanumérico queda vacío y se rechaza.
+    paquete.catalogo.doc_id = "' ; -- '".to_string();
     distiller.registrar_respuesta(ARCHIVO_V3, paquete);
 
     let error = servicio(Arc::new(distiller), store.clone())
@@ -310,6 +312,22 @@ async fn adv_ingestas_concurrentes_del_mismo_documento_dejan_una_sola_version_vi
     assert!(confirmadas >= 1);
     let informe = store.verificar_integridad().await.unwrap();
     assert!(informe.es_integro(), "{informe:?}");
+}
+
+#[tokio::test]
+async fn adv_doc_id_con_comilla_se_canonicaliza_sin_inyectar_la_comilla() {
+    let (_dir, store) = store_temporal().await;
+    let distiller = MockDistiller::new();
+    let mut paquete = distiller_paquete_v3();
+    paquete.catalogo.doc_id = "PO-ALM-03'B".to_string();
+    distiller.registrar_respuesta(ARCHIVO_V3, paquete);
+
+    let reporte = servicio(Arc::new(distiller), store.clone())
+        .ingestar_documento(&centro(), ARCHIVO_V3, CONTENIDO_V3)
+        .await
+        .unwrap();
+    assert_eq!(reporte.doc_id, "PO-ALM-03-B");
+    assert!(store.verificar_integridad().await.unwrap().es_integro());
 }
 
 fn distiller_paquete_v3() -> lakehouse_rag::application::dtos::ingestion::DistilledDocumentPackage {

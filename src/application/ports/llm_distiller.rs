@@ -2,7 +2,9 @@
 
 use async_trait::async_trait;
 
-use crate::application::dtos::ingestion::{DistilledDocumentPackage, ParsedDocument};
+use crate::application::dtos::ingestion::{
+    DistilledDocumentPackage, ParsedDocument, json_schema_destilacion,
+};
 use crate::domain::errors::DomainError;
 
 #[async_trait]
@@ -15,7 +17,6 @@ pub trait LlmDistillerPort: Send + Sync {
 
     /// Retorna el JSON Schema en formato string para garantizar salidas estructuradas
     fn json_schema(&self) -> String {
-        let schema = schemars::schema_for!(DistilledDocumentPackage);
-        serde_json::to_string_pretty(&schema).unwrap_or_else(|_| "{}".to_string())
+        json_schema_destilacion()
     }
 }

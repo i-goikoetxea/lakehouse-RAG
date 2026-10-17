@@ -19,7 +19,7 @@
 | **8** | Auditoría Adversarial E2E y Criterios DoD | Sesión 8 | `[NO INICIADO]` | - |
 | **9** | Dominio v2: enums canónicos, prelación, vigencia, DocId seguro, IDs versionados, breadcrumb y condición | Sesión 9 | `[COMPLETADO]` | 180 / 180 |
 | **10** | Esquemas v2 y store transaccional (staged/commit/rollback, idempotencia por hash) | Sesión 10 | `[COMPLETADO]` | 214 / 214 |
-| **11** | Ingesta v2: breadcrumb, herencia de condición, destilador con json-schema y enums | - | `[NO INICIADO]` | - |
+| **11** | Ingesta v2: breadcrumb, herencia de condición, destilador con json-schema y enums | Sesión 11 | `[COMPLETADO]` | 246 / 246 |
 | **12** | Centros en disco y proyección LanceDB → DataFusion/Petgraph | - | `[NO INICIADO]` | - |
 | **13** | Tools v2: matriz exacta, lookup, SQL de solo lectura, grafo antisupernodos, `search_normative_context` | - | `[NO INICIADO]` | - |
 | **14** | Cableado de la app: `ingestar_documento`, gestión de centros, system prompt de prelación | - | `[NO INICIADO]` | - |
@@ -121,6 +121,15 @@
 - [x] Consumidores adaptados: la búsqueda híbrida solo lee `COMMITTED`; `TableLookupService` y `PetgraphEngine` leen columnas v2.
 - [x] Suites `tests/integration_store_v2_transaccional.rs` y `tests/adversarial_store_v2_tests.rs`; los hallazgos H1 (esquemas), H3, H4, H5 y H9 corren sin `#[ignore]`.
 - [ ] `raw_docs/` (copia inmutable del original): se traslada a la Fase 12 (centros en disco).
+
+### Fase 11: Ingesta v2 (plan v2 §1 filas 1, 2 y 7; §2.5 y §2.6)
+- [x] DTO de destilación v2 (`application/dtos/ingestion.rs`) alineado con §4; JSON Schema con `enum` para tipo de documento, fase, relación, tipo de eje y tipo de nodo.
+- [x] `ClaudeHeadlessDistiller` v2: reglas en `--system-prompt`, documento por stdin delimitado, `--output-format json --json-schema`, `--tools ""`, `--no-session-persistence`, `--strict-mcp-config`, `kill_on_drop`, sin consola en Windows y timeout de 300 s.
+- [x] Red de seguridad en Rust (`application/use_cases/mapeo_destilacion.rs`): enums del dominio, `separar_revision` + `DocId::desde_codigo_libre`, `calidad_extraccion` desde `HitoOperativo::alertas_calidad` y aristas `EXIGE_LLENAR_REGISTRO` sintetizadas.
+- [x] Parser Markdown: breadcrumb completo y condición heredada (H7); título de tabla tras línea en blanco y notas multilínea `(*)`, `(1)`, `(a)` (H8).
+- [x] Columnas v2 rellenas: `rol_ejecutor`, `registro_*`, `objeto_alcance`, `chunk_origen_id`, `tablas_vinculadas`, `hitos_vinculados`, unidades, `valor_salida_nombre`, `instrucciones_uso_sql`, `vector_hito` y `vector_tabla`.
+- [x] Embeddings multilingües `MultilingualE5Large` (1024 dims) con caché fuera del cwd.
+- [x] Suite adversarial `tests/adversarial_ingesta_v2_tests.rs` y E2E real de la Etapa 1 con todas las comprobaciones en OK.
 
 ---
 
@@ -408,3 +417,79 @@
   * La fecha de vigor sale de `fecha_emision`; si el DTO v2 trae `fecha_vigor`, usar esa. Una revisión nueva exige `version_num` mayor y `fecha_vigor` posterior a la vigente.
   * Los fallos reales pendientes de H2 son `grafo_registros` y `custodia_responsable_sin_ejecutor`.
 
+### Sesión 11 (2026-10-17) — Fase 11: Ingesta v2
+* **Objetivo:** plan v2 §1 (problemas 1, 2 y 7), §2.5 (destilación) y §2.6 (embeddings).
+* **Contratos nuevos:**
+  * `application/dtos/ingestion.rs` (DTO v2, sustituye al v1): `DistilledDocumentPackage { catalogo, hitos, tablas, aristas }`.
+    * `CatalogoDestilado`: `doc_id`, `titulo`, `tipo_documento`, `revision`, `version_num`, `fecha_vigor`, `emisor`.
+    * `HitoDestilado`: `orden_secuencia`, `fase_operativa`, `objeto_alcance`, `rol_ejecutor`, `rol_responsable`, `registro_codigo`, `registro_nombre`, `criterio_aceptacion`, `condicion_aplicacion`, `seccion_origen`.
+    * `TablaDestilada`: `tabla_id`, `titulo`, `eje_x`/`eje_y` (`EjeDestilado {nombre, tipo, unidad}`), `valor_salida_nombre`, `seccion_origen`, `celdas`.
+    * `CeldaDestilada`: `LimitesDestilados` por eje, `eje_z`, `valor_resultado`, `unidad_medida`, `nota_pie_condicion`.
+    * `AristaDestilada`: `origen_tipo`, `tipo_relacion`, `destino_id`, `destino_tipo`, `contexto`.
+    * `json_schema_destilacion()` genera el esquema compacto. Los campos de vocabulario se deserializan como `String` (un valor fuera de vocabulario no tumba el paquete) y el esquema los restringe con `enum`.
+  * `ParsedSection` añade `breadcrumb` y `condicion_aplicacion`; `ParsedTableRaw` añade `seccion_codigo`.
+  * `application/use_cases/mapeo_destilacion.rs` (nuevo, puro): `clave_documental`, `mapear_revision -> RevisionMapeada` (filas sin vectores + textos a vectorizar), `interpretar_fecha_vigor` e `interpretar_valor_numerico`. `DocumentIngestionService` solo orquesta y vectoriza chunks, hitos y tablas en una única llamada al motor.
+  * `ClaudeHeadlessDistiller`: `construir_argumentos`, `construir_entrada`, `reglas_destilacion` y `extraer_paquete` (sobre de la CLI → `structured_output`; si no, `result` como texto; o el paquete desnudo). `TIMEOUT_DESTILACION_SEGUNDOS = 300`.
+  * `FastEmbedEngine`: `MODELO_POR_DEFECTO = MultilingualE5Large`, `con_cache(modelo, Option<&Path>)`, `resolver_directorio_cache`, `directorio_cache_efectivo` y `dimension_del_modelo`.
+* **Decisiones:**
+  * **Modelo de embeddings:** `MultilingualE5Large` (1024 dims, `Qdrant/multilingual-e5-large-onnx`, ≈ 2,2 GB). fastembed 4.9.1 (Cargo.lock) no incluye BGE-M3, y E5-large es su único modelo multilingüe de 1024 dims, así que no cambia el esquema (`DIMENSION_EMBEDDINGS = 1024`). Se aplican los prefijos E5: `query: ` en `generate_embedding` (consultas) y `passage: ` en `generate_batch_embeddings` (indexación).
+  * **Caché:** parámetro explícito > `FASTEMBED_CACHE_DIR` > `%LOCALAPPDATA%\lakehouse_rag\fastembed_cache` (Windows) o `$XDG_DATA_HOME` / `~/.local/share` (Unix). Sin dependencias nuevas; nunca el cwd.
+  * **Fase:** el esquema solo admite los 9 valores canónicos y el prompt pide el más cercano (soldeo → `EJECUCION`). Lo no interpretable queda como `NO_ESPECIFICADA`.
+  * **Prompt:** reglas en `--system-prompt` (sustituye el prompt por defecto de Claude Code) y documento por stdin entre `<documento>…</documento>`; un `</documento>` incrustado se neutraliza.
+  * **Versión:** `version_num` si es ≥ 0; si no, el número de `revision`; si no, la revisión incrustada en el `doc_id`.
+  * **Origen de las aristas:** el LLM no conoce los IDs internos. Con `origen_tipo = HITO_OPERATIVO`, el origen es el hito cuyo `registro_codigo` es el destino; en otro caso, el documento. `REMITE_A_TABLA` hacia una etiqueta de la propia revisión («4-A») apunta al `tabla_id` versionado. `DEROGA_A` guarda el código sin revisión y la revisión en `contexto_relacion`.
+  * **Red de seguridad:**
+    * Si un hito tiene registro y falta su arista `EXIGE_LLENAR_REGISTRO`, se sintetiza.
+    * Si la celda trae una llamada `(*)` sin nota, la nota se toma del parser.
+    * Si el hito no trae condición, hereda la del chunk de su sección.
+    * Los campos de más de 16 KiB se recortan y se eliminan los `\0`.
+  * **Dominio (bug de la Fase 9):** «Inspector QA/QC» se marcaba como rol fusionado por la `/`. Ahora una sigla compuesta (`QA/QC`, `I+D`) no cuenta como separador de roles.
+* **Tests añadidos:**
+  * Unitarios: DTO (3), destilador (+6), parser (+3), mapeo (9), FastEmbed (2) y dominio (+1).
+  * `tests/adversarial_ingesta_v2_tests.rs` (9): enums inválidos y caos de tipos, JSON roto, roles fusionados, documento sin hitos, tabla sin notas, breadcrumbs profundos/largos/masivos (3.000 secciones), prompt injection, inyección SQL en campos y 1.500 hitos con campos de 16 KiB.
+  * Adaptados: `comun_store_v2`, `integration_ingestion_pipeline`, `adversarial_store_v2_tests` (el doc_id con comilla ahora se canonicaliza; el que no tiene alfanuméricos se rechaza) y `acceptance_e2e_etapa1_ingesta` (paquete oro v2, 6 comprobaciones nuevas, H7 y H8 sin `#[ignore]`).
+* **Verificación:** 246 tests pasando + 5 ignorados (los reales); `cargo clippy --all-targets -- -D warnings` sin avisos; `cargo fmt --check` OK.
+* **E2E real** (Claude Code 2.1.296 con `sonnet`; FastEmbed E5-large; LanceDB en tempdir; perfil `dev`):
+  * Comando: `cargo test --test acceptance_e2e_etapa1_ingesta -- --ignored --nocapture --test-threads=1` → 3/3 tests OK.
+  * **52/52 comprobaciones en OK** (Rev. 03 + Rev. 04) en las dos ejecuciones completas. La segunda se hizo con el código final.
+
+  | # Etapa 1 | Comprobación (clave del test) | Antes | Fase 11 | Evidencia (ejecución real) |
+  | :---: | --- | :---: | :---: | --- |
+  | 8 | `custodia_responsable_sin_ejecutor` | FALLA | OK | CUSTODIA → `rol_responsable = "Jefe de Producción"` (Rev. 03 y 04) |
+  | 9 | `custodia_registro_columna` (nueva) | OK* | OK | `registro_codigo = FOR-ALM-02` (Rev. 03) / `FOR-ALM-05` (Rev. 04) |
+  | 10 | `fases_sql_exactas` | FALLA | OK | `["RECEPCION", "CUSTODIA", "INSPECCION"]` |
+  | 16 | `grafo_vocabulario_spec` | FALLA | OK | 0 relaciones fuera de §4 |
+  | 17 | `grafo_registros` | FALLA | OK | `EXIGE_LLENAR_REGISTRO` → FOR-ALM-01, FOR-ALM-02, PPI-MAT-09 |
+  | 28 | `grafo_deroga_a_rev03` | FALLA | OK | 1 arista `DEROGA_A` vigente en la Rev. 04 |
+  | 29 | `esquema_03_campos_spec` + `matriz_columnas_v2_pobladas` (nueva) | NO EXISTE | OK | 3/3 hitos con `rol_ejecutor`, `objeto_alcance` y `chunk_origen_id` |
+  | 30 | `esquema_vectores_hito_tabla` + `vectores_hito_tabla_poblados` (nueva) | NO EXISTE | OK | `vector_hito` 3/3, `vector_tabla` 1/1 |
+  | — | `tabla_04_unidades_salida_sql` (nueva) | — | OK | `eje_x_unidad` 1/1; `valor_salida_nombre = temperatura_precalentamiento_min_c` |
+  | 33 | `chunks_breadcrumb_jerarquico` (nueva) | FALLA | OK | `PO-ALM-03 Procedimiento… > 2. Secuencia Operativa > 2.2 Fase 2 — CUSTODIA` |
+  | — | `chunks_vinculos_hitos_tablas` (nueva) | — | OK | 3 chunks con `hitos_vinculados` y 2 con `tablas_vinculadas` |
+  | 34 | `parser_tabla_titulo_y_notas` (nueva) | FALLA | OK | Título «Tabla 4-A Temperatura mínima…» y notas `(*)` y `(1)` |
+  | 12/27 | `celda_cruce_valor` | OK | OK | `100 (*)` (Rev. 03) → `125 (*)` (Rev. 04), con la nota QA/QC + HV10 |
+
+  * Grafo de la Rev. 03 (ejecución 2): FOR-ALM-01, FOR-ALM-02, PPI-MAT-09, PCC-01, `PO-ALM-03@v3-TAB-0000` (remisión a la Tabla 4-A), UNE-EN-1090-2, UNE-EN-ISO-15614-1, PO-CAL-01, UNE-EN-10204 y ANEXO-II.
+
+  Tiempos (ejecución 1 / ejecución 2):
+
+  | Paso | Rev. 03 | Rev. 04 |
+  | --- | ---: | ---: |
+  | Carga de FastEmbed E5-large (1.ª vez, con descarga de ≈ 2,2 GB) | 100,3 s | — |
+  | Carga de FastEmbed E5-large (en caché) | 7,0 / 5,7 s | — |
+  | Destilación aislada con la configuración por defecto | 33,8 s | — |
+  | 2. Destilación (`claude -p --json-schema`) | 26,6 / 26,7 s | 27,7 / 26,3 s |
+  | 3. Embeddings (13 textos: 9 chunks + 3 hitos + 1 tabla, CPU) | 10,3 / 9,8 s | 8,9 / 8,3 s |
+  | 4-5. Escritura STAGED + commit | 0,22 s | 0,21 s |
+  | **Total `ingestar_documento`** | **37,1 / 36,7 s** | **36,9 / 34,8 s** |
+* **Desviaciones del plan:**
+  * Se añaden `seccion_origen` a la tabla destilada y `destino_tipo` a la arista (no estaban en la lista de la tarea) para enlazar la tabla con su chunk y fijar el tipo de nodo.
+  * El caso adversarial «doc_id con comilla» cambia de semántica: ya no se rechaza, sino que se canonicaliza (`PO-ALM-03'B` → `PO-ALM-03-B`), como pide `desde_codigo_libre`. Solo se rechaza el que queda vacío.
+  * La destilación sigue siendo del documento entero, no por sección (§5.2): con el fixture (≈ 9 KB) sobra margen. El parser ya entrega las secciones con breadcrumb para hacerlo cuando haga falta.
+  * BGE-Large-EN deja de ser el modelo por defecto. Un centro ingerido con BGE tiene vectores incompatibles (mismas dimensiones, distinto espacio): la Fase 12 debe guardar el modelo en `center_manifest.json` y no mezclarlos.
+  * TDD: el DTO, el destilador, el parser y el mapeo se escribieron junto con sus tests (rojo por compilación). El fallo de siglas `QA/QC` y la remisión a tabla se vieron en rojo antes de corregirlos.
+* **Notas para la Fase 12:**
+  * `FastEmbedEngine::try_new(None)` descarga E5-large en `%LOCALAPPDATA%\lakehouse_rag\fastembed_cache` la primera vez (≈ 100 s). La GUI debe avisar o precargar el modelo en segundo plano. Para el manifiesto, usar `MODELO_POR_DEFECTO`.
+  * `hitos_vinculados`, `tablas_vinculadas` (List<Utf8>) y `chunk_origen_id` ya permiten proyectar el grafo hito → chunk → tabla.
+  * Las aristas `EXIGE_LLENAR_REGISTRO` salen con `origen_tipo = HITO_OPERATIVO` y `origen_id = hito_id`; el resto, con el documento como origen.
+  * Los tests reales usan `target/fastembed_cache` (`FASTEMBED_CACHE_DIR`), donde ya está E5-large. Paquetes destilados reales: `target/validacion_etapa1/*.destilado.json`, reinyectables con `MockDistiller::registrar_respuesta`.

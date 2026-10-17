@@ -6,8 +6,8 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 
 use crate::application::dtos::ingestion::{
-    DistilledCatalog, DistilledCell, DistilledDocumentPackage, DistilledDoubleEntryTable,
-    DistilledOperationalTuple, DistilledReferenceEdge, ParsedDocument,
+    AristaDestilada, CatalogoDestilado, CeldaDestilada, DistilledDocumentPackage, EjeDestilado,
+    HitoDestilado, LimitesDestilados, ParsedDocument, ParsedTableRaw, TablaDestilada,
 };
 use crate::application::ports::llm_distiller::LlmDistillerPort;
 use crate::domain::errors::DomainError;
@@ -53,93 +53,112 @@ impl MockDistiller {
             .to_uppercase()
             .replace(' ', "-");
 
-        let catalogo = DistilledCatalog {
+        let catalogo = CatalogoDestilado {
             doc_id: doc_id.clone(),
             titulo: parsed.titulo.clone(),
-            tipo_documental: "NORMA_TECNICA".to_string(),
+            tipo_documento: "INSTRUCTIVO_TECNICO".to_string(),
+            revision: "Rev. 01".to_string(),
+            version_num: 1,
+            fecha_vigor: "2026-01-15".to_string(),
             emisor: "INGENIERIA_PLANTA".to_string(),
-            fecha_emision: "2026-01-15".to_string(),
-            nivel_prelacion: 2,
-            version: 1,
         };
 
-        let mut tuplas_operativas = Vec::new();
-        for sec in &parsed.secciones {
-            if sec.contenido.to_lowercase().contains("inspeccionar")
-                || sec.contenido.to_lowercase().contains("verificar")
-                || sec.contenido.to_lowercase().contains("control")
-            {
-                tuplas_operativas.push(DistilledOperationalTuple {
-                    seccion: sec.codigo.clone(),
-                    fase_operativa: "INSPECCION".to_string(),
-                    rol_responsable: "OPERADOR_TECNICO".to_string(),
-                    accion: "Verificación de parámetro operativo".to_string(),
-                    parametro_control: "Presión/Tolerancia".to_string(),
-                    tolerancia_criterio: "+/- 5%".to_string(),
-                    condicion_aplicacion: "Operación nominal continua".to_string(),
-                    referencia_normativa: doc_id.clone(),
-                });
-            }
-        }
+        let hitos: Vec<HitoDestilado> = parsed
+            .secciones
+            .iter()
+            .filter(|sec| {
+                let texto = sec.contenido.to_lowercase();
+                ["inspeccionar", "verificar", "control"]
+                    .iter()
+                    .any(|verbo| texto.contains(verbo))
+            })
+            .enumerate()
+            .map(|(idx, sec)| HitoDestilado {
+                orden_secuencia: idx as i64 + 1,
+                fase_operativa: "INSPECCION".to_string(),
+                objeto_alcance: sec.titulo.clone(),
+                rol_ejecutor: "Operador Técnico".to_string(),
+                rol_responsable: "Supervisor de Calidad".to_string(),
+                registro_codigo: None,
+                registro_nombre: None,
+                criterio_aceptacion: "Verificación de parámetro operativo +/- 5%".to_string(),
+                condicion_aplicacion: sec.condicion_aplicacion.clone(),
+                seccion_origen: sec.codigo.clone(),
+            })
+            .collect();
 
-        let mut tablas_doble_entrada = Vec::new();
-        for t in &parsed.tablas {
-            let mut celdas = Vec::new();
-            for (idx, fila) in t.filas.iter().enumerate() {
-                if fila.len() >= 3 {
-                    celdas.push(DistilledCell {
-                        rango_x_min: Some((idx as f64) * 5.0),
-                        rango_x_max: Some(((idx + 1) as f64) * 5.0),
-                        x_inclusivo_min: true,
-                        x_inclusivo_max: true,
-                        categoria_x: None,
-                        rango_y_min: None,
-                        rango_y_max: None,
-                        y_inclusivo_min: false,
-                        y_inclusivo_max: false,
-                        categoria_y: Some(fila[2].clone()),
-                        valor_resultado: fila[1].clone(),
-                        unidad_medida: "mm".to_string(),
-                        notas_especificas: t.notas.clone(),
-                    });
-                }
-            }
+        let tablas = parsed
+            .tablas
+            .iter()
+            .enumerate()
+            .map(|(idx, tabla)| Self::tabla_heuristica(idx, tabla))
+            .collect();
 
-            let coord_x = t
-                .encabezados
-                .first()
-                .cloned()
-                .unwrap_or_else(|| "Eje_X".to_string());
-            let coord_y = t
-                .encabezados
-                .get(2)
-                .cloned()
-                .unwrap_or_else(|| "Eje_Y".to_string());
-
-            tablas_doble_entrada.push(DistilledDoubleEntryTable {
-                nombre_tabla: t.titulo.clone(),
-                coordenada_x_nombre: coord_x,
-                coordenada_y_nombre: coord_y,
-                nota_pie: t.notas.clone(),
-                celdas,
-            });
-        }
-
-        let mut aristas_referencia = Vec::new();
+        let mut aristas = Vec::new();
         if parsed.contenido_completo.contains("NOM-STPS-001") {
-            aristas_referencia.push(DistilledReferenceEdge {
-                doc_destino_id: "NOM-STPS-001".to_string(),
-                tipo_relacion: "CITA".to_string(),
-                peso_prelacion: 1.0,
-                contexto_cita: Some("Cita obligatoria de seguridad general".to_string()),
+            aristas.push(AristaDestilada {
+                origen_tipo: "DOCUMENTO".to_string(),
+                tipo_relacion: "SUBORDINADO_A_NORMA".to_string(),
+                destino_id: "NOM-STPS-001".to_string(),
+                destino_tipo: "DOCUMENTO".to_string(),
+                contexto: Some("Cita obligatoria de seguridad general".to_string()),
             });
         }
 
         DistilledDocumentPackage {
             catalogo,
-            tuplas_operativas,
-            tablas_doble_entrada,
-            aristas_referencia,
+            hitos,
+            tablas,
+            aristas,
+        }
+    }
+
+    /// Eje X numérico por fila y eje Y categórico (tercera columna) por cada fila con 3 celdas
+    fn tabla_heuristica(idx: usize, tabla: &ParsedTableRaw) -> TablaDestilada {
+        let eje = |nombre: Option<&String>, defecto: &str, tipo: &str| EjeDestilado {
+            nombre: nombre.cloned().unwrap_or_else(|| defecto.to_string()),
+            tipo: tipo.to_string(),
+            unidad: None,
+        };
+        let celdas = tabla
+            .filas
+            .iter()
+            .enumerate()
+            .filter(|(_, fila)| fila.len() >= 3)
+            .map(|(fila_idx, fila)| CeldaDestilada {
+                eje_x: LimitesDestilados {
+                    categoria: None,
+                    min: Some(fila_idx as f64 * 5.0),
+                    min_inclusivo: true,
+                    max: Some((fila_idx + 1) as f64 * 5.0),
+                    max_inclusivo: true,
+                },
+                eje_y: LimitesDestilados {
+                    categoria: Some(fila[2].clone()),
+                    min: None,
+                    min_inclusivo: false,
+                    max: None,
+                    max_inclusivo: false,
+                },
+                eje_z: None,
+                valor_resultado: fila[1].clone(),
+                unidad_medida: Some("mm".to_string()),
+                nota_pie_condicion: tabla.notas.clone(),
+            })
+            .collect();
+
+        TablaDestilada {
+            tabla_id: format!("T{}", idx + 1),
+            titulo: tabla.titulo.clone(),
+            eje_x: eje(tabla.encabezados.first(), "Eje_X", "RANGO_NUMERICO"),
+            eje_y: eje(tabla.encabezados.get(2), "Eje_Y", "CATEGORIA_EXACTA"),
+            valor_salida_nombre: tabla
+                .encabezados
+                .get(1)
+                .cloned()
+                .unwrap_or_else(|| "valor".to_string()),
+            seccion_origen: tabla.seccion_codigo.clone(),
+            celdas,
         }
     }
 }
@@ -188,6 +207,8 @@ mod tests {
                 titulo: "Control Operativo".to_string(),
                 nivel: 2,
                 contenido: "Se debe verificar la presión y temperatura en cada turno.".to_string(),
+                breadcrumb: "Procedimiento > 1.1 Control Operativo".to_string(),
+                condicion_aplicacion: None,
             }],
             tablas: Vec::new(),
             contenido_completo: "Texto con referencia a NOM-STPS-001 para cumplimiento."
@@ -202,9 +223,10 @@ mod tests {
             paquete.catalogo.titulo,
             "Procedimiento de Calidad y Seguridad"
         );
-        assert_eq!(paquete.tuplas_operativas.len(), 1);
-        assert_eq!(paquete.aristas_referencia.len(), 1);
-        assert_eq!(paquete.aristas_referencia[0].doc_destino_id, "NOM-STPS-001");
+        assert_eq!(paquete.hitos.len(), 1);
+        assert_eq!(paquete.hitos[0].seccion_origen, "1.1");
+        assert_eq!(paquete.aristas.len(), 1);
+        assert_eq!(paquete.aristas[0].destino_id, "NOM-STPS-001");
     }
 
     #[tokio::test]

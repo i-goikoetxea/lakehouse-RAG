@@ -3,8 +3,8 @@
 use std::sync::Arc;
 
 use lakehouse_rag::application::dtos::ingestion::{
-    DistilledCatalog, DistilledCell, DistilledDocumentPackage, DistilledDoubleEntryTable,
-    DistilledOperationalTuple, DistilledReferenceEdge,
+    AristaDestilada, CatalogoDestilado, CeldaDestilada, DistilledDocumentPackage, EjeDestilado,
+    HitoDestilado, LimitesDestilados, TablaDestilada,
 };
 use lakehouse_rag::application::ports::lakehouse_store::{
     LakehouseStorePort, TABLA_CATALOGO_TABLAS, TABLA_CELDAS_DOBLE_ENTRADA, TABLA_CHUNKS_NORMATIVA,
@@ -70,82 +70,99 @@ Medir la desviación axial con reloj comparador micrométrico.
 Este procedimiento complementa a la norma NOM-STPS-001 en materia de protección laboral.
 "#;
 
+    let catalogo = |doc_id: &str, version: i64, fecha: &str| CatalogoDestilado {
+        doc_id: doc_id.to_string(),
+        titulo: "Procedimiento de Mantenimiento de Turbogeneradores".to_string(),
+        tipo_documento: "PROCEDIMIENTO_GENERAL".to_string(),
+        revision: format!("Rev. {version:02}"),
+        version_num: version,
+        fecha_vigor: fecha.to_string(),
+        emisor: "INGENIERIA_ELECTROMECANICA".to_string(),
+    };
+    let hito = |seccion: &str, fase: &str, ejecutor: &str, responsable: &str, registro: &str| {
+        HitoDestilado {
+            orden_secuencia: 0,
+            fase_operativa: fase.to_string(),
+            objeto_alcance: "Turbogenerador".to_string(),
+            rol_ejecutor: ejecutor.to_string(),
+            rol_responsable: responsable.to_string(),
+            registro_codigo: Some(registro.to_string()),
+            registro_nombre: Some("Registro".to_string()),
+            criterio_aceptacion: "Conforme a tabla".to_string(),
+            condicion_aplicacion: None,
+            seccion_origen: seccion.to_string(),
+        }
+    };
+    let rango_rpm = |min: f64, max: f64| LimitesDestilados {
+        categoria: None,
+        min: Some(min),
+        min_inclusivo: true,
+        max: Some(max),
+        max_inclusivo: true,
+    };
+    let clase = |nombre: &str| LimitesDestilados {
+        categoria: Some(nombre.to_string()),
+        min: None,
+        min_inclusivo: false,
+        max: None,
+        max_inclusivo: false,
+    };
+    let celda = |x: LimitesDestilados, y: LimitesDestilados, valor: &str| CeldaDestilada {
+        eje_x: x,
+        eje_y: y,
+        eje_z: None,
+        valor_resultado: valor.to_string(),
+        unidad_medida: Some("um".to_string()),
+        nota_pie_condicion: None,
+    };
     let paquete = DistilledDocumentPackage {
-        catalogo: DistilledCatalog {
-            doc_id: "PROC-TURBO-001".to_string(),
-            titulo: "Procedimiento de Mantenimiento de Turbogeneradores".to_string(),
-            tipo_documental: "PROCEDIMIENTO_TECNICO".to_string(),
-            emisor: "INGENIERIA_ELECTROMECANICA".to_string(),
-            fecha_emision: "2026-03-01".to_string(),
-            nivel_prelacion: 2,
-            version: 1,
-        },
-        tuplas_operativas: vec![
-            DistilledOperationalTuple {
-                seccion: "1.1".to_string(),
-                fase_operativa: "RECEPCION".to_string(),
-                rol_responsable: "SUPERVISOR".to_string(),
-                accion: "Verificar precintos de calibración".to_string(),
-                parametro_control: "Integridad de precinto".to_string(),
-                tolerancia_criterio: "100% intacto".to_string(),
-                condicion_aplicacion: "Previo al montaje".to_string(),
-                referencia_normativa: "PROC-TURBO-001".to_string(),
-            },
-            DistilledOperationalTuple {
-                seccion: "1.2".to_string(),
-                fase_operativa: "INSPECCION".to_string(),
-                rol_responsable: "TECNICO_MECANICO".to_string(),
-                accion: "Medir desviación axial".to_string(),
-                parametro_control: "Alineación axial".to_string(),
-                tolerancia_criterio: "Según tabla RPM".to_string(),
-                condicion_aplicacion: "Eje rotando en vacío".to_string(),
-                referencia_normativa: "PROC-TURBO-001".to_string(),
-            },
+        catalogo: catalogo("PROC-TURBO-001", 1, "2026-03-01"),
+        hitos: vec![
+            hito("1.1", "RECEPCION", "Montador", "Supervisor", "FOR-REC-01"),
+            hito(
+                "1.2",
+                "INSPECCION",
+                "Técnico Mecánico",
+                "Jefe de Mantenimiento",
+                "FOR-INS-02",
+            ),
         ],
-        tablas_doble_entrada: vec![DistilledDoubleEntryTable {
-            nombre_tabla: "Tabla de Tolerancias de Desalineación Dinámica".to_string(),
-            coordenada_x_nombre: "Rango RPM".to_string(),
-            coordenada_y_nombre: "Categoría Crítica".to_string(),
-            nota_pie: Some("Lecturas compensadas a 20 grados Celsius.".to_string()),
+        tablas: vec![TablaDestilada {
+            tabla_id: "T1".to_string(),
+            titulo: "Tabla de Tolerancias de Desalineación Dinámica".to_string(),
+            eje_x: EjeDestilado {
+                nombre: "rpm".to_string(),
+                tipo: "RANGO_NUMERICO".to_string(),
+                unidad: Some("rpm".to_string()),
+            },
+            eje_y: EjeDestilado {
+                nombre: "categoria_critica".to_string(),
+                tipo: "CATEGORIA_EXACTA".to_string(),
+                unidad: None,
+            },
+            valor_salida_nombre: "tolerancia_maxima_um".to_string(),
+            seccion_origen: Some("1.2".to_string()),
             celdas: vec![
-                DistilledCell {
-                    rango_x_min: Some(0.0),
-                    rango_x_max: Some(1500.0),
-                    x_inclusivo_min: true,
-                    x_inclusivo_max: true,
-                    categoria_x: None,
-                    rango_y_min: None,
-                    rango_y_max: None,
-                    y_inclusivo_min: false,
-                    y_inclusivo_max: false,
-                    categoria_y: Some("Clase I".to_string()),
-                    valor_resultado: "50.0".to_string(),
-                    unidad_medida: "um".to_string(),
-                    notas_especificas: None,
-                },
-                DistilledCell {
-                    rango_x_min: Some(1500.1),
-                    rango_x_max: Some(3600.0),
-                    x_inclusivo_min: true,
-                    x_inclusivo_max: true,
-                    categoria_x: None,
-                    rango_y_min: None,
-                    rango_y_max: None,
-                    y_inclusivo_min: false,
-                    y_inclusivo_max: false,
-                    categoria_y: Some("Clase II".to_string()),
-                    valor_resultado: "25.0".to_string(),
-                    unidad_medida: "um".to_string(),
-                    notas_especificas: None,
-                },
+                celda(rango_rpm(0.0, 1500.0), clase("Clase I"), "50.0"),
+                celda(rango_rpm(1500.1, 3600.0), clase("Clase II"), "25.0"),
             ],
         }],
-        aristas_referencia: vec![DistilledReferenceEdge {
-            doc_destino_id: "NOM-STPS-001".to_string(),
-            tipo_relacion: "COMPLEMENTA".to_string(),
-            peso_prelacion: 0.75,
-            contexto_cita: Some("Protección laboral complementaria".to_string()),
-        }],
+        aristas: vec![
+            AristaDestilada {
+                origen_tipo: "DOCUMENTO".to_string(),
+                tipo_relacion: "COMPLEMENTA".to_string(),
+                destino_id: "NOM-STPS-001".to_string(),
+                destino_tipo: "DOCUMENTO".to_string(),
+                contexto: Some("Protección laboral complementaria".to_string()),
+            },
+            AristaDestilada {
+                origen_tipo: "HITO_OPERATIVO".to_string(),
+                tipo_relacion: "EXIGE_LLENAR_REGISTRO".to_string(),
+                destino_id: "FOR-REC-01".to_string(),
+                destino_tipo: "REGISTRO".to_string(),
+                contexto: None,
+            },
+        ],
     };
 
     distiller.registrar_respuesta("proc_turbos.md", paquete);
@@ -164,7 +181,8 @@ Este procedimiento complementa a la norma NOM-STPS-001 en materia de protección
     assert_eq!(reporte.total_tuplas, 2);
     assert_eq!(reporte.total_tablas, 1);
     assert_eq!(reporte.total_celdas, 2);
-    assert_eq!(reporte.total_aristas, 1);
+    // 2 aristas del LLM + 1 EXIGE_LLENAR_REGISTRO sintetizada para FOR-INS-02
+    assert_eq!(reporte.total_aristas, 3);
     assert!(reporte.total_chunks >= 3);
 
     // Verificar en LanceDB cada una de las 6 tablas
@@ -202,7 +220,7 @@ Este procedimiento complementa a la norma NOM-STPS-001 en materia de protección
         .contar_registros(TABLA_GRAFO_REFERENCIAS)
         .await
         .unwrap();
-    assert_eq!(count_grf, 1);
+    assert_eq!(count_grf, 3);
 }
 
 #[tokio::test]
@@ -230,22 +248,23 @@ async fn test_integration_ingesta_control_de_versiones_invalida_previa() {
     // 1. Ingestar Versión 1
     let doc_v1 = "# Norma de Presión V1\n## 1. Alcance\nPresión máxima 10 bar.";
     let mut paquete_v1 = DistilledDocumentPackage {
-        catalogo: DistilledCatalog {
+        catalogo: CatalogoDestilado {
             doc_id: "NORMA-PRESION".to_string(),
             titulo: "Norma de Presión".to_string(),
-            tipo_documental: "NORMA".to_string(),
+            tipo_documento: "NORMA_INTERNACIONAL".to_string(),
+            revision: "Rev. 01".to_string(),
+            version_num: 1,
+            fecha_vigor: "2025-01-01".to_string(),
             emisor: "OPERACIONES".to_string(),
-            fecha_emision: "2025-01-01".to_string(),
-            nivel_prelacion: 1,
-            version: 1,
         },
-        tuplas_operativas: Vec::new(),
-        tablas_doble_entrada: Vec::new(),
-        aristas_referencia: vec![DistilledReferenceEdge {
-            doc_destino_id: "NOM-STPS-001".to_string(),
+        hitos: Vec::new(),
+        tablas: Vec::new(),
+        aristas: vec![AristaDestilada {
+            origen_tipo: "DOCUMENTO".to_string(),
             tipo_relacion: "SUBORDINADO_A_NORMA".to_string(),
-            peso_prelacion: 1.0,
-            contexto_cita: None,
+            destino_id: "NOM-STPS-001".to_string(),
+            destino_tipo: "DOCUMENTO".to_string(),
+            contexto: None,
         }],
     };
     distiller.registrar_respuesta("norma_v1.md", paquete_v1.clone());
@@ -257,8 +276,9 @@ async fn test_integration_ingesta_control_de_versiones_invalida_previa() {
 
     // 2. Ingestar Versión 2 del mismo documento
     let doc_v2 = "# Norma de Presión V2\n## 1. Alcance Actualizado\nPresión máxima 12 bar.";
-    paquete_v1.catalogo.version = 2;
-    paquete_v1.catalogo.fecha_emision = "2026-01-01".to_string();
+    paquete_v1.catalogo.version_num = 2;
+    paquete_v1.catalogo.revision = "Rev. 02".to_string();
+    paquete_v1.catalogo.fecha_vigor = "2026-01-01".to_string();
     distiller.registrar_respuesta("norma_v2.md", paquete_v1);
 
     service
