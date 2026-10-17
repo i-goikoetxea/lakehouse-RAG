@@ -2,6 +2,7 @@
 
 pub mod agent;
 pub mod ingestion;
+pub mod lakehouse_filas;
 pub mod tools;
 
 pub use agent::*;

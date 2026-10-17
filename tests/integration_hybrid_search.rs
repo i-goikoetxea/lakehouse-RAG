@@ -2,19 +2,22 @@
 
 use std::sync::Arc;
 
-use arrow_array::{BooleanArray, FixedSizeListArray, Float32Array, RecordBatch, StringArray};
-use arrow_schema::{DataType, Field};
 use tempfile::tempdir;
 
+use lakehouse_rag::application::dtos::lakehouse_filas::{ClaveDocumental, FilaChunk, LoteIngesta};
 use lakehouse_rag::application::ports::embedding_engine::EmbeddingEnginePort;
 use lakehouse_rag::application::ports::hybrid_search::{HybridSearchParams, HybridSearchPort};
-use lakehouse_rag::application::ports::lakehouse_store::{LakehouseStorePort, TABLA_DOC_CHUNKS};
+use lakehouse_rag::application::ports::lakehouse_store::{EstadoIngesta, LakehouseStorePort};
 use lakehouse_rag::application::use_cases::hybrid_search_service::HybridSearchService;
+use lakehouse_rag::domain::models::center::CenterId;
+use lakehouse_rag::domain::models::document::{DocId, TipoDocumento};
+use lakehouse_rag::domain::models::identificadores::IngestId;
 use lakehouse_rag::infrastructure::embeddings::mock_engine::MockEmbeddingEngine;
 use lakehouse_rag::infrastructure::storage::lancedb_store::LanceDbStore;
-use lakehouse_rag::infrastructure::storage::schemas::{DIMENSION_EMBEDDINGS, schema_doc_chunks};
+use lakehouse_rag::infrastructure::storage::lotes_arrow::ColumnasTransaccionales;
+use lakehouse_rag::infrastructure::storage::schemas::DIMENSION_EMBEDDINGS;
 
-/// Datos de prueba para crear un lote de chunks
+/// Datos de prueba para sembrar un chunk en el almacén v2
 struct TestChunkFixture<'a> {
     chunk_id: &'a str,
     doc_id: &'a str,
@@ -25,48 +28,52 @@ struct TestChunkFixture<'a> {
     vigente: bool,
 }
 
-/// Crea un RecordBatch con fragmentos vectorizados para tests
-fn crear_lote_chunks(chunks: Vec<TestChunkFixture<'_>>) -> RecordBatch {
-    let mut chunk_ids = Vec::new();
-    let mut doc_ids = Vec::new();
-    let mut centros = Vec::new();
-    let mut secciones = Vec::new();
-    let mut contenidos = Vec::new();
-    let mut vigentes = Vec::new();
-    let mut flat_vectors: Vec<f32> = Vec::new();
-
-    for c in chunks {
-        chunk_ids.push(c.chunk_id);
-        doc_ids.push(c.doc_id);
-        centros.push(c.centro_id);
-        secciones.push(c.seccion);
-        contenidos.push(c.contenido);
-        vigentes.push(c.vigente);
-        flat_vectors.extend(c.vector);
+impl TestChunkFixture<'_> {
+    fn a_fila(&self) -> FilaChunk {
+        FilaChunk {
+            clave: ClaveDocumental {
+                centro_id: CenterId::new(self.centro_id).expect("centro_id válido"),
+                doc_id: DocId::new(self.doc_id).expect("doc_id válido"),
+                version_num: 1,
+            },
+            chunk_id: self.chunk_id.to_string(),
+            nivel_prelacion: TipoDocumento::ProcedimientoObra.nivel_prelacion(),
+            breadcrumb_jerarquia: self.seccion.to_string(),
+            condicion_aplicacion: None,
+            texto_contenido: self.contenido.to_string(),
+            tablas_vinculadas: Vec::new(),
+            hitos_vinculados: Vec::new(),
+            vector: self.vector.clone(),
+        }
     }
+}
 
-    let item_field = Arc::new(Field::new("item", DataType::Float32, true));
-    let valores_vector = Arc::new(Float32Array::from(flat_vectors));
-    let array_vector = Arc::new(FixedSizeListArray::new(
-        item_field,
-        DIMENSION_EMBEDDINGS,
-        valores_vector,
-        None,
-    ));
-
-    RecordBatch::try_new(
-        schema_doc_chunks(),
-        vec![
-            Arc::new(StringArray::from(chunk_ids)),
-            Arc::new(StringArray::from(doc_ids)),
-            Arc::new(StringArray::from(centros)),
-            Arc::new(StringArray::from(secciones)),
-            Arc::new(StringArray::from(contenidos)),
-            array_vector,
-            Arc::new(BooleanArray::from(vigentes)),
-        ],
-    )
-    .expect("Construir RecordBatch chunks")
+/// Siembra los chunks con el estado indicado, agrupando por el valor de `vigente`
+async fn sembrar_chunks(
+    store: &LanceDbStore,
+    chunks: Vec<TestChunkFixture<'_>>,
+    estado: EstadoIngesta,
+) {
+    let ingest_id = IngestId::new("ingesta-prueba-busqueda").expect("ingest_id válido");
+    for vigente in [true, false] {
+        let filas: Vec<FilaChunk> = chunks
+            .iter()
+            .filter(|c| c.vigente == vigente)
+            .map(TestChunkFixture::a_fila)
+            .collect();
+        if filas.is_empty() {
+            continue;
+        }
+        let transaccion = ColumnasTransaccionales {
+            ingest_id: ingest_id.clone(),
+            estado,
+            vigente,
+        };
+        store
+            .sembrar_filas(&LoteIngesta::Chunks(filas), &transaccion)
+            .await
+            .expect("Sembrar chunks");
+    }
 }
 
 #[tokio::test]
@@ -94,7 +101,7 @@ async fn test_integration_busqueda_hibrida_recupera_chunk_relevante_por_rrf() {
     let v2 = engine.generate_embedding(t2).await.unwrap();
     let v3 = engine.generate_embedding(t3).await.unwrap();
 
-    let batch = crear_lote_chunks(vec![
+    let chunks = vec![
         TestChunkFixture {
             chunk_id: "CHK-001",
             doc_id: "DOC-CAL-01",
@@ -122,12 +129,9 @@ async fn test_integration_busqueda_hibrida_recupera_chunk_relevante_por_rrf() {
             vector: v3,
             vigente: true,
         },
-    ]);
+    ];
 
-    store
-        .insertar_lote(TABLA_DOC_CHUNKS, batch)
-        .await
-        .expect("Insertar chunks");
+    sembrar_chunks(&store, chunks, EstadoIngesta::Committed).await;
 
     let hybrid_service = HybridSearchService::new(store.clone(), engine.clone());
 
@@ -181,7 +185,7 @@ async fn test_integration_aislamiento_estricto_multi_centro() {
     let v_norte = engine.generate_embedding(texto).await.unwrap();
     let v_sur = engine.generate_embedding(texto).await.unwrap();
 
-    let batch = crear_lote_chunks(vec![
+    let chunks = vec![
         TestChunkFixture {
             chunk_id: "CHK-NORTE-1",
             doc_id: "DOC-NORTE",
@@ -200,12 +204,9 @@ async fn test_integration_aislamiento_estricto_multi_centro() {
             vector: v_sur,
             vigente: true,
         },
-    ]);
+    ];
 
-    store
-        .insertar_lote(TABLA_DOC_CHUNKS, batch)
-        .await
-        .expect("Insertar chunks");
+    sembrar_chunks(&store, chunks, EstadoIngesta::Committed).await;
 
     let hybrid_service = HybridSearchService::new(store.clone(), engine.clone());
 
@@ -254,7 +255,7 @@ async fn test_integration_filtrado_estricto_por_vigencia() {
     let v1 = engine.generate_embedding(texto_rev1).await.unwrap();
     let v2 = engine.generate_embedding(texto_rev2).await.unwrap();
 
-    let batch = crear_lote_chunks(vec![
+    let chunks = vec![
         TestChunkFixture {
             chunk_id: "CHK-REV1",
             doc_id: "DOC-MOT-V1",
@@ -273,12 +274,9 @@ async fn test_integration_filtrado_estricto_por_vigencia() {
             vector: v2,
             vigente: true, // VIGENTE
         },
-    ]);
+    ];
 
-    store
-        .insertar_lote(TABLA_DOC_CHUNKS, batch)
-        .await
-        .expect("Insertar chunks");
+    sembrar_chunks(&store, chunks, EstadoIngesta::Committed).await;
 
     let hybrid_service = HybridSearchService::new(store.clone(), engine.clone());
 
@@ -337,7 +335,7 @@ async fn test_integration_ponderacion_pesos_rrf() {
     let t1 = "Procedimiento especial código ISO-9001 calidad total";
     let v1 = engine.generate_embedding(t1).await.unwrap();
 
-    let batch = crear_lote_chunks(vec![TestChunkFixture {
+    let chunks = vec![TestChunkFixture {
         chunk_id: "CHK-W1",
         doc_id: "DOC-W",
         centro_id: "planta_peso",
@@ -345,12 +343,9 @@ async fn test_integration_ponderacion_pesos_rrf() {
         contenido: t1,
         vector: v1,
         vigente: true,
-    }]);
+    }];
 
-    store
-        .insertar_lote(TABLA_DOC_CHUNKS, batch)
-        .await
-        .expect("Insertar chunks");
+    sembrar_chunks(&store, chunks, EstadoIngesta::Committed).await;
 
     let hybrid_service = HybridSearchService::new(store.clone(), engine.clone());
 
@@ -385,4 +380,69 @@ async fn test_integration_ponderacion_pesos_rrf() {
         .await
         .unwrap();
     assert_eq!(hits_bm25.len(), 1);
+}
+
+#[tokio::test]
+async fn test_integration_chunk_staged_nunca_aparece_en_resultados() {
+    let tmp = tempdir().expect("Crear tempdir");
+    let store = Arc::new(
+        LanceDbStore::conectar(tmp.path())
+            .await
+            .expect("Conectar store"),
+    );
+    store
+        .inicializar_tablas()
+        .await
+        .expect("Inicializar tablas");
+
+    let engine = Arc::new(MockEmbeddingEngine::new(Some(
+        DIMENSION_EMBEDDINGS as usize,
+    )));
+
+    let texto = "Instrucción de trabajo para soldadura de tuberías de acero al carbono";
+    let vector = engine.generate_embedding(texto).await.unwrap();
+
+    let fixture = |chunk_id, doc_id| TestChunkFixture {
+        chunk_id,
+        doc_id,
+        centro_id: "planta_staged",
+        seccion: "Soldadura",
+        contenido: texto,
+        vector: vector.clone(),
+        vigente: true,
+    };
+
+    sembrar_chunks(
+        &store,
+        vec![fixture("CHK-COMMITTED", "DOC-COMMITTED")],
+        EstadoIngesta::Committed,
+    )
+    .await;
+    // Fila vigente pero aún STAGED: la ingesta no se ha confirmado
+    sembrar_chunks(
+        &store,
+        vec![fixture("CHK-STAGED", "DOC-STAGED")],
+        EstadoIngesta::Staged,
+    )
+    .await;
+
+    let hybrid_service = HybridSearchService::new(store.clone(), engine.clone());
+
+    for solo_vigentes in [true, false] {
+        let params = HybridSearchParams {
+            query: "soldadura tuberías acero carbono".to_string(),
+            centro_id: "planta_staged".to_string(),
+            top_k: 10,
+            solo_vigentes,
+            ..Default::default()
+        };
+        let hits = hybrid_service
+            .hybrid_search(&params)
+            .await
+            .expect("Búsqueda con fila staged");
+
+        assert_eq!(hits.len(), 1, "Solo debe verse la fila COMMITTED");
+        assert_eq!(hits[0].chunk_id, "CHK-COMMITTED");
+        assert!(hits.iter().all(|h| h.chunk_id != "CHK-STAGED"));
+    }
 }

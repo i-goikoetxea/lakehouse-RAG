@@ -18,7 +18,7 @@
 | **7** | Servidor MCP y App Gráfica (Linear + NotebookLM 16:9) | Sesión 7 | `[EN PROGRESO]` | 124 / 124 |
 | **8** | Auditoría Adversarial E2E y Criterios DoD | Sesión 8 | `[NO INICIADO]` | - |
 | **9** | Dominio v2: enums canónicos, prelación, vigencia, DocId seguro, IDs versionados, breadcrumb y condición | Sesión 9 | `[COMPLETADO]` | 180 / 180 |
-| **10** | Esquemas v2 y store transaccional (staged/commit/rollback, idempotencia, `raw_docs`) | - | `[NO INICIADO]` | - |
+| **10** | Esquemas v2 y store transaccional (staged/commit/rollback, idempotencia por hash) | Sesión 10 | `[COMPLETADO]` | 214 / 214 |
 | **11** | Ingesta v2: breadcrumb, herencia de condición, destilador con json-schema y enums | - | `[NO INICIADO]` | - |
 | **12** | Centros en disco y proyección LanceDB → DataFusion/Petgraph | - | `[NO INICIADO]` | - |
 | **13** | Tools v2: matriz exacta, lookup, SQL de solo lectura, grafo antisupernodos, `search_normative_context` | - | `[NO INICIADO]` | - |
@@ -110,6 +110,17 @@
 - [x] `DocId` con conjunto `[A-Za-z0-9._-]` (H9) y `DocId::desde_codigo_libre`.
 - [x] `HitoOperativo` (sustituye a `TuplaOperativa`) con `alertas_calidad`, `calidad_extraccion` y `texto_vectorizable`.
 - [x] Suite adversarial `tests/adversarial_dominio_v2_tests.rs`.
+
+### Fase 10: Esquemas v2 y store transaccional (plan v2 §1 filas 3 y 8, §2.2, §2.3)
+- [x] Esquemas Arrow v2 (`schemas.rs`): tablas `01_documentos_catalogo` … `06_grafo_referencias`, columnas comunes (`centro_id`, `doc_id`, `version_num`, `vigente`, `ingest_id`, `estado_ingesta`) y `VERSION_ESQUEMA = 2`.
+- [x] Filas tipadas `application/dtos/lakehouse_filas.rs` (`LoteIngesta`) y conversión a Arrow `infrastructure/storage/lotes_arrow.rs`.
+- [x] `LakehouseStorePort` v2: `existe_hash`, `escribir_staged`, `confirmar_ingesta`, `revertir_ingesta`, `leer_tabla` (límite explícito, O4) y `verificar_integridad`.
+- [x] `LanceDbStore` transaccional: errores propagados, literales escapados, compensación si la retirada de vigencia falla a medias y `fecha_derogacion` en 01 (H3, H9, O5).
+- [x] `IngestId` validado en el dominio.
+- [x] `DocumentIngestionService`: idempotencia por hash (H5), staged → commit con rollback, IDs versionados (H4) y enums canónicos.
+- [x] Consumidores adaptados: la búsqueda híbrida solo lee `COMMITTED`; `TableLookupService` y `PetgraphEngine` leen columnas v2.
+- [x] Suites `tests/integration_store_v2_transaccional.rs` y `tests/adversarial_store_v2_tests.rs`; los hallazgos H1 (esquemas), H3, H4, H5 y H9 corren sin `#[ignore]`.
+- [ ] `raw_docs/` (copia inmutable del original): se traslada a la Fase 12 (centros en disco).
 
 ---
 
@@ -290,3 +301,110 @@
   * IDs primarios: `id_versionado(&doc_id, version, TipoEntidad::…, idx)`. `DocId` ya no admite comillas, así que las interpolaciones en filtros LanceDB dejan de ser inyectables (H9), aunque conviene seguir escapando.
   * `DocumentoCatalogo` aún no tiene `tipo_documento` ni `VentanaVigencia`: añadirlos junto con el esquema 01 v2.
   * `DocumentIngestionService` sigue usando `DocId::new` sobre el `doc_id` destilado: si Claude devuelve espacios o tildes fallará; la Fase 11 debe pasar a `DocId::desde_codigo_libre` + `separar_revision`.
+
+### Sesión 10 (2026-10-17) — Fase 10: Esquemas v2 y store transaccional
+* **Objetivo:** plan v2 §1 (filas 3 y 8), §2.2 y §2.3 (`LakehouseStorePort`).
+* **Contratos nuevos:**
+  * `application/ports/lakehouse_store.rs`:
+    * Constantes `TABLA_DOCUMENTOS_CATALOGO`, `TABLA_CHUNKS_NORMATIVA`, `TABLA_MATRIZ_OPERATIVA`, `TABLA_CATALOGO_TABLAS`, `TABLA_CELDAS_DOBLE_ENTRADA`, `TABLA_GRAFO_REFERENCIAS`, `TODAS_LAS_TABLAS`, `TABLAS_DEPENDIENTES` y `LIMITE_MAXIMO_LECTURA = 1_000_000`.
+    * Tipos `EstadoIngesta {Staged, Committed}`, `HuellaIngerida`, `ResumenConfirmacion`, `ConsultaTabla` e `InformeIntegridad`.
+    * `ConsultaTabla` se construye con `confirmadas(limite)` y se acota con `solo_vigentes()`, `del_centro()` y `del_documento()`.
+    * `InformeIntegridad` expone `huerfanos`, `ingestas_staged`, `versiones_vigentes_multiples` y `es_integro()`.
+  * Puerto:
+    * Métodos: `inicializar_tablas`, `existe_hash(&CenterId, hash)`, `escribir_staged(&IngestId, Vec<LoteIngesta>)`, `confirmar_ingesta(&IngestId, &DocId)`, `revertir_ingesta(&IngestId)`, `leer_tabla(nombre, &ConsultaTabla)` (solo `COMMITTED`), `verificar_integridad`, `contar_registros` y `listar_tablas`.
+    * Se eliminan `insertar_lote` y `retirar_vigencia_documento`.
+  * `application/dtos/lakehouse_filas.rs`:
+    * Filas: `ClaveDocumental`, `FilaCatalogo`, `FilaChunk`, `FilaHito`, `FilaTabla`, `FilaCelda` y `FilaArista`, agrupadas en `LoteIngesta`.
+    * Auxiliares: `EjeTabla`/`TipoEjeTabla`, `LimitesEje` y `TipoNodoGrafo` (con `destino_de(relación)`).
+    * Las columnas transaccionales no forman parte de la fila: las fija el almacén.
+  * `domain/models/identificadores.rs`: `IngestId` (`[A-Za-z0-9_-]`, ≤ 64).
+  * `infrastructure/storage/lotes_arrow.rs`: `lote_a_record_batch`, `ColumnasTransaccionales` y `fecha_a_date32`.
+  * `LanceDbStore` añade `leer_filas_crudas` (diagnóstico, cualquier estado), `sembrar_filas` (solo fixtures) y `literal_sql`.
+* **Semántica de la confirmación:**
+  * Orden:
+    1. Activa la ingesta en 02-06.
+    2. Retira la vigencia de las filas vigentes del mismo `centro_id` + `doc_id` con otro `ingest_id`, en 02-06 y en 01 (con `fecha_derogacion = fecha_vigor` nueva).
+    3. Activa 01, que actúa como marca de commit.
+  * Si la retirada falla, reactiva la revisión previa antes de devolver el error.
+  * Rechaza la confirmación si:
+    * la ingesta no existe o ya está confirmada;
+    * el `doc_id` es ajeno;
+    * `version_num` es ≤ la máxima confirmada (`VersionConflict`);
+    * la `fecha_vigor` no es posterior a la vigente (`ValidationError`).
+  * `revertir_ingesta` rechaza las ingestas ya confirmadas (01 `COMMITTED`) y es idempotente (`Ok(0)`).
+* **Ingesta (`DocumentIngestionService`):**
+  * Flujo:
+    1. SHA-256 y `existe_hash`, por centro. Si el hash ya existe, devuelve `IngestionReport { ya_ingerido: true }` sin parsear ni destilar.
+    2. Parseo y destilación.
+    3. Filas con `id_versionado`.
+    4. `escribir_staged` y `confirmar_ingesta`.
+  * Cualquier error posterior a la primera escritura llama a `revertir_ingesta`.
+  * `IngestionReport` añade `ingest_id`, `ya_ingerido` y `versiones_derogadas`.
+  * `DocId::new` es estricto: una comilla devuelve `InvalidDocId` antes de escribir nada.
+* **Mapeo mínimo del DTO v1 (lo completa la Fase 11):**
+  * `tipo_documental` → `TipoDocumento::parse`, con respaldo `PROCEDIMIENTO_GENERAL`.
+  * `fecha_emision` ISO → `fecha_vigor`, con respaldo en la fecha de hoy.
+  * `revision = "Rev. NN"`.
+  * Fase → `FaseOperativa::parse`, con respaldo `NO_ESPECIFICADA`.
+  * `criterio_aceptacion` = `accion | parametro | tolerancia | referencia`; ahí queda hoy el código del registro.
+  * `tipo_relacion` → `parse_con_respaldo`.
+  * Destino → `codigo_canonico`.
+  * `valor_resultado_num` se toma del prefijo numérico del resultado.
+  * Quedan vacíos o nulos: `objeto_alcance`, `rol_ejecutor`, `registro_codigo`, `registro_nombre`, `chunk_origen_id`, `vector_hito`, `vector_tabla`, `valor_salida_nombre`, `eje_*_unidad`, `eje_z_filtro_adicional`, `condicion_aplicacion` y los vínculos de los chunks.
+  * `breadcrumb_jerarquia` es solo «código título» de la sección (H7).
+  * Todos los hitos salen con `calidad_extraccion = REVISAR`.
+* **Consumidores:**
+  * `HybridSearchService` lee la 02 v2, filtra `estado_ingesta = 'COMMITTED'` y escapa el centro.
+  * `TableLookupService` y `PetgraphEngine` leen las columnas v2 y saltan las filas no vigentes o no confirmadas (`peso_prelacion` es opcional, 1,0 por defecto).
+  * `LakehouseToolService` no cambia: usa sus propias tablas en memoria (las tools v2 son de la Fase 13).
+* **Tests añadidos:**
+  * Unitarios: esquemas v2 ×5, `IngestId`, filas, `literal_sql`, hash, compensación con `CAST(NULL AS DATE)` y mapeos de ingesta ×3.
+  * `tests/integration_store_v2_transaccional.rs` (8):
+    * staged invisible hasta el commit;
+    * Rev.03 → Rev.04 en las 6 tablas, con `fecha_derogacion`;
+    * IDs únicos entre revisiones;
+    * rollback ante un fallo inyectado en la 05;
+    * idempotencia por hash, con contador de llamadas al LLM;
+    * grafo de la v3 retirado;
+    * `verificar_integridad` con huérfanos, STAGED y versiones múltiples;
+    * lectura de más de 10 filas.
+  * `tests/adversarial_store_v2_tests.rs` (9):
+    * ingest_id malicioso y doc_id con comilla;
+    * confirmación doble y rollback de un ingest_id inexistente;
+    * lotes vacíos o mezclados;
+    * regresión de versión o de fecha y doc_id ajeno;
+    * límites frontera y tablas desconocidas;
+    * confirmaciones concurrentes.
+  * Fixtures compartidas en `tests/comun_store_v2/`.
+  * Adaptados a v2: `integration_lancedb_store`, `adversarial_storage_tests`, `integration_hybrid_search` (+1 test de STAGED invisible), `adversarial_embeddings_tests`, `integration_ingestion_pipeline`, `adversarial_ingestion_tests`, `integration_query_engine` y `acceptance_e2e_etapa1_ingesta`.
+* **Etapa 1:**
+  * Pasan sin `#[ignore]`:
+    * `hallazgo_esquemas_cumplen_la_especificacion` (H1);
+    * `hallazgo_rev04_retira_vigencia_de_las_aristas_del_grafo` (H3);
+    * `hallazgo_ids_no_colisionan_entre_revisiones` (H4);
+    * `hallazgo_reingesta_del_mismo_documento_no_duplica_filas` (H5);
+    * `hallazgo_doc_id_con_comilla_se_rechaza_sin_escribir_nada` (H9, reescrito: el doc_id con comilla se rechaza).
+  * Siguen ignorados H7 y H8.
+  * Reales ejecutados (`-- --ignored real_`):
+    * Destilador con la configuración por defecto: OK (42,6 s, 5 tuplas, 6 aristas).
+    * FastEmbed: OK (1024 dims).
+    * E2E Rev.03 → Rev.04 con Claude + FastEmbed + LanceDB: las dos ingestas terminan bien (`versiones_derogadas = [3]`), la vigencia es correcta en las 6 tablas, los IDs son únicos y aparece `DEROGA_A`.
+    * Fallan solo `grafo_registros` (Claude no emite `EXIGE_LLENAR_REGISTRO`) y `custodia_responsable_sin_ejecutor` (mezcla ejecutor y firmante). Ambas pertenecen al hallazgo H2 (Fase 11).
+* **Verificación:** 214 tests pasando + 7 ignorados; `cargo clippy --all-targets -- -D warnings` sin avisos; `cargo fmt --check` OK.
+* **Desviaciones del plan:**
+  * `escribir_staged` recibe filas tipadas (`LoteIngesta`) en lugar de `RecordBatch`. Así el caso de uso deja de construir Arrow y de depender de `infrastructure::storage::schemas` (solo lo importan los tests unitarios).
+  * `existe_hash` recibe también el centro: la idempotencia y la retirada de vigencia son por centro (O5).
+  * `raw_docs/` y `center_manifest.json` con `schema_version` pasan a la Fase 12 (centros en disco). Aquí solo existe la constante `VERSION_ESQUEMA = 2`.
+  * TDD: los tests de esquemas e `IngestId` se vieron en rojo antes de implementar. Las suites de integración y adversarial del store se escribieron justo después de la implementación; su rojo previo eran los `hallazgo_*` de la Etapa 1.
+  * No hay migración de datos v1: un centro creado con los nombres antiguos (`01_doc_catalog`…) no se lee, y `inicializar_tablas` crea las tablas v2 al lado.
+  * LanceDB no tiene transacciones entre tablas:
+    * Durante la confirmación hay una ventana breve con dos versiones vigentes en 02-06. Hay un único escritor por almacén, serializado con un mutex.
+    * Si el proceso muere a mitad, `verificar_integridad` lo detecta como STAGED colgados o versiones vigentes múltiples.
+* **Notas para la Fase 11:**
+  * Sustituir el DTO de destilación por el v2 y rellenar, en `document_ingestion_service.rs`, las columnas hoy vacías listadas arriba. Están en `filas_hitos`, `fila_tabla`, `fila_celda` y `filas_chunks`.
+  * Calcular `calidad_extraccion` con `HitoOperativo::new(...).calidad_extraccion()` y `vector_hito` con `texto_vectorizable()`.
+  * Construir `breadcrumb_jerarquia` y `condicion_aplicacion` con `PilaEncabezados` (H7) y vectorizar `breadcrumb + condición + texto`.
+  * Pasar a `DocId::desde_codigo_libre` + `separar_revision` sobre el doc_id destilado: hoy un espacio o una tilde abortan la ingesta con `InvalidDocId`.
+  * La fecha de vigor sale de `fecha_emision`; si el DTO v2 trae `fecha_vigor`, usar esa. Una revisión nueva exige `version_num` mayor y `fecha_vigor` posterior a la vigente.
+  * Los fallos reales pendientes de H2 son `grafo_registros` y `custodia_responsable_sin_ejecutor`.
+

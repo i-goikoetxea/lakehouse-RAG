@@ -18,8 +18,9 @@
 //!   Variables opcionales: `ETAPA1_CLAUDE_TIMEOUT_S` (por defecto 600) y `ETAPA1_CLAUDE_MODEL` (por defecto `sonnet`).
 //!   Los paquetes JSON destilados por Claude se vuelcan en `target/validacion_etapa1/`.
 //!
-//! Los tests `hallazgo_*` describen el comportamiento correcto y están en rojo a propósito:
-//! llevan `#[ignore]` para no romper la suite normal.
+//! Los tests `hallazgo_*` describen el comportamiento correcto. Los que la Fase 10 arregló
+//! (H1 esquemas, H3, H4, H5 y H9) ya corren en la suite normal; los pendientes (H7, H8) siguen
+//! con `#[ignore]` y en rojo a propósito.
 
 use std::collections::BTreeSet;
 use std::path::PathBuf;
@@ -37,11 +38,13 @@ use lakehouse_rag::application::dtos::ingestion::{
     DistilledCatalog, DistilledCell, DistilledDocumentPackage, DistilledDoubleEntryTable,
     DistilledOperationalTuple, DistilledReferenceEdge, ParsedDocument,
 };
+use lakehouse_rag::application::dtos::lakehouse_filas::LoteIngesta;
 use lakehouse_rag::application::ports::document_parser::DocumentParserPort;
 use lakehouse_rag::application::ports::embedding_engine::EmbeddingEnginePort;
 use lakehouse_rag::application::ports::lakehouse_store::{
-    LakehouseStorePort, TABLA_DOC_CATALOG, TABLA_DOC_CHUNKS, TABLA_DOUBLE_ENTRY_CELLS,
-    TABLA_DOUBLE_ENTRY_TABLES, TABLA_OPERATIONAL_MATRIX, TABLA_REFERENCE_GRAPH, TODAS_LAS_TABLAS,
+    ConsultaTabla, HuellaIngerida, InformeIntegridad, LakehouseStorePort, ResumenConfirmacion,
+    TABLA_CATALOGO_TABLAS, TABLA_CELDAS_DOBLE_ENTRADA, TABLA_CHUNKS_NORMATIVA,
+    TABLA_DOCUMENTOS_CATALOGO, TABLA_GRAFO_REFERENCIAS, TABLA_MATRIZ_OPERATIVA, TODAS_LAS_TABLAS,
 };
 use lakehouse_rag::application::ports::llm_distiller::LlmDistillerPort;
 use lakehouse_rag::application::use_cases::document_ingestion_service::{
@@ -50,6 +53,8 @@ use lakehouse_rag::application::use_cases::document_ingestion_service::{
 use lakehouse_rag::domain::errors::DomainError;
 use lakehouse_rag::domain::models::center::CenterId;
 use lakehouse_rag::domain::models::document::DocId;
+use lakehouse_rag::domain::models::identificadores::IngestId;
+use lakehouse_rag::domain::models::reference_graph::TipoRelacionNormativa;
 use lakehouse_rag::infrastructure::embeddings::fastembed_engine::FastEmbedEngine;
 use lakehouse_rag::infrastructure::embeddings::mock_engine::MockEmbeddingEngine;
 use lakehouse_rag::infrastructure::llm::{
@@ -58,7 +63,8 @@ use lakehouse_rag::infrastructure::llm::{
 use lakehouse_rag::infrastructure::parsers::markdown_parser::MarkdownParser;
 use lakehouse_rag::infrastructure::storage::lancedb_store::LanceDbStore;
 use lakehouse_rag::infrastructure::storage::schemas::{
-    DIMENSION_EMBEDDINGS, schema_doc_catalog, schema_double_entry_tables, schema_operational_matrix,
+    DIMENSION_EMBEDDINGS, schema_catalogo_tablas, schema_documentos_catalogo,
+    schema_matriz_operativa,
 };
 use lancedb::query::{ExecutableQuery, QueryBase};
 
@@ -73,24 +79,13 @@ const CRUCE_CE_PORCENTAJE: f64 = 0.42;
 
 const LIMITE_LECTURA_FILAS: usize = 100_000;
 
-/// Vocabulario de `tipo_relacion` de la Tabla 6 (§4 de la especificación).
-const RELACIONES_SPEC: [&str; 5] = [
-    "EXIGE_LLENAR_REGISTRO",
-    "DEROGA_A",
-    "MODIFICA_APARTADO",
-    "REMITE_A_TABLA",
-    "SUBORDINADO_A_NORMA",
-];
+/// Vocabulario de `tipo_relacion` de la Tabla 6 (§4 de la especificación + `REFERENCIA_A` del plan v2).
+const RELACIONES_SPEC: [&str; 6] = TipoRelacionNormativa::VALORES_CANONICOS;
 
 /// Comprobaciones que fallan por hallazgos ya documentados (ver tests `hallazgo_*`).
 /// La variante con mocks las excluye para no romper la suite normal.
-const HALLAZGOS_CONOCIDOS: [&str; 5] = [
-    "esquema_01_campos_spec",
-    "esquema_03_campos_spec",
-    "esquema_vectores_hito_tabla",
-    "vigencia_06_reference_graph",
-    "ids_unicos_entre_revisiones",
-];
+/// Fase 10: H1 (esquemas), H3 (vigencia del grafo) y H4 (IDs) ya no fallan.
+const HALLAZGOS_CONOCIDOS: [&str; 0] = [];
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Cronometraje por puerto (decoradores que miden cada paso del pipeline real)
@@ -201,27 +196,58 @@ impl LakehouseStorePort for AlmacenCronometrado {
         self.interno.inicializar_tablas().await
     }
 
-    async fn insertar_lote(
+    async fn existe_hash(
         &self,
-        nombre_tabla: &str,
-        lote: RecordBatch,
-    ) -> Result<(), DomainError> {
-        let filas = lote.num_rows();
+        centro_id: &CenterId,
+        hash_sha256: &str,
+    ) -> Result<Option<HuellaIngerida>, DomainError> {
         let inicio = Instant::now();
-        let resultado = self.interno.insertar_lote(nombre_tabla, lote).await;
+        let resultado = self.interno.existe_hash(centro_id, hash_sha256).await;
+        self.cronometro
+            .registrar("0. comprobación de hash", inicio.elapsed());
+        resultado
+    }
+
+    async fn escribir_staged(
+        &self,
+        ingest_id: &IngestId,
+        lotes: Vec<LoteIngesta>,
+    ) -> Result<usize, DomainError> {
+        let inicio = Instant::now();
+        let resultado = self.interno.escribir_staged(ingest_id, lotes).await;
+        self.cronometro
+            .registrar("4. escritura STAGED (6 tablas)", inicio.elapsed());
+        resultado
+    }
+
+    async fn confirmar_ingesta(
+        &self,
+        ingest_id: &IngestId,
+        doc_id: &DocId,
+    ) -> Result<ResumenConfirmacion, DomainError> {
+        let inicio = Instant::now();
+        let resultado = self.interno.confirmar_ingesta(ingest_id, doc_id).await;
         self.cronometro.registrar(
-            format!("4. escritura {nombre_tabla} ({filas} filas)"),
+            "5. commit (activar y retirar vigencia previa)",
             inicio.elapsed(),
         );
         resultado
     }
 
-    async fn retirar_vigencia_documento(&self, doc_id: &DocId) -> Result<u64, DomainError> {
-        let inicio = Instant::now();
-        let resultado = self.interno.retirar_vigencia_documento(doc_id).await;
-        self.cronometro
-            .registrar("4. retirar vigencia previa", inicio.elapsed());
-        resultado
+    async fn revertir_ingesta(&self, ingest_id: &IngestId) -> Result<u64, DomainError> {
+        self.interno.revertir_ingesta(ingest_id).await
+    }
+
+    async fn leer_tabla(
+        &self,
+        nombre_tabla: &str,
+        consulta: &ConsultaTabla,
+    ) -> Result<Vec<RecordBatch>, DomainError> {
+        self.interno.leer_tabla(nombre_tabla, consulta).await
+    }
+
+    async fn verificar_integridad(&self) -> Result<InformeIntegridad, DomainError> {
+        self.interno.verificar_integridad().await
     }
 
     async fn contar_registros(&self, nombre_tabla: &str) -> Result<usize, DomainError> {
@@ -449,16 +475,16 @@ struct CeldaLeida {
 }
 
 fn leer_celdas(lote: &RecordBatch) -> Vec<CeldaLeida> {
-    let x_min = columna_f64(lote, "rango_x_min");
-    let x_max = columna_f64(lote, "rango_x_max");
-    let x_inc_min = columna_bool(lote, "x_inclusivo_min");
-    let x_inc_max = columna_bool(lote, "x_inclusivo_max");
-    let y_min = columna_f64(lote, "rango_y_min");
-    let y_max = columna_f64(lote, "rango_y_max");
-    let y_inc_min = columna_bool(lote, "y_inclusivo_min");
-    let y_inc_max = columna_bool(lote, "y_inclusivo_max");
-    let valores = columna_texto(lote, "valor_resultado");
-    let notas = columna_texto(lote, "notas_especificas");
+    let x_min = columna_f64(lote, "eje_x_min");
+    let x_max = columna_f64(lote, "eje_x_max");
+    let x_inc_min = columna_bool(lote, "eje_x_min_inclusivo");
+    let x_inc_max = columna_bool(lote, "eje_x_max_inclusivo");
+    let y_min = columna_f64(lote, "eje_y_min");
+    let y_max = columna_f64(lote, "eje_y_max");
+    let y_inc_min = columna_bool(lote, "eje_y_min_inclusivo");
+    let y_inc_max = columna_bool(lote, "eje_y_max_inclusivo");
+    let valores = columna_texto(lote, "valor_resultado_texto");
+    let notas = columna_texto(lote, "nota_pie_condicion");
 
     (0..lote.num_rows())
         .map(|i| CeldaLeida {
@@ -502,7 +528,7 @@ fn buscar_celda_cruce(celdas: &[CeldaLeida]) -> Vec<&CeldaLeida> {
 // ─────────────────────────────────────────────────────────────────────────────
 
 fn verificar_esquemas_contra_spec(informe: &mut InformeVerificacion) {
-    let matriz = schema_operational_matrix();
+    let matriz = schema_matriz_operativa();
     let faltantes_03: Vec<&str> = [
         "hito_id",
         "orden_secuencia",
@@ -526,12 +552,12 @@ fn verificar_esquemas_contra_spec(informe: &mut InformeVerificacion) {
     } else {
         informe.anotar_inexistente(
             "esquema_03_campos_spec",
-            format!("faltan en 03_operational_matrix: {faltantes_03:?}"),
+            format!("faltan en 03_matriz_operativa: {faltantes_03:?}"),
         );
     }
 
     let tiene_vector_hito = matriz.field_with_name("vector_hito").is_ok();
-    let tiene_vector_tabla = schema_double_entry_tables()
+    let tiene_vector_tabla = schema_catalogo_tablas()
         .field_with_name("vector_tabla")
         .is_ok();
     if tiene_vector_hito && tiene_vector_tabla {
@@ -549,7 +575,7 @@ fn verificar_esquemas_contra_spec(informe: &mut InformeVerificacion) {
         );
     }
 
-    let catalogo = schema_doc_catalog();
+    let catalogo = schema_documentos_catalogo();
     let faltantes_01: Vec<&str> = ["revision", "fecha_vigor", "tipo_documento"]
         .into_iter()
         .filter(|campo| catalogo.field_with_name(campo).is_err())
@@ -559,7 +585,7 @@ fn verificar_esquemas_contra_spec(informe: &mut InformeVerificacion) {
     } else {
         informe.anotar_inexistente(
             "esquema_01_campos_spec",
-            format!("faltan en 01_doc_catalog: {faltantes_01:?} (hay version Int32 y fecha_emision Utf8)"),
+            format!("faltan en 01_documentos_catalogo: {faltantes_01:?}"),
         );
     }
 }
@@ -582,30 +608,29 @@ async fn verificar_conteos(
     reporte: &IngestionReport,
     informe: &mut InformeVerificacion,
 ) {
-    let filtro = format!("doc_id = '{}'", reporte.doc_id);
-    let filtro_grafo = format!("doc_origen_id = '{}'", reporte.doc_id);
+    let filtro = format!("doc_id = '{}' AND vigente = true", reporte.doc_id);
     let esperados = [
-        (TABLA_DOC_CATALOG, 1, filtro.as_str()),
-        (TABLA_DOC_CHUNKS, reporte.total_chunks, filtro.as_str()),
+        (TABLA_DOCUMENTOS_CATALOGO, 1, filtro.as_str()),
         (
-            TABLA_OPERATIONAL_MATRIX,
+            TABLA_CHUNKS_NORMATIVA,
+            reporte.total_chunks,
+            filtro.as_str(),
+        ),
+        (
+            TABLA_MATRIZ_OPERATIVA,
             reporte.total_tuplas,
             filtro.as_str(),
         ),
+        (TABLA_CATALOGO_TABLAS, reporte.total_tablas, filtro.as_str()),
         (
-            TABLA_DOUBLE_ENTRY_TABLES,
-            reporte.total_tablas,
-            filtro.as_str(),
-        ),
-        (
-            TABLA_DOUBLE_ENTRY_CELLS,
+            TABLA_CELDAS_DOBLE_ENTRADA,
             reporte.total_celdas,
             filtro.as_str(),
         ),
         (
-            TABLA_REFERENCE_GRAPH,
+            TABLA_GRAFO_REFERENCIAS,
             reporte.total_aristas,
-            filtro_grafo.as_str(),
+            filtro.as_str(),
         ),
     ];
     let mut detalle = Vec::new();
@@ -626,7 +651,7 @@ async fn verificar_matriz_anti_fusion(
 ) {
     let lote = leer_filas(
         store,
-        TABLA_OPERATIONAL_MATRIX,
+        TABLA_MATRIZ_OPERATIVA,
         Some(&format!("doc_id = '{doc_id}' AND vigente = true")),
     )
     .await;
@@ -711,7 +736,7 @@ async fn verificar_matriz_anti_fusion(
         "custodia_registro",
         registro_presente,
         format!(
-            "{registro_custodia_esperado} en fila CUSTODIA={registro_presente} (sin columna registro_codigo; se busca en cualquier columna)"
+            "{registro_custodia_esperado} en fila CUSTODIA={registro_presente} (registro_codigo llega en la Fase 11; se busca en cualquier columna)"
         ),
     );
 }
@@ -724,7 +749,7 @@ async fn verificar_celdas_doble_entrada(
 ) {
     let lote = leer_filas(
         store,
-        TABLA_DOUBLE_ENTRY_CELLS,
+        TABLA_CELDAS_DOBLE_ENTRADA,
         Some(&format!("doc_id = '{doc_id}' AND vigente = true")),
     )
     .await;
@@ -790,11 +815,11 @@ async fn verificar_celdas_doble_entrada(
 async fn verificar_grafo(store: &LanceDbStore, doc_id: &str, informe: &mut InformeVerificacion) {
     let lote = leer_filas(
         store,
-        TABLA_REFERENCE_GRAPH,
-        Some(&format!("doc_origen_id = '{doc_id}'")),
+        TABLA_GRAFO_REFERENCIAS,
+        Some(&format!("doc_id = '{doc_id}' AND vigente = true")),
     )
     .await;
-    let destinos: Vec<String> = columna_texto(&lote, "doc_destino_id")
+    let destinos: Vec<String> = columna_texto(&lote, "destino_id")
         .into_iter()
         .flatten()
         .collect();
@@ -841,8 +866,8 @@ async fn verificar_derogacion(
 ) {
     let derogaciones = contar_filas(
         store,
-        TABLA_REFERENCE_GRAPH,
-        &format!("doc_origen_id = '{doc_id}' AND tipo_relacion = 'DEROGA_A' AND vigente = true"),
+        TABLA_GRAFO_REFERENCIAS,
+        &format!("doc_id = '{doc_id}' AND tipo_relacion = 'DEROGA_A' AND vigente = true"),
     )
     .await;
     informe.anotar(
@@ -860,7 +885,7 @@ async fn verificar_vectores(
 ) {
     let lote = leer_filas(
         store,
-        TABLA_DOC_CHUNKS,
+        TABLA_CHUNKS_NORMATIVA,
         Some(&format!("doc_id = '{doc_id}' AND vigente = true")),
     )
     .await;
@@ -907,14 +932,14 @@ async fn verificar_versionado(
 
     let catalogo = leer_filas(
         store,
-        TABLA_DOC_CATALOG,
+        TABLA_DOCUMENTOS_CATALOGO,
         Some(&format!("doc_id = '{doc_id}'")),
     )
     .await;
     let versiones = catalogo
-        .column_by_name("version")
+        .column_by_name("version_num")
         .and_then(|c| c.as_any().downcast_ref::<Int32Array>().cloned())
-        .expect("Columna version");
+        .expect("Columna version_num");
     let vigentes = columna_bool(&catalogo, "vigente");
     let pares: Vec<(i32, bool)> = (0..catalogo.num_rows())
         .map(|i| (versiones.value(i), vigentes[i]))
@@ -924,46 +949,45 @@ async fn verificar_versionado(
             .iter()
             .all(|(ver, vig)| *vig == (*ver == reporte_nuevo.version));
     informe.anotar(
-        "vigencia_01_doc_catalog",
+        "vigencia_01_documentos_catalogo",
         solo_ultima_vigente && reporte_nuevo.version > reporte_previo.version,
         format!("(version, vigente)={pares:?}"),
     );
 
     let filtro_doc = format!("doc_id = '{doc_id}'");
-    let filtro_grafo = format!("doc_origen_id = '{doc_id}'");
     let casos: [(&'static str, &str, &str, usize, usize); 5] = [
         (
-            "vigencia_02_doc_chunks",
-            TABLA_DOC_CHUNKS,
+            "vigencia_02_chunks_normativa",
+            TABLA_CHUNKS_NORMATIVA,
             &filtro_doc,
             reporte_previo.total_chunks,
             reporte_nuevo.total_chunks,
         ),
         (
-            "vigencia_03_operational_matrix",
-            TABLA_OPERATIONAL_MATRIX,
+            "vigencia_03_matriz_operativa",
+            TABLA_MATRIZ_OPERATIVA,
             &filtro_doc,
             reporte_previo.total_tuplas,
             reporte_nuevo.total_tuplas,
         ),
         (
-            "vigencia_04_double_entry_tables",
-            TABLA_DOUBLE_ENTRY_TABLES,
+            "vigencia_04_catalogo_tablas",
+            TABLA_CATALOGO_TABLAS,
             &filtro_doc,
             reporte_previo.total_tablas,
             reporte_nuevo.total_tablas,
         ),
         (
-            "vigencia_05_double_entry_cells",
-            TABLA_DOUBLE_ENTRY_CELLS,
+            "vigencia_05_celdas_doble_entrada",
+            TABLA_CELDAS_DOBLE_ENTRADA,
             &filtro_doc,
             reporte_previo.total_celdas,
             reporte_nuevo.total_celdas,
         ),
         (
-            "vigencia_06_reference_graph",
-            TABLA_REFERENCE_GRAPH,
-            &filtro_grafo,
+            "vigencia_06_grafo_referencias",
+            TABLA_GRAFO_REFERENCIAS,
+            &filtro_doc,
             reporte_previo.total_aristas,
             reporte_nuevo.total_aristas,
         ),
@@ -978,7 +1002,7 @@ async fn verificar_versionado(
         );
     }
 
-    let chunks = leer_filas(store, TABLA_DOC_CHUNKS, Some(&filtro_doc)).await;
+    let chunks = leer_filas(store, TABLA_CHUNKS_NORMATIVA, Some(&filtro_doc)).await;
     let ids = columna_texto(&chunks, "chunk_id");
     let unicos: BTreeSet<&Option<String>> = ids.iter().collect();
     informe.anotar(
@@ -1167,7 +1191,7 @@ fn tupla_oro(
         parametro_control: "Criterio de aceptación de la fase".to_string(),
         tolerancia_criterio: "Según PO-ALM-03".to_string(),
         condicion_aplicacion: "Siempre".to_string(),
-        // El DTO no tiene `registro_codigo`: el código del registro solo cabe aquí.
+        // El DTO v1 no tiene `registro_codigo`: el código del registro solo cabe aquí (Fase 11).
         referencia_normativa: registro.to_string(),
     }
 }
@@ -1508,8 +1532,8 @@ async fn real_e2e_ingesta_rev03_y_rev04_claude_fastembed_lancedb() {
 // Hallazgos: describen el comportamiento correcto y están en rojo hasta que se arreglen
 // ─────────────────────────────────────────────────────────────────────────────
 
+/// H3 arreglado en la Fase 10: la 06 tiene `doc_id` y la confirmación retira la vigencia en las 6 tablas.
 #[tokio::test]
-#[ignore = "HALLAZGO H3: retirar_vigencia_documento filtra por doc_id y 06_reference_graph no tiene esa columna"]
 async fn hallazgo_rev04_retira_vigencia_de_las_aristas_del_grafo() {
     let pipeline = montar_pipeline(distiller_oro(), embeddings_mock(), None).await;
     ingerir_cronometrado(&pipeline, FIXTURE_REV03)
@@ -1521,8 +1545,8 @@ async fn hallazgo_rev04_retira_vigencia_de_las_aristas_del_grafo() {
 
     let aristas_rev03_vigentes = contar_filas(
         &pipeline.store,
-        TABLA_REFERENCE_GRAPH,
-        &format!("doc_origen_id = '{DOC_ID_ESPERADO}' AND vigente = true"),
+        TABLA_GRAFO_REFERENCIAS,
+        &format!("doc_id = '{DOC_ID_ESPERADO}' AND vigente = true"),
     )
     .await;
     // Rev. 03 aporta 7 aristas y Rev. 04 aporta 8: solo deberían quedar vigentes las 8 nuevas.
@@ -1532,8 +1556,8 @@ async fn hallazgo_rev04_retira_vigencia_de_las_aristas_del_grafo() {
     );
 }
 
+/// H4 arreglado en la Fase 10: IDs versionados (`PO-ALM-03@v3-HIT-0000`).
 #[tokio::test]
-#[ignore = "HALLAZGO H4: los IDs (chunk_id, tupla_id, tabla_id, celda_id, arista_id) se repiten entre revisiones"]
 async fn hallazgo_ids_no_colisionan_entre_revisiones() {
     let pipeline = montar_pipeline(distiller_oro(), embeddings_mock(), None).await;
     ingerir_cronometrado(&pipeline, FIXTURE_REV03)
@@ -1543,32 +1567,49 @@ async fn hallazgo_ids_no_colisionan_entre_revisiones() {
         .await
         .unwrap();
 
-    let tuplas = leer_filas(&pipeline.store, TABLA_OPERATIONAL_MATRIX, None).await;
-    let ids = columna_texto(&tuplas, "tupla_id");
-    let distintos: BTreeSet<&Option<String>> = ids.iter().collect();
-    assert_eq!(distintos.len(), ids.len(), "tupla_id duplicados: {ids:?}");
+    let claves_primarias = [
+        (TABLA_CHUNKS_NORMATIVA, "chunk_id"),
+        (TABLA_MATRIZ_OPERATIVA, "hito_id"),
+        (TABLA_CATALOGO_TABLAS, "tabla_id"),
+        (TABLA_CELDAS_DOBLE_ENTRADA, "celda_id"),
+        (TABLA_GRAFO_REFERENCIAS, "edge_id"),
+    ];
+    for (tabla, columna) in claves_primarias {
+        let lote = leer_filas(&pipeline.store, tabla, None).await;
+        let ids = columna_texto(&lote, columna);
+        let distintos: BTreeSet<&Option<String>> = ids.iter().collect();
+        assert!(!ids.is_empty(), "{tabla} vacía");
+        assert_eq!(distintos.len(), ids.len(), "{columna} duplicados: {ids:?}");
+    }
 }
 
+/// H5 arreglado en la Fase 10: `existe_hash` antes de destilar.
 #[tokio::test]
-#[ignore = "HALLAZGO H5: hash_sha256 se calcula pero no se usa para evitar re-ingestas duplicadas"]
 async fn hallazgo_reingesta_del_mismo_documento_no_duplica_filas() {
     let pipeline = montar_pipeline(distiller_oro(), embeddings_mock(), None).await;
     let primero = ingerir_cronometrado(&pipeline, FIXTURE_REV03)
         .await
         .unwrap();
-    let _ = ingerir_cronometrado(&pipeline, FIXTURE_REV03).await;
+    let segundo = ingerir_cronometrado(&pipeline, FIXTURE_REV03)
+        .await
+        .unwrap();
+    assert!(
+        segundo.ya_ingerido,
+        "La re-ingesta debería devolver «ya ingerido»"
+    );
+    assert_eq!(segundo.ingest_id, primero.ingest_id);
 
     let filas_catalogo = contar_filas(
         &pipeline.store,
-        TABLA_DOC_CATALOG,
+        TABLA_DOCUMENTOS_CATALOGO,
         &format!("hash_sha256 = '{}'", primero.sha256),
     )
     .await;
     assert_eq!(filas_catalogo, 1, "El mismo hash se ingirió dos veces");
 }
 
+/// H1 (esquemas) arreglado en la Fase 10: las 6 tablas siguen §4.
 #[tokio::test]
-#[ignore = "HALLAZGO H6: los esquemas Arrow no siguen §4 (sin rol_ejecutor, registro_codigo, vector_hito, ...)"]
 async fn hallazgo_esquemas_cumplen_la_especificacion() {
     let mut informe = InformeVerificacion::default();
     verificar_esquemas_contra_spec(&mut informe);
@@ -1577,15 +1618,15 @@ async fn hallazgo_esquemas_cumplen_la_especificacion() {
 }
 
 #[tokio::test]
-#[ignore = "HALLAZGO H7: el chunk no guarda breadcrumb H1 > H2 > H3, solo el título de su sección"]
+#[ignore = "HALLAZGO H7 (Fase 11): breadcrumb_jerarquia guarda solo el título de su sección, no H1 > H2 > H3"]
 async fn hallazgo_chunks_guardan_breadcrumb_jerarquico() {
     let pipeline = montar_pipeline(distiller_oro(), embeddings_mock(), None).await;
     ingerir_cronometrado(&pipeline, FIXTURE_REV03)
         .await
         .unwrap();
 
-    let chunks = leer_filas(&pipeline.store, TABLA_DOC_CHUNKS, None).await;
-    let secciones: Vec<String> = columna_texto(&chunks, "seccion")
+    let chunks = leer_filas(&pipeline.store, TABLA_CHUNKS_NORMATIVA, None).await;
+    let secciones: Vec<String> = columna_texto(&chunks, "breadcrumb_jerarquia")
         .into_iter()
         .flatten()
         .collect();
@@ -1613,30 +1654,22 @@ async fn hallazgo_parser_captura_notas_al_pie_de_la_tabla() {
     );
 }
 
+/// H9 arreglado en las Fases 9 y 10: `DocId` con charset estricto rechaza la comilla antes de
+/// escribir nada, y además todos los predicados del almacén escapan sus literales.
 #[tokio::test]
-#[ignore = "HALLAZGO H9: retirar_vigencia_documento interpola doc_id en SQL sin escapar y descarta el error"]
-async fn hallazgo_doc_id_con_comilla_retira_vigencia() {
+async fn hallazgo_doc_id_con_comilla_se_rechaza_sin_escribir_nada() {
     let distiller = MockDistiller::new();
     let mut rev_a = paquete_oro(3, "FOR-ALM-02", "100");
     rev_a.catalogo.doc_id = "PO-ALM-03'B".to_string();
-    let mut rev_b = paquete_oro(4, "FOR-ALM-05", "125");
-    rev_b.catalogo.doc_id = "PO-ALM-03'B".to_string();
     distiller.registrar_respuesta(FIXTURE_REV03, rev_a);
-    distiller.registrar_respuesta(FIXTURE_REV04, rev_b);
 
     let pipeline = montar_pipeline(Arc::new(distiller), embeddings_mock(), None).await;
-    ingerir_cronometrado(&pipeline, FIXTURE_REV03)
+    let error = ingerir_cronometrado(&pipeline, FIXTURE_REV03)
         .await
-        .unwrap();
-    ingerir_cronometrado(&pipeline, FIXTURE_REV04)
-        .await
-        .unwrap();
-
-    let vigentes = contar_filas(
-        &pipeline.store,
-        TABLA_DOC_CATALOG,
-        "doc_id = 'PO-ALM-03''B' AND vigente = true",
-    )
-    .await;
-    assert_eq!(vigentes, 1, "Ambas revisiones quedaron vigentes");
+        .unwrap_err();
+    assert!(matches!(error, DomainError::InvalidDocId(_)), "{error:?}");
+    for tabla in TODAS_LAS_TABLAS {
+        let filas = pipeline.store.contar_registros(tabla).await.unwrap();
+        assert_eq!(filas, 0, "{tabla} tiene filas tras rechazar el doc_id");
+    }
 }

@@ -2,44 +2,47 @@
 
 use std::sync::Arc;
 
-use arrow_array::{BooleanArray, FixedSizeListArray, Float32Array, RecordBatch, StringArray};
-use arrow_schema::{DataType, Field};
 use tempfile::tempdir;
 
+use lakehouse_rag::application::dtos::lakehouse_filas::{ClaveDocumental, FilaChunk, LoteIngesta};
 use lakehouse_rag::application::ports::hybrid_search::{HybridSearchParams, HybridSearchPort};
-use lakehouse_rag::application::ports::lakehouse_store::{LakehouseStorePort, TABLA_DOC_CHUNKS};
+use lakehouse_rag::application::ports::lakehouse_store::{EstadoIngesta, LakehouseStorePort};
 use lakehouse_rag::application::use_cases::hybrid_search_service::HybridSearchService;
 use lakehouse_rag::domain::errors::DomainError;
+use lakehouse_rag::domain::models::center::CenterId;
+use lakehouse_rag::domain::models::document::{DocId, TipoDocumento};
+use lakehouse_rag::domain::models::identificadores::IngestId;
 use lakehouse_rag::infrastructure::embeddings::mock_engine::MockEmbeddingEngine;
 use lakehouse_rag::infrastructure::storage::lancedb_store::LanceDbStore;
-use lakehouse_rag::infrastructure::storage::schemas::{DIMENSION_EMBEDDINGS, schema_doc_chunks};
+use lakehouse_rag::infrastructure::storage::lotes_arrow::ColumnasTransaccionales;
+use lakehouse_rag::infrastructure::storage::schemas::DIMENSION_EMBEDDINGS;
 
-fn crear_lote_minimo(centro: &str) -> RecordBatch {
-    let item_field = Arc::new(Field::new("item", DataType::Float32, true));
-    let valores_vector = Arc::new(Float32Array::from(vec![
-        0.05f32;
-        DIMENSION_EMBEDDINGS as usize
-    ]));
-    let array_vector = Arc::new(FixedSizeListArray::new(
-        item_field,
-        DIMENSION_EMBEDDINGS,
-        valores_vector,
-        None,
-    ));
-
-    RecordBatch::try_new(
-        schema_doc_chunks(),
-        vec![
-            Arc::new(StringArray::from(vec!["CHK-ADV-01"])),
-            Arc::new(StringArray::from(vec!["DOC-ADV-01"])),
-            Arc::new(StringArray::from(vec![centro])),
-            Arc::new(StringArray::from(vec!["Sección Segura"])),
-            Arc::new(StringArray::from(vec!["Contenido técnico verificado"])),
-            array_vector,
-            Arc::new(BooleanArray::from(vec![true])),
-        ],
-    )
-    .expect("RecordBatch mínimo")
+/// Siembra un chunk mínimo vigente y COMMITTED para el centro indicado
+async fn sembrar_chunk_minimo(store: &LanceDbStore, centro: &str) {
+    let fila = FilaChunk {
+        clave: ClaveDocumental {
+            centro_id: CenterId::new(centro).expect("centro_id válido"),
+            doc_id: DocId::new("DOC-ADV-01").expect("doc_id válido"),
+            version_num: 1,
+        },
+        chunk_id: "CHK-ADV-01".to_string(),
+        nivel_prelacion: TipoDocumento::ProcedimientoObra.nivel_prelacion(),
+        breadcrumb_jerarquia: "Sección Segura".to_string(),
+        condicion_aplicacion: None,
+        texto_contenido: "Contenido técnico verificado".to_string(),
+        tablas_vinculadas: Vec::new(),
+        hitos_vinculados: Vec::new(),
+        vector: vec![0.05f32; DIMENSION_EMBEDDINGS as usize],
+    };
+    let transaccion = ColumnasTransaccionales {
+        ingest_id: IngestId::new("ingesta-adversarial").expect("ingest_id válido"),
+        estado: EstadoIngesta::Committed,
+        vigente: true,
+    };
+    store
+        .sembrar_filas(&LoteIngesta::Chunks(vec![fila]), &transaccion)
+        .await
+        .expect("Sembrar chunk mínimo");
 }
 
 #[tokio::test]
@@ -126,21 +129,17 @@ async fn test_adv_resistencia_a_inyecciones_en_query_y_centro() {
         .await
         .expect("Inicializar tablas");
 
-    let batch = crear_lote_minimo("planta_segura");
-    store
-        .insertar_lote(TABLA_DOC_CHUNKS, batch)
-        .await
-        .expect("Insertar lote");
+    sembrar_chunk_minimo(&store, "planta_segura").await;
 
     let engine = Arc::new(MockEmbeddingEngine::default());
     let service = HybridSearchService::new(store, engine);
 
     let ataques = vec![
-        "'; DROP TABLE \"02_doc_chunks\"; --",
+        "'; DROP TABLE \"02_chunks_normativa\"; --",
         "' OR '1'='1",
         "\" OR 1=1 --",
         "admin' --",
-        "UNION SELECT * FROM \"01_doc_catalog\"",
+        "UNION SELECT * FROM \"01_documentos_catalogo\"",
         "\0\0\0CARACTERES_NULOS",
         "../../../etc/passwd",
         "{{7*7}} <script>alert(1)</script>",
@@ -177,11 +176,7 @@ async fn test_adv_limites_extremos_top_k() {
         .await
         .expect("Inicializar tablas");
 
-    let batch = crear_lote_minimo("planta_limites");
-    store
-        .insertar_lote(TABLA_DOC_CHUNKS, batch)
-        .await
-        .expect("Insertar lote");
+    sembrar_chunk_minimo(&store, "planta_limites").await;
 
     let engine = Arc::new(MockEmbeddingEngine::default());
     let service = HybridSearchService::new(store, engine);

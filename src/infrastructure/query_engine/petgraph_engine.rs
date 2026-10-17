@@ -9,9 +9,13 @@ use petgraph::visit::EdgeRef;
 use tokio::sync::RwLock;
 
 use crate::application::ports::graph_engine::{GraphEnginePort, LinajeNormativo};
+use crate::application::ports::lakehouse_store::EstadoIngesta;
 use crate::domain::errors::DomainError;
 use crate::domain::models::document::DocId;
 use crate::domain::models::reference_graph::{AristaGrafo, TipoRelacionNormativa};
+
+/// Peso de las aristas leídas de tablas v2, que no guardan `peso_prelacion`
+const PESO_PRELACION_POR_DEFECTO: f32 = 1.0;
 
 struct GrafoInterno {
     grafo: DiGraph<DocId, AristaGrafo>,
@@ -55,34 +59,30 @@ impl PetgraphEngine {
         }
     }
 
-    /// Hidrata el grafo normativo a partir de un RecordBatch de Arrow de `06_reference_graph`
+    /// Hidrata el grafo normativo a partir de un RecordBatch de Arrow de `06_grafo_referencias` (esquema v2; solo aristas COMMITTED y vigentes)
     pub async fn cargar_desde_record_batch(
         &self,
         batch: &RecordBatch,
     ) -> Result<usize, DomainError> {
         let arista_id_arr = batch
-            .column_by_name("arista_id")
+            .column_by_name("edge_id")
             .and_then(|c| c.as_any().downcast_ref::<StringArray>())
             .ok_or_else(|| {
-                DomainError::StorageError("Columna arista_id no encontrada o inválida".to_string())
+                DomainError::StorageError("Columna edge_id no encontrada o inválida".to_string())
             })?;
 
         let doc_origen_arr = batch
-            .column_by_name("doc_origen_id")
+            .column_by_name("origen_id")
             .and_then(|c| c.as_any().downcast_ref::<StringArray>())
             .ok_or_else(|| {
-                DomainError::StorageError(
-                    "Columna doc_origen_id no encontrada o inválida".to_string(),
-                )
+                DomainError::StorageError("Columna origen_id no encontrada o inválida".to_string())
             })?;
 
         let doc_destino_arr = batch
-            .column_by_name("doc_destino_id")
+            .column_by_name("destino_id")
             .and_then(|c| c.as_any().downcast_ref::<StringArray>())
             .ok_or_else(|| {
-                DomainError::StorageError(
-                    "Columna doc_destino_id no encontrada o inválida".to_string(),
-                )
+                DomainError::StorageError("Columna destino_id no encontrada o inválida".to_string())
             })?;
 
         let tipo_rel_arr = batch
@@ -94,17 +94,16 @@ impl PetgraphEngine {
                 )
             })?;
 
+        // v2 no guarda peso: la prelación se deriva de `nivel_prelacion` (Fase 13)
         let peso_arr = batch
             .column_by_name("peso_prelacion")
-            .and_then(|c| c.as_any().downcast_ref::<Float32Array>())
-            .ok_or_else(|| {
-                DomainError::StorageError(
-                    "Columna peso_prelacion no encontrada o inválida".to_string(),
-                )
-            })?;
+            .and_then(|c| c.as_any().downcast_ref::<Float32Array>());
+        let estado_arr = batch
+            .column_by_name("estado_ingesta")
+            .and_then(|c| c.as_any().downcast_ref::<StringArray>());
 
         let contexto_arr = batch
-            .column_by_name("contexto_cita")
+            .column_by_name("contexto_relacion")
             .and_then(|c| c.as_any().downcast_ref::<StringArray>());
 
         let vigente_arr = batch
@@ -117,17 +116,21 @@ impl PetgraphEngine {
         let mut aristas = Vec::with_capacity(batch.num_rows());
 
         for i in 0..batch.num_rows() {
-            if !vigente_arr.value(i) {
+            let confirmada =
+                estado_arr.is_none_or(|a| a.value(i) == EstadoIngesta::Committed.as_str());
+            if !vigente_arr.value(i) || !confirmada {
                 continue;
             }
 
             let arista_id = arista_id_arr.value(i);
             let doc_origen = DocId::new(doc_origen_arr.value(i))?;
-            let doc_destino = DocId::new(doc_destino_arr.value(i))?;
+            let destino_texto = doc_destino_arr.value(i);
+            let doc_destino =
+                DocId::new(destino_texto).or_else(|_| DocId::desde_codigo_libre(destino_texto))?;
             // Lectura tolerante: filas heredadas con vocabulario previo a §4 se degradan a REFERENCIA_A
             let (tipo_rel, _fue_respaldo) =
                 TipoRelacionNormativa::parse_con_respaldo(tipo_rel_arr.value(i));
-            let peso = peso_arr.value(i);
+            let peso = peso_arr.map_or(PESO_PRELACION_POR_DEFECTO, |a| a.value(i));
             let contexto = contexto_arr
                 .filter(|a| a.is_valid(i))
                 .map(|a| a.value(i).to_string());

@@ -10,9 +10,9 @@ use lancedb::query::{ExecutableQuery, QueryBase};
 
 use crate::application::ports::embedding_engine::EmbeddingEnginePort;
 use crate::application::ports::hybrid_search::{HybridSearchParams, HybridSearchPort, SearchHit};
-use crate::application::ports::lakehouse_store::TABLA_DOC_CHUNKS;
+use crate::application::ports::lakehouse_store::{EstadoIngesta, TABLA_CHUNKS_NORMATIVA};
 use crate::domain::errors::DomainError;
-use crate::infrastructure::storage::lancedb_store::LanceDbStore;
+use crate::infrastructure::storage::lancedb_store::{LanceDbStore, literal_sql};
 
 /// Orquestador de búsqueda híbrida en el Lakehouse
 pub struct HybridSearchService {
@@ -72,10 +72,10 @@ impl HybridSearchService {
             .column_by_name("centro_id")
             .and_then(|c| c.as_any().downcast_ref::<StringArray>());
         let seccion_arr = batch
-            .column_by_name("seccion")
+            .column_by_name("breadcrumb_jerarquia")
             .and_then(|c| c.as_any().downcast_ref::<StringArray>());
         let contenido_arr = batch
-            .column_by_name("contenido")
+            .column_by_name("texto_contenido")
             .and_then(|c| c.as_any().downcast_ref::<StringArray>());
         let vigente_arr = batch
             .column_by_name("vigente")
@@ -231,10 +231,15 @@ impl HybridSearchPort for HybridSearchService {
             ));
         }
 
-        let table = self.store.abrir_tabla(TABLA_DOC_CHUNKS).await?;
+        let table = self.store.abrir_tabla(TABLA_CHUNKS_NORMATIVA).await?;
 
         // 1. Construir expresión de filtro SQL para LanceDB
-        let mut filter_expr = format!("centro_id = '{}'", params.centro_id.trim());
+        // Solo filas confirmadas (staged/commit, plan v2 problema 8) y centro escapado
+        let mut filter_expr = format!(
+            "centro_id = {} AND estado_ingesta = {}",
+            literal_sql(params.centro_id.trim()),
+            literal_sql(EstadoIngesta::Committed.as_str())
+        );
         if params.solo_vigentes {
             filter_expr.push_str(" AND vigente = true");
         }

@@ -2,14 +2,13 @@
 
 use std::sync::Arc;
 
-use futures::StreamExt;
 use lakehouse_rag::application::dtos::ingestion::{
     DistilledCatalog, DistilledCell, DistilledDocumentPackage, DistilledDoubleEntryTable,
     DistilledOperationalTuple, DistilledReferenceEdge,
 };
 use lakehouse_rag::application::ports::lakehouse_store::{
-    LakehouseStorePort, TABLA_DOC_CATALOG, TABLA_DOC_CHUNKS, TABLA_DOUBLE_ENTRY_CELLS,
-    TABLA_DOUBLE_ENTRY_TABLES, TABLA_OPERATIONAL_MATRIX, TABLA_REFERENCE_GRAPH,
+    LakehouseStorePort, TABLA_CATALOGO_TABLAS, TABLA_CELDAS_DOBLE_ENTRADA, TABLA_CHUNKS_NORMATIVA,
+    TABLA_DOCUMENTOS_CATALOGO, TABLA_GRAFO_REFERENCIAS, TABLA_MATRIZ_OPERATIVA,
 };
 use lakehouse_rag::application::use_cases::document_ingestion_service::DocumentIngestionService;
 use lakehouse_rag::domain::models::center::CenterId;
@@ -18,7 +17,17 @@ use lakehouse_rag::infrastructure::llm::mock_distiller::MockDistiller;
 use lakehouse_rag::infrastructure::parsers::markdown_parser::MarkdownParser;
 use lakehouse_rag::infrastructure::storage::lancedb_store::LanceDbStore;
 use lakehouse_rag::infrastructure::storage::schemas::DIMENSION_EMBEDDINGS;
-use lancedb::query::{ExecutableQuery, QueryBase};
+
+/// Cuenta las filas físicas (cualquier estado) de una tabla que cumplen el filtro
+async fn contar_filas(store: &LanceDbStore, tabla: &str, filtro: Option<&str>) -> usize {
+    store
+        .leer_filas_crudas(tabla, filtro)
+        .await
+        .expect("Leer filas crudas")
+        .iter()
+        .map(|lote| lote.num_rows())
+        .sum()
+}
 
 #[tokio::test]
 async fn test_integration_ingesta_e2e_persiste_en_las_6_tablas() {
@@ -159,32 +168,38 @@ Este procedimiento complementa a la norma NOM-STPS-001 en materia de protección
     assert!(reporte.total_chunks >= 3);
 
     // Verificar en LanceDB cada una de las 6 tablas
-    let count_cat = store_arc.contar_registros(TABLA_DOC_CATALOG).await.unwrap();
+    let count_cat = store_arc
+        .contar_registros(TABLA_DOCUMENTOS_CATALOGO)
+        .await
+        .unwrap();
     assert_eq!(count_cat, 1);
 
-    let count_chk = store_arc.contar_registros(TABLA_DOC_CHUNKS).await.unwrap();
+    let count_chk = store_arc
+        .contar_registros(TABLA_CHUNKS_NORMATIVA)
+        .await
+        .unwrap();
     assert_eq!(count_chk, reporte.total_chunks);
 
     let count_mat = store_arc
-        .contar_registros(TABLA_OPERATIONAL_MATRIX)
+        .contar_registros(TABLA_MATRIZ_OPERATIVA)
         .await
         .unwrap();
     assert_eq!(count_mat, 2);
 
     let count_tbl = store_arc
-        .contar_registros(TABLA_DOUBLE_ENTRY_TABLES)
+        .contar_registros(TABLA_CATALOGO_TABLAS)
         .await
         .unwrap();
     assert_eq!(count_tbl, 1);
 
     let count_cld = store_arc
-        .contar_registros(TABLA_DOUBLE_ENTRY_CELLS)
+        .contar_registros(TABLA_CELDAS_DOBLE_ENTRADA)
         .await
         .unwrap();
     assert_eq!(count_cld, 2);
 
     let count_grf = store_arc
-        .contar_registros(TABLA_REFERENCE_GRAPH)
+        .contar_registros(TABLA_GRAFO_REFERENCIAS)
         .await
         .unwrap();
     assert_eq!(count_grf, 1);
@@ -226,7 +241,12 @@ async fn test_integration_ingesta_control_de_versiones_invalida_previa() {
         },
         tuplas_operativas: Vec::new(),
         tablas_doble_entrada: Vec::new(),
-        aristas_referencia: Vec::new(),
+        aristas_referencia: vec![DistilledReferenceEdge {
+            doc_destino_id: "NOM-STPS-001".to_string(),
+            tipo_relacion: "SUBORDINADO_A_NORMA".to_string(),
+            peso_prelacion: 1.0,
+            contexto_cita: None,
+        }],
     };
     distiller.registrar_respuesta("norma_v1.md", paquete_v1.clone());
 
@@ -246,31 +266,31 @@ async fn test_integration_ingesta_control_de_versiones_invalida_previa() {
         .await
         .unwrap();
 
-    // 3. Verificar que solo hay 1 registro vigente para NORMA-PRESION en el catálogo
-    let tabla_cat = store_arc.abrir_tabla(TABLA_DOC_CATALOG).await.unwrap();
-    let query_vigentes = tabla_cat
-        .query()
-        .only_if("doc_id = 'NORMA-PRESION' AND vigente = true")
-        .execute()
-        .await
-        .unwrap();
-
-    let mut stream = query_vigentes;
-    let mut total_vigentes = 0;
-    while let Some(batch_res) = stream.next().await {
-        let b = batch_res.unwrap();
-        total_vigentes += b.num_rows();
-    }
-
+    // 3. Verificar que solo hay 1 registro vigente para NORMA-PRESION en el catálogo y en el grafo
+    let filtro_vigentes = "doc_id = 'NORMA-PRESION' AND vigente = true";
+    let vigentes_catalogo =
+        contar_filas(&store_arc, TABLA_DOCUMENTOS_CATALOGO, Some(filtro_vigentes)).await;
     assert_eq!(
-        total_vigentes, 1,
+        vigentes_catalogo, 1,
         "Solo la versión más reciente debe figurar como vigente"
     );
 
-    let total_historico = store_arc.contar_registros(TABLA_DOC_CATALOG).await.unwrap();
+    let vigentes_grafo =
+        contar_filas(&store_arc, TABLA_GRAFO_REFERENCIAS, Some(filtro_vigentes)).await;
+    assert_eq!(
+        vigentes_grafo, 1,
+        "La revisión nueva también retira la vigencia de las aristas previas"
+    );
+
+    let total_historico = contar_filas(&store_arc, TABLA_DOCUMENTOS_CATALOGO, None).await;
     assert_eq!(
         total_historico, 2,
         "Debe conservarse el registro histórico inmutable"
+    );
+    assert_eq!(
+        contar_filas(&store_arc, TABLA_GRAFO_REFERENCIAS, None).await,
+        2,
+        "Debe conservarse el histórico de aristas"
     );
 }
 
@@ -306,31 +326,18 @@ async fn test_integration_ingesta_coexistencia_multi_centro() {
         .unwrap();
 
     // Verificar en tabla de chunks el conteo filtrado por centro
-    let tabla_chk = store_arc.abrir_tabla(TABLA_DOC_CHUNKS).await.unwrap();
-
-    let query_alfa = tabla_chk
-        .query()
-        .only_if("centro_id = 'planta-alfa'")
-        .execute()
-        .await
-        .unwrap();
-    let mut stream_alfa = query_alfa;
-    let mut rows_alfa = 0;
-    while let Some(b) = stream_alfa.next().await {
-        rows_alfa += b.unwrap().num_rows();
-    }
-
-    let query_beta = tabla_chk
-        .query()
-        .only_if("centro_id = 'planta-beta'")
-        .execute()
-        .await
-        .unwrap();
-    let mut stream_beta = query_beta;
-    let mut rows_beta = 0;
-    while let Some(b) = stream_beta.next().await {
-        rows_beta += b.unwrap().num_rows();
-    }
+    let rows_alfa = contar_filas(
+        &store_arc,
+        TABLA_CHUNKS_NORMATIVA,
+        Some("centro_id = 'planta-alfa'"),
+    )
+    .await;
+    let rows_beta = contar_filas(
+        &store_arc,
+        TABLA_CHUNKS_NORMATIVA,
+        Some("centro_id = 'planta-beta'"),
+    )
+    .await;
 
     assert!(rows_alfa >= 1);
     assert!(rows_beta >= 1);

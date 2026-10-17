@@ -1,5 +1,6 @@
 //! Identificadores primarios versionados: evitan colisiones entre revisiones (H4)
 
+use crate::domain::errors::DomainError;
 use crate::domain::models::document::DocId;
 
 /// Separador entre el documento y su versión. `DocId` nunca contiene `@`,
@@ -38,10 +39,47 @@ pub fn id_versionado(doc_id: &DocId, version: u32, tipo: TipoEntidad, indice: us
     )
 }
 
+/// Identificador de una ingesta transaccional (staged → commit / rollback).
+/// Solo admite `[A-Za-z0-9_-]`, por lo que puede viajar en un predicado SQL sin riesgo de inyección.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct IngestId(String);
+
+impl IngestId {
+    pub const MAX_LONGITUD: usize = 64;
+
+    pub fn new(valor: impl Into<String>) -> Result<Self, DomainError> {
+        let limpio = valor.into().trim().to_string();
+        if limpio.is_empty() || limpio.len() > Self::MAX_LONGITUD {
+            return Err(DomainError::ValidationError(format!(
+                "El ingest_id debe tener entre 1 y {} caracteres",
+                Self::MAX_LONGITUD
+            )));
+        }
+        let charset_valido = limpio
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-'));
+        if !charset_valido || !limpio.chars().any(|c| c.is_ascii_alphanumeric()) {
+            return Err(DomainError::ValidationError(format!(
+                "El ingest_id {limpio:?} solo admite [A-Za-z0-9_-] y al menos un alfanumérico"
+            )));
+        }
+        Ok(Self(limpio))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for IngestId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::models::document::DocId;
 
     #[test]
     fn test_id_versionado_distingue_revisiones_y_entidades() {
@@ -59,6 +97,33 @@ mod tests {
             TipoEntidad::Arista,
         ] {
             assert!(id_versionado(&doc, 1, tipo, 0).starts_with("PO-ALM-03@v1-"));
+        }
+    }
+
+    #[test]
+    fn test_ingest_id_solo_admite_charset_seguro() {
+        let valido = IngestId::new(" ING-20261017_abc ").unwrap();
+        assert_eq!(valido.as_str(), "ING-20261017_abc");
+        assert_eq!(valido.to_string(), "ING-20261017_abc");
+
+        for malicioso in [
+            "",
+            "   ",
+            "x' OR '1'='1",
+            "a;DROP",
+            "a b",
+            "a.b",
+            "ñandú",
+            "--",
+            &"A".repeat(IngestId::MAX_LONGITUD + 1),
+        ] {
+            assert!(
+                matches!(
+                    IngestId::new(malicioso),
+                    Err(DomainError::ValidationError(_))
+                ),
+                "debería rechazar {malicioso:?}"
+            );
         }
     }
 }

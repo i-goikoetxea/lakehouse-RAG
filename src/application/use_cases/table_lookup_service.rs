@@ -6,6 +6,7 @@ use std::sync::RwLock;
 use arrow_array::{Array, BooleanArray, Float64Array, RecordBatch, StringArray};
 use async_trait::async_trait;
 
+use crate::application::ports::lakehouse_store::EstadoIngesta;
 use crate::application::ports::table_lookup::TableLookupPort;
 use crate::domain::errors::DomainError;
 use crate::domain::models::document::DocId;
@@ -45,7 +46,7 @@ impl TableLookupService {
         Ok(())
     }
 
-    /// Hidrata celdas a partir de un RecordBatch de Arrow correspondiente a `05_double_entry_cells`
+    /// Hidrata celdas a partir de un RecordBatch de Arrow correspondiente a `05_celdas_doble_entrada` (esquema v2; solo filas COMMITTED y vigentes)
     pub fn cargar_desde_record_batch(&self, batch: &RecordBatch) -> Result<usize, DomainError> {
         let celda_id_arr = batch
             .column_by_name("celda_id")
@@ -69,43 +70,43 @@ impl TableLookupService {
             })?;
 
         let rango_x_min_arr = batch
-            .column_by_name("rango_x_min")
+            .column_by_name("eje_x_min")
             .and_then(|c| c.as_any().downcast_ref::<Float64Array>());
         let rango_x_max_arr = batch
-            .column_by_name("rango_x_max")
+            .column_by_name("eje_x_max")
             .and_then(|c| c.as_any().downcast_ref::<Float64Array>());
         let x_inc_min_arr = batch
-            .column_by_name("x_inclusivo_min")
+            .column_by_name("eje_x_min_inclusivo")
             .and_then(|c| c.as_any().downcast_ref::<BooleanArray>());
         let x_inc_max_arr = batch
-            .column_by_name("x_inclusivo_max")
+            .column_by_name("eje_x_max_inclusivo")
             .and_then(|c| c.as_any().downcast_ref::<BooleanArray>());
         let cat_x_arr = batch
-            .column_by_name("categoria_x")
+            .column_by_name("eje_x_categoria")
             .and_then(|c| c.as_any().downcast_ref::<StringArray>());
 
         let rango_y_min_arr = batch
-            .column_by_name("rango_y_min")
+            .column_by_name("eje_y_min")
             .and_then(|c| c.as_any().downcast_ref::<Float64Array>());
         let rango_y_max_arr = batch
-            .column_by_name("rango_y_max")
+            .column_by_name("eje_y_max")
             .and_then(|c| c.as_any().downcast_ref::<Float64Array>());
         let y_inc_min_arr = batch
-            .column_by_name("y_inclusivo_min")
+            .column_by_name("eje_y_min_inclusivo")
             .and_then(|c| c.as_any().downcast_ref::<BooleanArray>());
         let y_inc_max_arr = batch
-            .column_by_name("y_inclusivo_max")
+            .column_by_name("eje_y_max_inclusivo")
             .and_then(|c| c.as_any().downcast_ref::<BooleanArray>());
         let cat_y_arr = batch
-            .column_by_name("categoria_y")
+            .column_by_name("eje_y_categoria")
             .and_then(|c| c.as_any().downcast_ref::<StringArray>());
 
         let valor_resultado_arr = batch
-            .column_by_name("valor_resultado")
+            .column_by_name("valor_resultado_texto")
             .and_then(|c| c.as_any().downcast_ref::<StringArray>())
             .ok_or_else(|| {
                 DomainError::StorageError(
-                    "Columna valor_resultado no encontrada o inválida".to_string(),
+                    "Columna valor_resultado_texto no encontrada o inválida".to_string(),
                 )
             })?;
 
@@ -114,7 +115,7 @@ impl TableLookupService {
             .and_then(|c| c.as_any().downcast_ref::<StringArray>());
 
         let notas_arr = batch
-            .column_by_name("notas_especificas")
+            .column_by_name("nota_pie_condicion")
             .and_then(|c| c.as_any().downcast_ref::<StringArray>());
 
         let vigente_arr = batch
@@ -124,11 +125,16 @@ impl TableLookupService {
                 DomainError::StorageError("Columna vigente no encontrada o inválida".to_string())
             })?;
 
+        let estado_arr = batch
+            .column_by_name("estado_ingesta")
+            .and_then(|c| c.as_any().downcast_ref::<StringArray>());
+
         let mut celdas = Vec::with_capacity(batch.num_rows());
 
         for i in 0..batch.num_rows() {
-            let vigente = vigente_arr.value(i);
-            if !vigente {
+            let confirmada =
+                estado_arr.is_none_or(|a| a.value(i) == EstadoIngesta::Committed.as_str());
+            if !vigente_arr.value(i) || !confirmada {
                 continue;
             }
 
