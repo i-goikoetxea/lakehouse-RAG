@@ -193,7 +193,7 @@ async fn test_adv_petgraph_resistencia_a_bucles_de_derogacion_paradojicos() {
         "Sec 1",
         doc_b.clone(),
         "Sec 1",
-        TipoRelacionNormativa::Deroga,
+        TipoRelacionNormativa::DerogaA,
         1.0,
         None,
     )
@@ -205,7 +205,7 @@ async fn test_adv_petgraph_resistencia_a_bucles_de_derogacion_paradojicos() {
         "Sec 1",
         doc_c.clone(),
         "Sec 1",
-        TipoRelacionNormativa::Deroga,
+        TipoRelacionNormativa::DerogaA,
         1.0,
         None,
     )
@@ -217,7 +217,7 @@ async fn test_adv_petgraph_resistencia_a_bucles_de_derogacion_paradojicos() {
         "Sec 1",
         doc_a.clone(),
         "Sec 1",
-        TipoRelacionNormativa::Deroga,
+        TipoRelacionNormativa::DerogaA,
         1.0,
         None,
     )

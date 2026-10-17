@@ -5,6 +5,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::domain::errors::DomainError;
 use crate::domain::models::center::CenterId;
+use crate::domain::services::normalizacion::codigo_canonico;
+use crate::domain::services::normalizacion::normalizar_token;
 
 /// Identificador único inmutable de un documento dentro del catálogo
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -28,18 +30,33 @@ impl DocId {
             )));
         }
 
-        if cleaned.chars().any(|c| c.is_control() || c == '\0') {
+        if let Some(prohibido) = cleaned.chars().find(|c| !Self::es_caracter_permitido(*c)) {
+            return Err(DomainError::InvalidDocId(format!(
+                "El identificador contiene el carácter no permitido {prohibido:?}; solo se admite [A-Za-z0-9._-]"
+            )));
+        }
+
+        if cleaned.contains("..") || !cleaned.chars().any(|c| c.is_ascii_alphanumeric()) {
             return Err(DomainError::InvalidDocId(
-                "El identificador contiene caracteres de control o bytes nulos no permitidos"
-                    .to_string(),
+                "El identificador debe contener alfanuméricos y no puede contener '..'".to_string(),
             ));
         }
 
         Ok(Self(cleaned))
     }
 
+    /// Construye el identificador a partir de un código escrito libremente
+    /// (`UNE-EN ISO 15614-1` → `UNE-EN-ISO-15614-1`)
+    pub fn desde_codigo_libre(codigo: &str) -> Result<Self, DomainError> {
+        Self::new(codigo_canonico(codigo))
+    }
+
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+
+    fn es_caracter_permitido(caracter: char) -> bool {
+        caracter.is_ascii_alphanumeric() || matches!(caracter, '.' | '_' | '-')
     }
 }
 
@@ -57,10 +74,10 @@ impl std::ops::Deref for DocId {
     }
 }
 
-/// Nivel de prelación jurídica/técnica (1 a 5)
+/// Nivel de prelación técnica/contractual (1 a 5)
 ///
-/// 1 = Máxima prelación (ej. Norma Oficial, Ley de Seguridad)
-/// 5 = Menor prelación (ej. Guía informativa, recomendación interna)
+/// 1 = Máxima prelación (especificación del cliente)
+/// 5 = Menor prelación (norma supletoria o formato de registro). Ver [`TipoDocumento::nivel_prelacion`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct NivelPrelacion(i8);
 
@@ -89,6 +106,107 @@ impl NivelPrelacion {
 impl std::fmt::Display for NivelPrelacion {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "Nivel {}", self.0)
+    }
+}
+
+/// Tipo de documento normativo; determina su nivel de prelación (problema 5)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum TipoDocumento {
+    EspecificacionCliente,
+    ProcedimientoObra,
+    ProcedimientoGeneral,
+    InstructivoTecnico,
+    NormaInternacional,
+    FormatoRegistro,
+}
+
+impl TipoDocumento {
+    /// Vocabulario cerrado que aceptan el JSON Schema de destilación y las tablas Arrow
+    pub const VALORES_CANONICOS: [&'static str; 6] = [
+        "ESPECIFICACION_CLIENTE",
+        "PROCEDIMIENTO_OBRA",
+        "PROCEDIMIENTO_GENERAL",
+        "INSTRUCTIVO_TECNICO",
+        "NORMA_INTERNACIONAL",
+        "FORMATO_REGISTRO",
+    ];
+
+    /// Interpreta el valor canónico o un sinónimo (pliego, procedimiento, norma/UNE/ISO,
+    /// instrucción, formato). Se decide por la primera palabra del texto normalizado.
+    pub fn parse(valor: impl AsRef<str>) -> Result<Self, DomainError> {
+        let token = normalizar_token(valor.as_ref());
+        if let Some(canonico) = Self::desde_canonico(&token) {
+            return Ok(canonico);
+        }
+        let palabras: Vec<&str> = token.split('_').collect();
+        Self::desde_palabra_inicial(&palabras).ok_or_else(|| {
+            DomainError::ValidationError(format!(
+                "Tipo de documento no reconocido: '{}'",
+                valor.as_ref().trim()
+            ))
+        })
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::EspecificacionCliente => "ESPECIFICACION_CLIENTE",
+            Self::ProcedimientoObra => "PROCEDIMIENTO_OBRA",
+            Self::ProcedimientoGeneral => "PROCEDIMIENTO_GENERAL",
+            Self::InstructivoTecnico => "INSTRUCTIVO_TECNICO",
+            Self::NormaInternacional => "NORMA_INTERNACIONAL",
+            Self::FormatoRegistro => "FORMATO_REGISTRO",
+        }
+    }
+
+    /// Nivel de prelación: 1 = especificación del cliente … 5 = norma o formato
+    pub fn nivel_prelacion(&self) -> NivelPrelacion {
+        let nivel = match self {
+            Self::EspecificacionCliente => 1,
+            Self::ProcedimientoObra => 2,
+            Self::ProcedimientoGeneral => 3,
+            Self::InstructivoTecnico => 4,
+            Self::NormaInternacional | Self::FormatoRegistro => 5,
+        };
+        NivelPrelacion(nivel)
+    }
+
+    fn desde_canonico(token: &str) -> Option<Self> {
+        [
+            Self::EspecificacionCliente,
+            Self::ProcedimientoObra,
+            Self::ProcedimientoGeneral,
+            Self::InstructivoTecnico,
+            Self::NormaInternacional,
+            Self::FormatoRegistro,
+        ]
+        .into_iter()
+        .find(|tipo| tipo.as_str() == token)
+    }
+
+    fn desde_palabra_inicial(palabras: &[&str]) -> Option<Self> {
+        let es_de_obra = palabras.iter().any(|p| matches!(*p, "OBRA" | "PROYECTO"));
+        match *palabras.first()? {
+            "PLIEGO" | "ESPECIFICACION" | "ESPECIFICACIONES" | "CLIENTE" | "CONTRATO" => {
+                Some(Self::EspecificacionCliente)
+            }
+            "PROCEDIMIENTO" | "PROCEDIMIENTOS" if es_de_obra => Some(Self::ProcedimientoObra),
+            "PROCEDIMIENTO" | "PROCEDIMIENTOS" => Some(Self::ProcedimientoGeneral),
+            "INSTRUCTIVO" | "INSTRUCCION" | "INSTRUCCIONES" | "IT" => {
+                Some(Self::InstructivoTecnico)
+            }
+            "NORMA" | "NORMAS" | "NORMATIVA" | "UNE" | "ISO" | "EN" | "IEC" | "ASTM" | "ASME"
+            | "AWS" | "DIN" => Some(Self::NormaInternacional),
+            "FORMATO" | "FORMATOS" | "FORMULARIO" | "REGISTRO" | "PLANTILLA" => {
+                Some(Self::FormatoRegistro)
+            }
+            _ => None,
+        }
+    }
+}
+
+impl std::fmt::Display for TipoDocumento {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
     }
 }
 
@@ -240,5 +358,88 @@ mod tests {
         .unwrap_err();
 
         assert!(matches!(err, DomainError::ValidationError(_)));
+    }
+    #[test]
+    fn test_doc_id_rechaza_caracteres_fuera_del_conjunto_seguro() {
+        for ataque in [
+            "PO-ALM-03'; DROP TABLE x;--",
+            "PO ALM 03",
+            "PO-ALM-03@v3",
+            "doc\"comillas",
+            "../etc/passwd",
+            "..",
+            "Recepción",
+        ] {
+            assert!(DocId::new(ataque).is_err(), "Debe rechazar '{ataque}'");
+        }
+        assert_eq!(
+            DocId::new(" PO-ALM-03.v2_b ").unwrap().as_str(),
+            "PO-ALM-03.v2_b"
+        );
+    }
+
+    #[test]
+    fn test_doc_id_desde_codigo_libre_canonicaliza() {
+        assert_eq!(
+            DocId::desde_codigo_libre("UNE-EN ISO 15614-1")
+                .unwrap()
+                .as_str(),
+            "UNE-EN-ISO-15614-1"
+        );
+        assert_eq!(
+            DocId::desde_codigo_libre("po_alm_03").unwrap().as_str(),
+            "PO-ALM-03"
+        );
+        assert!(DocId::desde_codigo_libre("¿?").is_err());
+    }
+
+    #[test]
+    fn test_tipo_documento_parse_y_prelacion() {
+        let casos = [
+            (
+                "ESPECIFICACION_CLIENTE",
+                TipoDocumento::EspecificacionCliente,
+                1,
+            ),
+            (
+                "Pliego de condiciones técnicas",
+                TipoDocumento::EspecificacionCliente,
+                1,
+            ),
+            ("procedimiento de obra", TipoDocumento::ProcedimientoObra, 2),
+            ("Procedimiento", TipoDocumento::ProcedimientoGeneral, 3),
+            (
+                "PROCEDIMIENTO_GENERAL",
+                TipoDocumento::ProcedimientoGeneral,
+                3,
+            ),
+            ("Instrucción técnica", TipoDocumento::InstructivoTecnico, 4),
+            ("Norma UNE-EN 1090-2", TipoDocumento::NormaInternacional, 5),
+            ("ISO 3834", TipoDocumento::NormaInternacional, 5),
+            ("formato de registro", TipoDocumento::FormatoRegistro, 5),
+        ];
+        for (entrada, esperado, nivel) in casos {
+            let tipo = TipoDocumento::parse(entrada).unwrap();
+            assert_eq!(tipo, esperado, "{entrada}");
+            assert_eq!(tipo.nivel_prelacion().valor(), nivel, "{entrada}");
+        }
+        assert_eq!(
+            TipoDocumento::ProcedimientoObra.as_str(),
+            "PROCEDIMIENTO_OBRA"
+        );
+        assert!(TipoDocumento::parse("acta de reunión").is_err());
+        assert!(TipoDocumento::parse("   ").is_err());
+        assert!(
+            TipoDocumento::EspecificacionCliente
+                .nivel_prelacion()
+                .tiene_mayor_prelacion_que(&TipoDocumento::NormaInternacional.nivel_prelacion())
+        );
+    }
+
+    #[test]
+    fn test_tipo_documento_valores_canonicos_son_reparseables() {
+        for valor in TipoDocumento::VALORES_CANONICOS {
+            assert_eq!(TipoDocumento::parse(valor).unwrap().as_str(), valor);
+        }
     }
 }

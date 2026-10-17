@@ -4,52 +4,91 @@ use serde::{Deserialize, Serialize};
 
 use crate::domain::errors::DomainError;
 use crate::domain::models::document::DocId;
+use crate::domain::services::normalizacion::normalizar_token;
 
-/// Tipo de relación o arista entre dos nodos normativos
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+/// Tipo de relación entre dos nodos normativos: vocabulario cerrado de la especificación §4
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum TipoRelacionNormativa {
-    Deroga,
-    Complementa,
-    Referencia,
-    Condiciona,
-    Excepciona,
-    Personalizada(String),
+    ExigeLlenarRegistro,
+    DerogaA,
+    ModificaApartado,
+    RemiteATabla,
+    SubordinadoANorma,
+    ReferenciaA,
 }
 
 impl TipoRelacionNormativa {
+    /// Vocabulario cerrado que aceptan el JSON Schema de destilación y la Tabla 06
+    pub const VALORES_CANONICOS: [&'static str; 6] = [
+        "EXIGE_LLENAR_REGISTRO",
+        "DEROGA_A",
+        "MODIFICA_APARTADO",
+        "REMITE_A_TABLA",
+        "SUBORDINADO_A_NORMA",
+        "REFERENCIA_A",
+    ];
+
+    /// Interpretación estricta: valor canónico o sinónimo conocido; cualquier otro es error
     pub fn parse(valor: impl AsRef<str>) -> Result<Self, DomainError> {
-        let v = valor.as_ref().trim();
-        if v.is_empty() {
+        let token = normalizar_token(valor.as_ref());
+        if token.is_empty() {
             return Err(DomainError::ValidationError(
                 "El tipo de relación normativa no puede estar vacío".to_string(),
             ));
         }
+        Self::desde_token(&token).ok_or_else(|| {
+            DomainError::ValidationError(format!(
+                "Tipo de relación fuera del vocabulario §4: '{}'",
+                valor.as_ref().trim()
+            ))
+        })
+    }
 
-        match v.to_lowercase().as_str() {
-            "deroga" => Ok(Self::Deroga),
-            "complementa" => Ok(Self::Complementa),
-            "referencia" => Ok(Self::Referencia),
-            "condiciona" => Ok(Self::Condiciona),
-            "excepciona" => Ok(Self::Excepciona),
-            otro => Ok(Self::Personalizada(otro.to_string())),
+    /// Interpretación tolerante para datos heredados: lo no reconocido se degrada a
+    /// `REFERENCIA_A`. El booleano indica si se aplicó ese respaldo.
+    pub fn parse_con_respaldo(valor: impl AsRef<str>) -> (Self, bool) {
+        match Self::parse(valor) {
+            Ok(tipo) => (tipo, false),
+            Err(_) => (Self::ReferenciaA, true),
         }
     }
 
-    pub fn as_str(&self) -> &str {
+    pub fn as_str(&self) -> &'static str {
         match self {
-            Self::Deroga => "Deroga",
-            Self::Complementa => "Complementa",
-            Self::Referencia => "Referencia",
-            Self::Condiciona => "Condiciona",
-            Self::Excepciona => "Excepciona",
-            Self::Personalizada(s) => s.as_str(),
+            Self::ExigeLlenarRegistro => "EXIGE_LLENAR_REGISTRO",
+            Self::DerogaA => "DEROGA_A",
+            Self::ModificaApartado => "MODIFICA_APARTADO",
+            Self::RemiteATabla => "REMITE_A_TABLA",
+            Self::SubordinadoANorma => "SUBORDINADO_A_NORMA",
+            Self::ReferenciaA => "REFERENCIA_A",
+        }
+    }
+
+    fn desde_token(token: &str) -> Option<Self> {
+        match token {
+            "EXIGE_LLENAR_REGISTRO" | "EXIGE_REGISTRO" | "LLENA_REGISTRO" | "REQUIERE_REGISTRO" => {
+                Some(Self::ExigeLlenarRegistro)
+            }
+            "DEROGA_A" | "DEROGA" | "SUSTITUYE_A" | "SUSTITUYE" | "ANULA_A" | "ANULA" => {
+                Some(Self::DerogaA)
+            }
+            "MODIFICA_APARTADO" | "MODIFICA_A" | "MODIFICA" | "ENMIENDA_A" | "ENMIENDA" => {
+                Some(Self::ModificaApartado)
+            }
+            "REMITE_A_TABLA" | "REMITE_TABLA" | "CONSULTA_TABLA" => Some(Self::RemiteATabla),
+            "SUBORDINADO_A_NORMA" | "SUBORDINADO_A" | "SUBORDINADO" | "SE_SUBORDINA_A" => {
+                Some(Self::SubordinadoANorma)
+            }
+            "REFERENCIA_A" | "REFERENCIA" | "REFERENCIAS" | "COMPLEMENTA_A" | "COMPLEMENTA"
+            | "REMITE_A" | "REMITE" | "CITA_A" | "CITA" => Some(Self::ReferenciaA),
+            _ => None,
         }
     }
 }
 
 impl std::fmt::Display for TipoRelacionNormativa {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.as_str())
+        f.write_str(self.as_str())
     }
 }
 
@@ -106,7 +145,7 @@ impl AristaGrafo {
             ));
         }
 
-        if tipo_relacion == TipoRelacionNormativa::Deroga
+        if tipo_relacion == TipoRelacionNormativa::DerogaA
             && origen_doc_id == destino_doc_id
             && o_sec.eq_ignore_ascii_case(&d_sec)
         {
@@ -134,29 +173,47 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_tipo_relacion_parsing() {
-        assert_eq!(
-            TipoRelacionNormativa::parse("deroga").unwrap(),
-            TipoRelacionNormativa::Deroga
-        );
-        assert_eq!(
-            TipoRelacionNormativa::parse("Complementa").unwrap(),
-            TipoRelacionNormativa::Complementa
-        );
-        assert_eq!(
-            TipoRelacionNormativa::parse("condiciona").unwrap(),
-            TipoRelacionNormativa::Condiciona
-        );
-        assert_eq!(
-            TipoRelacionNormativa::parse("excepciona").unwrap(),
-            TipoRelacionNormativa::Excepciona
-        );
+    fn test_tipo_relacion_parse_estricto_con_sinonimos() {
+        let casos = [
+            (
+                "EXIGE_LLENAR_REGISTRO",
+                TipoRelacionNormativa::ExigeLlenarRegistro,
+            ),
+            ("deroga", TipoRelacionNormativa::DerogaA),
+            ("DEROGA_A", TipoRelacionNormativa::DerogaA),
+            ("Modifica apartado", TipoRelacionNormativa::ModificaApartado),
+            ("REMITE_A_TABLA", TipoRelacionNormativa::RemiteATabla),
+            ("subordinado_a", TipoRelacionNormativa::SubordinadoANorma),
+            ("Referencia", TipoRelacionNormativa::ReferenciaA),
+            ("COMPLEMENTA", TipoRelacionNormativa::ReferenciaA),
+            ("remite_a", TipoRelacionNormativa::ReferenciaA),
+            ("CITA", TipoRelacionNormativa::ReferenciaA),
+        ];
+        for (entrada, esperado) in casos {
+            assert_eq!(
+                TipoRelacionNormativa::parse(entrada).unwrap(),
+                esperado,
+                "{entrada}"
+            );
+        }
+        assert_eq!(TipoRelacionNormativa::DerogaA.as_str(), "DEROGA_A");
+        assert!(TipoRelacionNormativa::parse("armoniza_con").is_err());
+        assert!(TipoRelacionNormativa::parse("  ").is_err());
+    }
 
-        let custom = TipoRelacionNormativa::parse("armoniza_con").unwrap();
+    #[test]
+    fn test_tipo_relacion_parse_con_respaldo() {
         assert_eq!(
-            custom,
-            TipoRelacionNormativa::Personalizada("armoniza_con".to_string())
+            TipoRelacionNormativa::parse_con_respaldo("DEROGA"),
+            (TipoRelacionNormativa::DerogaA, false)
         );
+        assert_eq!(
+            TipoRelacionNormativa::parse_con_respaldo("armoniza_con"),
+            (TipoRelacionNormativa::ReferenciaA, true)
+        );
+        for valor in TipoRelacionNormativa::VALORES_CANONICOS {
+            assert_eq!(TipoRelacionNormativa::parse(valor).unwrap().as_str(), valor);
+        }
     }
 
     #[test]
@@ -170,7 +227,7 @@ mod tests {
             "Sección 4.1",
             doc_b.clone(),
             "Sección 8.3",
-            TipoRelacionNormativa::Deroga,
+            TipoRelacionNormativa::DerogaA,
             1.0,
             Some("La nueva disposición deroga el procedimiento anterior".to_string()),
         )
@@ -178,7 +235,7 @@ mod tests {
 
         assert_eq!(arista.origen_doc_id, doc_a);
         assert_eq!(arista.destino_doc_id, doc_b);
-        assert_eq!(arista.tipo_relacion, TipoRelacionNormativa::Deroga);
+        assert_eq!(arista.tipo_relacion, TipoRelacionNormativa::DerogaA);
         assert!(arista.vigente);
     }
 
@@ -193,7 +250,7 @@ mod tests {
             "Sec 1",
             doc_b,
             "Sec 2",
-            TipoRelacionNormativa::Referencia,
+            TipoRelacionNormativa::ReferenciaA,
             -0.5,
             None,
         )

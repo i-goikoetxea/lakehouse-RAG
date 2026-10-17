@@ -17,6 +17,13 @@
 | **6** | Servidor de Herramientas Data Lake y Agente | Sesión 6 | `[COMPLETADO]` | 108 / 108 |
 | **7** | Servidor MCP y App Gráfica (Linear + NotebookLM 16:9) | Sesión 7 | `[EN PROGRESO]` | 124 / 124 |
 | **8** | Auditoría Adversarial E2E y Criterios DoD | Sesión 8 | `[NO INICIADO]` | - |
+| **9** | Dominio v2: enums canónicos, prelación, vigencia, DocId seguro, IDs versionados, breadcrumb y condición | Sesión 9 | `[COMPLETADO]` | 180 / 180 |
+| **10** | Esquemas v2 y store transaccional (staged/commit/rollback, idempotencia, `raw_docs`) | - | `[NO INICIADO]` | - |
+| **11** | Ingesta v2: breadcrumb, herencia de condición, destilador con json-schema y enums | - | `[NO INICIADO]` | - |
+| **12** | Centros en disco y proyección LanceDB → DataFusion/Petgraph | - | `[NO INICIADO]` | - |
+| **13** | Tools v2: matriz exacta, lookup, SQL de solo lectura, grafo antisupernodos, `search_normative_context` | - | `[NO INICIADO]` | - |
+| **14** | Cableado de la app: `ingestar_documento`, gestión de centros, system prompt de prelación | - | `[NO INICIADO]` | - |
+| **15** | Aceptación: `tests/acceptance_8_problemas.rs` y prueba manual de la GUI | - | `[NO INICIADO]` | - |
 
 
 
@@ -91,6 +98,18 @@
 - [ ] Prueba de Tabla de Doble Entrada: Verificación de cruce numérico exacto y notas al pie.
 - [ ] Prueba de Selector Claude Headless: Conmutación de modelos y observabilidad de herramientas.
 - [ ] Reporte final de cierre y documentación técnica.
+
+### Fase 9: Dominio v2 (plan `docs/arquitectura/plan_lakehouse_v2.md` §2.1)
+- [x] `services/normalizacion.rs`: `plegar_mayusculas`, `normalizar_token`, `codigo_canonico`, `separar_revision`.
+- [x] `models/alcance.rs`: `extraer_condicion` y `PilaEncabezados` (breadcrumb y condición heredada).
+- [x] `models/identificadores.rs`: `TipoEntidad` e `id_versionado` (`PO-ALM-03@v3-HIT-0002`).
+- [x] `models/vigencia.rs`: `VentanaVigencia` (intervalo semiabierto, derogación inmutable).
+- [x] `FaseOperativa` canónica en MAYÚSCULAS con `Otra(String)` normalizada.
+- [x] `TipoRelacionNormativa` cerrado (§4) con `parse` estricto y `parse_con_respaldo`.
+- [x] `TipoDocumento` → `NivelPrelacion`.
+- [x] `DocId` con conjunto `[A-Za-z0-9._-]` (H9) y `DocId::desde_codigo_libre`.
+- [x] `HitoOperativo` (sustituye a `TuplaOperativa`) con `alertas_calidad`, `calidad_extraccion` y `texto_vectorizable`.
+- [x] Suite adversarial `tests/adversarial_dominio_v2_tests.rs`.
 
 ---
 
@@ -247,3 +266,27 @@
   * No se ha verificado visualmente la ventana Tauri; probar con `cargo tauri dev` el chat y el selector.
   * Pendiente el comando `ingestar_documento` (requiere enviar ruta o bytes desde el frontend).
   * Las citas (`citations`), `matrixResult` y `graphResult` aún se devuelven vacíos desde el backend.
+
+### Sesión 9 (2026-10-17) — Fase 9: Dominio v2
+* **Objetivo:** Implementar el contrato de dominio del plan v2 (§2.1) en `src/domain/`, sin I/O, con TDD.
+* **Acciones realizadas:**
+  * Registrados y llevados a Verde los módulos Rojo de la sesión orquestadora: `services/normalizacion.rs`, `models/alcance.rs`, `models/identificadores.rs` y `models/vigencia.rs`.
+  * `FaseOperativa`: variantes `Recepcion, Descarga, Custodia, Inspeccion, Ensayo, Liberacion, Ejecucion, Despacho, Mantenimiento, Otra(String)`; `parse` quita paréntesis/corchetes, tildes y prefijos (`FASE`, `ETAPA`, `PASO`, numeración) y decide por la primera palabra. `VALORES_CANONICOS`, `es_canonica()`, `MAX_LONGITUD_OTRA = 64`.
+  * `TipoRelacionNormativa`: vocabulario cerrado §4 (`ExigeLlenarRegistro, DerogaA, ModificaApartado, RemiteATabla, SubordinadoANorma, ReferenciaA`), ahora `Copy`. `parse` estricto con sinónimos y `parse_con_respaldo -> (Self, bool)`. `petgraph_engine` lee la Tabla 06 con `parse_con_respaldo` (filas heredadas como `Complementa` o `CITA` se degradan a `REFERENCIA_A`).
+  * `TipoDocumento` (nuevo, en `document.rs`) con `parse` por la primera palabra, `as_str`, `VALORES_CANONICOS` y `nivel_prelacion()`.
+  * `DocId::new` solo admite `[A-Za-z0-9._-]`, exige un alfanumérico y rechaza `..`. Nuevo `DocId::desde_codigo_libre`.
+  * `HitoOperativo` + `BorradorHito` (entrada del extractor) sustituyen a `TuplaOperativa`. Alertas: `RolesFusionados`, `EjecutorVacio`, `ResponsableVacio`, `SinRegistro` y `RegistroNoCanonico`; `CalidadExtraccion {Ok, Revisar}`.
+  * Actualizados los usos en `src/` (petgraph_engine, lakehouse_tool_service) y `tests/` (adversarial_domain, adversarial_query, integration_agent_tools, integration_query_engine).
+* **Tests añadidos:** 20 unitarios de dominio (normalización 3, alcance 4, identificadores 1, vigencia 2, documento 4, relación +1 neto, matriz +5 neto) y 12 adversariales en `tests/adversarial_dominio_v2_tests.rs` (Unicode/emoji/homoglifos, cadenas de 1 MB, inyección SQL, 29-feb y año 9999/`NaiveDate::MAX`, niveles 0-255 y roles fusionados camuflados con falsos positivos controlados).
+* **Verificación:** 180 tests pasando + 12 ignorados, `cargo clippy --all-targets -- -D warnings` sin avisos, `cargo fmt --check` OK.
+* **Desviaciones del contrato:**
+  * `texto_vectorizable()` añade `Condición: …` cuando el hito tiene `condicion_aplicacion` (problema 7); el ejecutor no se vectoriza.
+  * Se añade la alerta `EjecutorVacio`. Solo `hito_id` y `objeto_alcance` son obligatorios; los roles y el criterio vacíos generan alertas en lugar de errores, para no perder filas en la ingesta.
+  * `VentanaVigencia::derogar` rechaza una segunda derogación (inmutable para la auditoría). Sus campos son privados con getters, para preservar la invariante.
+  * `HitoOperativo` conserva `registro_codigo` tal cual (recortado); la canonicalización la decide la ingesta (Fase 11) y la alerta `RegistroNoCanonico` la señala (también si el código no tiene dígitos).
+* **Notas para la Fase 10:**
+  * Columnas en texto: usar `FaseOperativa::as_str`, `TipoRelacionNormativa::as_str`, `TipoDocumento::as_str`, `AlertaExtraccion::as_str` y `CalidadExtraccion::as_str` (MAYÚSCULAS canónicas). `nivel_prelacion` = `TipoDocumento::nivel_prelacion().valor()` (i8).
+  * Fechas: `VentanaVigencia::fecha_vigor()` / `fecha_derogacion()` → Date32. `vigente_en` define la semántica del filtro de *time travel*.
+  * IDs primarios: `id_versionado(&doc_id, version, TipoEntidad::…, idx)`. `DocId` ya no admite comillas, así que las interpolaciones en filtros LanceDB dejan de ser inyectables (H9), aunque conviene seguir escapando.
+  * `DocumentoCatalogo` aún no tiene `tipo_documento` ni `VentanaVigencia`: añadirlos junto con el esquema 01 v2.
+  * `DocumentIngestionService` sigue usando `DocId::new` sobre el `doc_id` destilado: si Claude devuelve espacios o tildes fallará; la Fase 11 debe pasar a `DocId::desde_codigo_libre` + `separar_revision`.

@@ -124,7 +124,9 @@ impl PetgraphEngine {
             let arista_id = arista_id_arr.value(i);
             let doc_origen = DocId::new(doc_origen_arr.value(i))?;
             let doc_destino = DocId::new(doc_destino_arr.value(i))?;
-            let tipo_rel = TipoRelacionNormativa::parse(tipo_rel_arr.value(i))?;
+            // Lectura tolerante: filas heredadas con vocabulario previo a §4 se degradan a REFERENCIA_A
+            let (tipo_rel, _fue_respaldo) =
+                TipoRelacionNormativa::parse_con_respaldo(tipo_rel_arr.value(i));
             let peso = peso_arr.value(i);
             let contexto = contexto_arr
                 .filter(|a| a.is_valid(i))
@@ -187,7 +189,7 @@ impl GraphEnginePort for PetgraphEngine {
                 .edges_directed(nodo_actual, petgraph::Direction::Incoming)
             {
                 let peso = edge.weight();
-                if peso.vigente && peso.tipo_relacion == TipoRelacionNormativa::Deroga {
+                if peso.vigente && peso.tipo_relacion == TipoRelacionNormativa::DerogaA {
                     let source_idx = edge.source();
                     let source_doc = &estado.grafo[source_idx];
                     derogador = Some(source_doc.clone());
@@ -224,7 +226,7 @@ impl GraphEnginePort for PetgraphEngine {
                     .edges_directed(nodo, petgraph::Direction::Outgoing)
                 {
                     let target = &estado.grafo[edge.target()];
-                    refs.push((target.clone(), edge.weight().tipo_relacion.clone()));
+                    refs.push((target.clone(), edge.weight().tipo_relacion));
                 }
                 // Referencias entrantes
                 for edge in estado
@@ -232,7 +234,7 @@ impl GraphEnginePort for PetgraphEngine {
                     .edges_directed(nodo, petgraph::Direction::Incoming)
                 {
                     let source = &estado.grafo[edge.source()];
-                    refs.push((source.clone(), edge.weight().tipo_relacion.clone()));
+                    refs.push((source.clone(), edge.weight().tipo_relacion));
                 }
             }
             refs
@@ -298,7 +300,7 @@ mod tests {
             "Art 1",
             doc_v1.clone(),
             "Art 1",
-            TipoRelacionNormativa::Deroga,
+            TipoRelacionNormativa::DerogaA,
             1.0,
             None,
         )
@@ -311,7 +313,7 @@ mod tests {
             "Art 1",
             doc_v2.clone(),
             "Art 1",
-            TipoRelacionNormativa::Deroga,
+            TipoRelacionNormativa::DerogaA,
             1.0,
             None,
         )
@@ -340,7 +342,7 @@ mod tests {
             "Sec 1",
             doc_b.clone(),
             "Sec 1",
-            TipoRelacionNormativa::Complementa,
+            TipoRelacionNormativa::ReferenciaA,
             1.0,
             None,
         )
@@ -351,7 +353,7 @@ mod tests {
             "Sec 1",
             doc_a.clone(),
             "Sec 1",
-            TipoRelacionNormativa::Complementa,
+            TipoRelacionNormativa::ReferenciaA,
             1.0,
             None,
         )

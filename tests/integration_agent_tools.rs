@@ -148,7 +148,7 @@ async fn test_integration_e2e_las_5_tools_del_lakehouse() {
         "sec_nueva",
         doc_id.clone(),
         "sec_general",
-        TipoRelacionNormativa::Deroga,
+        TipoRelacionNormativa::DerogaA,
         1.0,
         Some("Deroga norma previa por actualización tecnológica".to_string()),
     )

@@ -7,7 +7,9 @@ use lakehouse_rag::domain::errors::DomainError;
 use lakehouse_rag::domain::models::center::CenterId;
 use lakehouse_rag::domain::models::document::DocId;
 use lakehouse_rag::domain::models::double_entry_table::{LimiteRango, RangoNumerico};
-use lakehouse_rag::domain::models::operational_matrix::{FaseOperativa, TuplaOperativa};
+use lakehouse_rag::domain::models::operational_matrix::{
+    BorradorHito, FaseOperativa, HitoOperativo,
+};
 use lakehouse_rag::domain::models::reference_graph::{AristaGrafo, TipoRelacionNormativa};
 
 // =========================================================================
@@ -144,7 +146,7 @@ fn test_adv_grafo_rechaza_pesos_no_finitos() {
         "Sec 1",
         doc_b.clone(),
         "Sec 2",
-        TipoRelacionNormativa::Deroga,
+        TipoRelacionNormativa::DerogaA,
         f32::NAN,
         None,
     );
@@ -160,7 +162,7 @@ fn test_adv_grafo_rechaza_pesos_no_finitos() {
         "Sec 1",
         doc_b,
         "Sec 2",
-        TipoRelacionNormativa::Deroga,
+        TipoRelacionNormativa::DerogaA,
         f32::INFINITY,
         None,
     );
@@ -181,7 +183,7 @@ fn test_adv_grafo_rechaza_autoderogacion_paradojica() {
         "Sección 4.1",
         doc_a,
         "Sección 4.1",
-        TipoRelacionNormativa::Deroga,
+        TipoRelacionNormativa::DerogaA,
         1.0,
         Some("Intento de autoderogación".to_string()),
     );
@@ -193,29 +195,30 @@ fn test_adv_grafo_rechaza_autoderogacion_paradojica() {
 }
 
 // =========================================================================
-// VECTOR 4: Prevención de DoS por Payloads Excesivos en Tuplas
+// VECTOR 4: Prevención de DoS por Payloads Excesivos en Hitos
 // =========================================================================
 
 #[test]
-fn test_adv_tupla_rechaza_payload_desmesurado() {
+fn test_adv_hito_rechaza_payload_desmesurado() {
     let doc_id = DocId::new("DOC-001").unwrap();
     let texto_abusivo = "X".repeat(500_000); // 500 KB en un solo campo
 
-    let res = TuplaOperativa::new(
-        "TUP-DOS",
+    let res = HitoOperativo::new(BorradorHito {
+        hito_id: "DOC-001@v1-HIT-0000".to_string(),
         doc_id,
-        FaseOperativa::Inspeccion,
-        texto_abusivo,
-        "Condición normal",
-        "100",
-        None,
-        None,
-        "Alta",
-        "Sec 1",
-    );
+        orden_secuencia: 0,
+        fase: FaseOperativa::Inspeccion,
+        objeto_alcance: texto_abusivo,
+        rol_ejecutor: "Inspector".to_string(),
+        rol_responsable: "Jefe de Calidad".to_string(),
+        registro_codigo: Some("FOR-CAL-01".to_string()),
+        registro_nombre: None,
+        criterio_aceptacion: "Conforme".to_string(),
+        condicion_aplicacion: None,
+    });
 
     assert!(
         res.is_err(),
-        "TuplaOperativa debe rechazar strings de longitud abusiva"
+        "HitoOperativo debe rechazar strings de longitud abusiva"
     );
 }

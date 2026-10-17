@@ -569,7 +569,7 @@ mod tests {
             "sec_2",
             doc1.clone(),
             "sec_1",
-            TipoRelacionNormativa::Deroga,
+            TipoRelacionNormativa::DerogaA,
             1.0,
             Some("Derogación técnica total".to_string()),
         )

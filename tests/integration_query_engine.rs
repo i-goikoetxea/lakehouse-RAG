@@ -404,6 +404,6 @@ async fn test_integration_petgraph_hidratacion_arrow_y_resolucion_prevalencia() 
         linaje_2024
             .referencias_directas
             .iter()
-            .any(|(d, t)| d.as_str() == "DOC-ISO-9001" && *t == TipoRelacionNormativa::Referencia)
+            .any(|(d, t)| d.as_str() == "DOC-ISO-9001" && *t == TipoRelacionNormativa::ReferenciaA)
     );
 }
