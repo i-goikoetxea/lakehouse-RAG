@@ -12,15 +12,15 @@ use crate::application::dtos::agent::{
 };
 use crate::application::ports::model_catalog::ModelCatalogPort;
 use crate::application::use_cases::agent_orchestrator::{AgentOrchestrator, EventCallback};
+use crate::application::use_cases::lakehouse_app::{AsistenteDirecto, AsistenteLakehousePort};
 use crate::domain::models::center::CenterId;
 use crate::presentation::gui::{ChatResponsePayload, ToolCardDto};
 
 type EventosRegistrados = Arc<StdMutex<Vec<(AgentExecutionEvent, Instant)>>>;
 
-/// Fachada de la GUI sobre el orquestador del agente y el catálogo de modelos
+/// Fachada de la GUI sobre el asistente del Lakehouse (en producción, `LakehouseApp`)
 pub struct GuiChatService {
-    orquestador: AgentOrchestrator,
-    catalogo: Arc<dyn ModelCatalogPort>,
+    asistente: Arc<dyn AsistenteLakehousePort>,
     historiales: Mutex<HashMap<String, Vec<AgentMessage>>>,
 }
 
@@ -30,17 +30,22 @@ impl GuiChatService {
     /// Número máximo de mensajes conservados por centro
     pub const MAX_HISTORIAL: usize = 40;
 
+    /// Chat directo sobre un orquestador, sin gestión de centros (tests y usos embebidos)
     pub fn new(orquestador: AgentOrchestrator, catalogo: Arc<dyn ModelCatalogPort>) -> Self {
+        Self::desde_asistente(Arc::new(AsistenteDirecto::new(orquestador, catalogo)))
+    }
+
+    /// Chat sobre la composición única (`LakehouseApp`): exige el centro activo y proyectado
+    pub fn desde_asistente(asistente: Arc<dyn AsistenteLakehousePort>) -> Self {
         Self {
-            orquestador,
-            catalogo,
+            asistente,
             historiales: Mutex::new(HashMap::new()),
         }
     }
 
     /// Catálogo de modelos disponibles en la instalación de Claude Code
     pub async fn listar_modelos(&self) -> Result<Vec<ModelDescriptor>, String> {
-        self.catalogo
+        self.asistente
             .listar_modelos()
             .await
             .map_err(|e| e.to_string())
@@ -74,8 +79,8 @@ impl GuiChatService {
 
         let eventos: EventosRegistrados = Arc::default();
         let resultado = self
-            .orquestador
-            .procesar_turno(
+            .asistente
+            .conversar(
                 &modelo,
                 &centro,
                 historial,

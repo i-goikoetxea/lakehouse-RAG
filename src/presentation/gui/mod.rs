@@ -8,18 +8,104 @@ pub mod chat_service;
 
 use serde::{Deserialize, Serialize};
 
+use std::sync::Arc;
+
 use crate::application::dtos::agent::ModelDescriptor;
+use crate::application::use_cases::lakehouse_app::LakehouseApp;
+use crate::domain::models::center::CentroConocimiento;
 use chat_service::GuiChatService;
 
-/// Inicia la aplicación nativa Tauri 2.0 registrando los comandos IPC del frontend
-pub fn iniciar_app_tauri(servicio_chat: GuiChatService) -> Result<(), tauri::Error> {
+/// Inicia la aplicación nativa Tauri 2.0 sobre la composición única (`LakehouseApp`)
+pub fn iniciar_app_tauri(app: Arc<LakehouseApp>) -> Result<(), tauri::Error> {
+    let servicio_chat = GuiChatService::desde_asistente(app.clone());
     tauri::Builder::default()
         .manage(servicio_chat)
+        .manage(app)
         .invoke_handler(tauri::generate_handler![
             listar_modelos_claude,
-            enviar_mensaje_chat
+            enviar_mensaje_chat,
+            listar_centros,
+            activar_centro,
+            desactivar_centro,
+            ingestar_documento
         ])
         .run(tauri::generate_context!())
+}
+
+/// Centro tal como lo consume el frontend
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CentroDto {
+    pub id: String,
+    pub nombre: String,
+    pub ruta_disco: String,
+    pub activo: bool,
+}
+
+impl From<&CentroConocimiento> for CentroDto {
+    fn from(centro: &CentroConocimiento) -> Self {
+        Self {
+            id: centro.id().to_string(),
+            nombre: centro.manifiesto().nombre.clone(),
+            ruta_disco: centro.manifiesto().ruta_almacenamiento.clone(),
+            activo: centro.esta_activo(),
+        }
+    }
+}
+
+/// Comando IPC: centros registrados
+#[tauri::command]
+async fn listar_centros(
+    app: tauri::State<'_, Arc<LakehouseApp>>,
+) -> Result<Vec<CentroDto>, String> {
+    let centros = app.listar_centros().await.map_err(|e| e.to_string())?;
+    Ok(centros.iter().map(CentroDto::from).collect())
+}
+
+/// Comando IPC: activa un centro y reconstruye sus vistas
+#[tauri::command]
+async fn activar_centro(
+    app: tauri::State<'_, Arc<LakehouseApp>>,
+    centro_id: String,
+) -> Result<usize, String> {
+    let resumen = app
+        .activar_centro(&centro_id)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(resumen.vistas.len())
+}
+
+/// Comando IPC: desactiva un centro (cero acceso)
+#[tauri::command]
+async fn desactivar_centro(
+    app: tauri::State<'_, Arc<LakehouseApp>>,
+    centro_id: String,
+) -> Result<(), String> {
+    app.desactivar_centro(&centro_id)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Comando IPC: ingesta transaccional de un archivo local en un centro
+#[tauri::command]
+async fn ingestar_documento(
+    app: tauri::State<'_, Arc<LakehouseApp>>,
+    ruta: String,
+    centro_id: String,
+) -> Result<String, String> {
+    let resultado = app
+        .ingestar(std::path::Path::new(&ruta), &centro_id)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(format!(
+        "{} v{} ({})",
+        resultado.informe.doc_id,
+        resultado.informe.version,
+        if resultado.informe.ya_ingerido {
+            "ya ingerido"
+        } else {
+            "ingerido"
+        }
+    ))
 }
 
 /// Comando IPC: catálogo dinámico de modelos de la instalación local de Claude Code

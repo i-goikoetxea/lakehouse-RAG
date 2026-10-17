@@ -20,7 +20,7 @@
 | **9** | Dominio v2: enums canónicos, prelación, vigencia, DocId seguro, IDs versionados, breadcrumb y condición | Sesión 9 | `[COMPLETADO]` | 180 / 180 |
 | **10** | Esquemas v2 y store transaccional (staged/commit/rollback, idempotencia por hash) | Sesión 10 | `[COMPLETADO]` | 214 / 214 |
 | **11** | Ingesta v2: breadcrumb, herencia de condición, destilador con json-schema y enums | Sesión 11 | `[COMPLETADO]` | 246 / 246 |
-| **12** | Centros en disco y proyección LanceDB → DataFusion/Petgraph | - | `[NO INICIADO]` | - |
+| **12** | Centros en disco y proyección LanceDB → DataFusion/Petgraph | Sesión 12 | `[COMPLETADO]` | 291 / 291 |
 | **13** | Tools v2: matriz exacta, lookup, SQL de solo lectura, grafo antisupernodos, `search_normative_context` | - | `[NO INICIADO]` | - |
 | **14** | Cableado de la app: `ingestar_documento`, gestión de centros, system prompt de prelación | - | `[NO INICIADO]` | - |
 | **15** | Aceptación: `tests/acceptance_8_problemas.rs` y prueba manual de la GUI | - | `[NO INICIADO]` | - |
@@ -120,7 +120,7 @@
 - [x] `DocumentIngestionService`: idempotencia por hash (H5), staged → commit con rollback, IDs versionados (H4) y enums canónicos.
 - [x] Consumidores adaptados: la búsqueda híbrida solo lee `COMMITTED`; `TableLookupService` y `PetgraphEngine` leen columnas v2.
 - [x] Suites `tests/integration_store_v2_transaccional.rs` y `tests/adversarial_store_v2_tests.rs`; los hallazgos H1 (esquemas), H3, H4, H5 y H9 corren sin `#[ignore]`.
-- [ ] `raw_docs/` (copia inmutable del original): se traslada a la Fase 12 (centros en disco).
+- [x] `raw_docs/` (copia inmutable del original): hecho en la Fase 12 (centros en disco).
 
 ### Fase 11: Ingesta v2 (plan v2 §1 filas 1, 2 y 7; §2.5 y §2.6)
 - [x] DTO de destilación v2 (`application/dtos/ingestion.rs`) alineado con §4; JSON Schema con `enum` para tipo de documento, fase, relación, tipo de eje y tipo de nodo.
@@ -130,6 +130,16 @@
 - [x] Columnas v2 rellenas: `rol_ejecutor`, `registro_*`, `objeto_alcance`, `chunk_origen_id`, `tablas_vinculadas`, `hitos_vinculados`, unidades, `valor_salida_nombre`, `instrucciones_uso_sql`, `vector_hito` y `vector_tabla`.
 - [x] Embeddings multilingües `MultilingualE5Large` (1024 dims) con caché fuera del cwd.
 - [x] Suite adversarial `tests/adversarial_ingesta_v2_tests.rs` y E2E real de la Etapa 1 con todas las comprobaciones en OK.
+
+### Fase 12: Centros en disco, proyección y fachada (plan v2 §1 filas 6 y 8, §2.3, §3.1)
+- [x] `CenterRegistryPort` + `JsonCenterRegistry` (`centers_registry.json` en el directorio de configuración, inyectable; escritura atómica; registro corrupto → error sin sobrescribir; `eliminar` no toca el disco).
+- [x] `CenterWorkspacePort` + `DiskCenterWorkspace`: `center_manifest.json` (`schema_version = 2`, modelo y dimensión de embeddings), `raw_docs/` (copia `<sha256>_<nombre>` + `.sha256`), `glue_catalog/` y `lakehouse_data/`; el manifiesto se valida contra el modelo activo al abrir.
+- [x] `LakehouseProjectionPort` + `LanceProjection`: filas `COMMITTED` (vigentes e históricas, sin columnas vectoriales) registradas en DataFusion con prefijo de centro; Petgraph y TableLookup con lo vigente de los centros proyectados; inventario en `glue_catalog/inventario_tablas.json`; desregistro al desactivar.
+- [x] Fachada `LakehouseApp` (`application/use_cases/lakehouse_app.rs`) y composición única `infrastructure/bootstrap.rs`; `main.rs`, GUI (`GuiChatService::desde_asistente` y comandos Tauri) y MCP la usan.
+- [x] CLI: `--centros`, `--crear-centro`, `--activar`, `--desactivar`, `--eliminar-centro`, `--ingest`, `--ask`, `--integridad` (legible o `--json`).
+- [x] Tools: lo mínimo para leer las vistas v2 (nombres canónicos `01_…`–`06_…`, columnas v2 en catálogo y matriz) e inventario v2 en el system prompt.
+- [x] Suites `tests/integration_lakehouse_app.rs` (9) y `tests/adversarial_centros_proyeccion_tests.rs` (11).
+- [x] Puerta E2E `tests/e2e_binario_fase12.rs` (2 tests `#[ignore]`, binario real).
 
 ---
 
@@ -493,3 +503,112 @@
   * `hitos_vinculados`, `tablas_vinculadas` (List<Utf8>) y `chunk_origen_id` ya permiten proyectar el grafo hito → chunk → tabla.
   * Las aristas `EXIGE_LLENAR_REGISTRO` salen con `origen_tipo = HITO_OPERATIVO` y `origen_id = hito_id`; el resto, con el documento como origen.
   * Los tests reales usan `target/fastembed_cache` (`FASTEMBED_CACHE_DIR`), donde ya está E5-large. Paquetes destilados reales: `target/validacion_etapa1/*.destilado.json`, reinyectables con `MockDistiller::registrar_respuesta`.
+
+### Sesión 12 (2026-10-17) — Fase 12: Centros en disco, proyección y fachada
+* **Objetivo:** plan v2 §1 (problemas 6 y 8), §2.3 (`CenterRegistryPort`, `LakehouseProjectionPort`) y §3.1 (fachada única y primera puerta E2E con el binario real).
+* **Contratos nuevos:**
+  * `application/dtos/centros.rs`: `ModeloEmbeddingsActivo`, `ManifiestoCentroDisco` (`schema_version = 2`, `modelo_embeddings`, `dimension_embeddings`) con `validar_compatibilidad`, `DocumentoOriginal` y `validar_ruta_centro` (rechaza `..`, `\0` y rutas vacías).
+  * `CenterRegistryPort` añade `eliminar` (solo quita la entrada del registro). Adaptador `infrastructure/storage/center_registry_json.rs`: `JsonCenterRegistry::new(dir)`, formato §3.1 (`id`, `nombre`, `ruta_disco`, `activo`, `fecha_creacion`, `estadisticas`). Directorio: `LAKEHOUSE_RAG_CONFIG_DIR` > `%APPDATA%\lakehouse_rag` (XDG o `~/.config` en Unix).
+  * `CenterWorkspacePort` (`ruta_absoluta`, `preparar`, `abrir`, `guardar_original`) → `CentroAbierto { id, ruta, manifiesto, store }`. Adaptador `center_workspace_disk.rs` (`DiskCenterWorkspace`).
+  * `LakehouseProjectionPort` (`reconstruir_vistas`, `retirar_vistas`, `centros_proyectados`) y `nombre_vista(centro, tabla) = "{centro}_{tabla}"`. Adaptador `query_engine/lakehouse_projection.rs` (`LanceProjection`). Nuevos `PetgraphEngine::vaciar` y `TableLookupService::vaciar`.
+  * Fachada `application/use_cases/lakehouse_app.rs`: `LakehouseApp::new(DependenciasLakehouse)` con:
+    * Centros: `crear_centro`, `listar_centros`, `activar_centro`, `desactivar_centro`, `eliminar_centro` e `hidratar_centros_activos`.
+    * Ingesta: `ingestar(ruta, centro) -> ResultadoIngesta`.
+    * Consulta: `preguntar(texto, centro, modelo) -> RespuestaLakehouse { respuesta, herramientas: Vec<UsoHerramienta> }`.
+    * Diagnóstico: `integridad(centro) -> InformeIntegridadCentro` (incluye `tablas_ausentes`).
+    * `servidor_herramientas()`.
+    * Trait `AsistenteLakehousePort` (`listar_modelos`, `conversar`), implementado por `LakehouseApp` y por `AsistenteDirecto`.
+  * Composición única `infrastructure/bootstrap.rs`: `componer_lakehouse(&ConfiguracionComposicion)` y `motores_consulta()`. `LazyFastEmbedEngine` (`embeddings/lazy_engine.rs`) carga E5-large solo al vectorizar.
+  * CLI `presentation/cli/{mod,ejecutor,salida}.rs`: `ModoEjecucion::Comando(ComandoCli, FormatoSalida)` y `ErrorArgumentos`. Códigos de salida: 0 OK, 1 error, 2 argumentos y 3 centro no íntegro.
+  * GUI: `iniciar_app_tauri(Arc<LakehouseApp>)`, `GuiChatService::desde_asistente` y comandos `listar_centros`, `activar_centro`, `desactivar_centro` e `ingestar_documento`. El frontend aún no los usa (Fase 14).
+  * MCP: hidrata los centros activos y sirve `app.servidor_herramientas()`.
+* **Decisiones:**
+  * **Proyección:**
+    * DataFusion recibe **todas las filas `COMMITTED`**, vigentes e históricas (con `vigente`, `version_num`, `fecha_vigor` y `fecha_derogacion`), para el *time travel* SQL de la Fase 13. Nunca recibe filas `STAGED`. Las tools filtran `vigente = true`.
+    * Las columnas vectoriales no se proyectan.
+    * Petgraph y TableLookup se recargan con lo **vigente** de todos los centros proyectados.
+    * Las 6 tablas se leen antes de tocar DataFusion: si una falla, las vistas previas quedan intactas.
+  * **Ciclo de vida:**
+    * Un centro nuevo nace **inactivo**. `activar` valida el manifiesto, proyecta y solo entonces marca el centro como `activo`.
+    * Un proceso nuevo (CLI) proyecta bajo demanda en `preguntar`; la GUI y el MCP hidratan los centros activos al arrancar.
+    * Preguntar a un centro inactivo o inexistente es un error explícito.
+  * **Disco:**
+    * `preparar` solo acepta un directorio inexistente, vacío o que ya sea un centro (readopción tras `eliminar`).
+    * Dos centros no comparten ruta.
+    * Copia en `raw_docs/<sha256>_<nombre_seguro>` + `.sha256`. Si ya existe, no se reescribe. No se marca como solo lectura, para no romper los borrados de tempdir en Windows.
+    * La copia se hace antes de la ingesta. Si la ingesta falla, la copia queda: es inmutable y está indexada por hash.
+  * **Ingesta confirmada con proyección fallida:** devuelve OK con `aviso_proyeccion`, porque los datos ya están confirmados en LanceDB.
+  * **Tools (lo mínimo para leer v2):**
+    * Los nombres canónicos `01_…`–`06_…` se reescriben a la vista entrecomillada del centro (`"obra-a_03_matriz_operativa"`): el `-` del id obliga a usar comillas. Los identificadores ya cualificados se respetan.
+    * `inspect_lakehouse_catalog` y `query_operational_matrix` leen columnas v2 (`parametro` → `objeto_alcance`).
+    * El system prompt incluye `INVENTARIO_TABLAS_V2`.
+  * **Petgraph:**
+    * El grafo es por documento (sin versión). Una arista que el dominio rechaza se omite con `warn` en vez de tumbar la proyección. Es el caso de la `DEROGA_A` de la Rev. 04 hacia `PO-ALM-03`, que aquí es un bucle.
+    * Los orígenes versionados (`…@v4-HIT-…`) se canonicalizan con `desde_codigo_libre`.
+  * **Consola en release:**
+    * Se mantiene `windows_subsystem = "windows"`.
+    * Los modos que no son GUI llaman a `AttachConsole(ATTACH_PARENT_PROCESS)` solo si `GetStdHandle(STD_OUTPUT_HANDLE)` es nulo. Si stdout está redirigido (tubería o archivo, como en la E2E), se escribe ahí.
+    * Verificado en debug (subsistema de consola). Release **no se ha probado** en esta sesión: si en una consola interactiva el texto no aparece tras `AttachConsole`, habrá que reabrir `CONOUT$`.
+* **Tests añadidos (+45; 291 pasando + 7 ignorados):**
+  * Unitarios: DTO de centros (4), registro JSON (4), espacio en disco (2), proyección (2), `nombre_vista` (1), fachada (2), FastEmbed diferido (2), reescritura SQL (2), Petgraph v2 (1), CLI (3) y salida (2).
+  * `tests/integration_lakehouse_app.rs` (9):
+    * Estructura del centro y manifiesto.
+    * Ciclo completo activar → ingerir → consultar → desactivar.
+    * Idempotencia de la reingesta.
+    * `preguntar` con tools.
+    * Proceso nuevo e hidratación.
+    * Multi-centro §9.1.
+    * Eliminar y readoptar.
+    * Ingesta fallida sin residuos.
+    * Regresión de la autoderogación.
+  * `tests/adversarial_centros_proyeccion_tests.rs` (11):
+    * Rutas con `..` e ids hostiles.
+    * Registro corrupto (4 variantes, sin sobrescribirlo).
+    * Centro inexistente (6 operaciones).
+    * Activación doble y concurrente.
+    * Alta duplicada por id o por ruta, y directorio ajeno no vacío.
+    * Manifiesto de otro modelo, otra dimensión u otro esquema, corrupto o ausente.
+    * `.lance` borrado a mano.
+    * Nombre de archivo hostil.
+    * SQL hostil sobre las vistas.
+  * Adaptado: `tests/integration_agent_tools.rs` (lotes con forma v2).
+  * TDD: antes de corregir se vieron en rojo la autoderogación (en la puerta E2E) y la ingesta fallida (un mock que no fallaba). El resto se escribió junto con su test (rojo por compilación).
+* **Verificación:** `cargo test` con 291 OK + 7 ignorados; `cargo clippy --all-targets -- -D warnings` sin avisos; `cargo fmt --check` OK.
+* **Puerta E2E real:**
+  * Comando: `cargo test --test e2e_binario_fase12 -- --ignored --nocapture --test-threads=1`.
+  * Entorno: binario `target/debug/lakehouse_rag`, Claude Code con `sonnet` y FastEmbed E5-large en `target/fastembed_cache`.
+  * Resultado: **2/2 OK en 302 s**.
+  * 1.ª ejecución: **FALLÓ** la ingesta de la Rev. 04 (código 1) con «Paradoja lógica: una sección normativa no puede derogarse a sí misma». El fallo ocurría al cargar Petgraph tras el commit. Se corrigió (las aristas inválidas se omiten y se informa `aviso_proyeccion`) y se añadió la regresión.
+  * 2.ª ejecución:
+
+  | Paso (binario, `--json`) | Tiempo | Resultado |
+  | --- | ---: | --- |
+  | `--crear-centro obra-planta-solar-01 <tmp> "Planta Solar"` | 0,2 s | Centro inactivo; estructura y manifiesto v2 |
+  | `--activar` | 0,1 s | 6 vistas vacías |
+  | `--ingest procedimiento_recepcion_rev03.md` | 39,4 s | `PO-ALM-03` v3: 9 chunks, 3 hitos, 1 tabla, 9 celdas, 10 aristas |
+  | `--ingest procedimiento_recepcion_rev04.md` | 52,9 s | v4, derogadas `[3]`; 01: 2 filas (1 vigente); 02: 18 filas (9 vigentes) |
+  | `--integridad` | 66,6 s* | `integro: true` |
+  | `--ask "¿Quién es el responsable de la custodia y qué registro llena?"` | 57,9 s | Tool `query_operational_matrix(fase=CUSTODIA)` → **Jefe de Producción**, **FOR-ALM-05** (Registro de Custodia, Preservación y Trazabilidad), con la condición «acopio > 7 días» |
+  | `--ask` con agregación SQL | 23,6 s | `execute_athena_sql`: `SELECT fase_operativa, COUNT(*) … WHERE vigente = true GROUP BY fase_operativa` → CUSTODIA 1, INSPECCION 1, RECEPCION 1 |
+  | Multi-centro: A con la Rev. 03 (inactivo), B vacío y activo | — | `--ask … --centro obra-a` → código 1, «está inactivo». `--ask … --centro obra-b` → `SELECT COUNT(*) … 01_documentos_catalogo` = **0**; ningún resultado contiene `PO-ALM-03` |
+
+  \* El tiempo de `--integridad` coincidió con un `cargo test` y un `cargo clippy` lanzados en paralelo en la misma máquina. No se ha medido de forma aislada.
+* **Qué falta en las tools (para la Fase 13; no se reescriben aquí):**
+  * `lookup_double_entry_table`:
+    * Usa `TableLookupService` con la semántica previa: no distingue `>=`/`>` en cada extremo y no admite `fecha_referencia`.
+    * Busca por `tabla_id` sin filtrar el centro: con varios centros activos, dos `tabla_id` iguales se mezclarían.
+  * `query_operational_matrix`:
+    * Compara la fase con `LOWER()`, así que «Recepción» con tilde no casa con `RECEPCION`.
+    * Falta normalizar con `FaseOperativa` y filtrar por `rol_*` y `registro_codigo`.
+  * `traverse_normative_graph`:
+    * Trabaja sobre un grafo por documento y pierde la versión (la autoderogación v4 → v3 se omite).
+    * No tiene poda antisupernodos.
+  * `execute_athena_sql`:
+    * Sigue validando por prefijos de texto, no con el parser de DataFusion.
+    * No tiene límite de filas.
+  * Ninguna tool acepta `fecha_referencia`; las vistas ya contienen el histórico para implementarlo.
+* **Notas para la Fase 13:**
+  * Las vistas se llaman `"{centro}_{tabla}"` y hay que entrecomillarlas: usa `nombre_vista` y `reescribir_tablas_canonicas` (`lakehouse_tool_service.rs`).
+  * `glue_catalog/inventario_tablas.json` tiene las columnas reales de cada vista, por si `inspect_lakehouse_catalog` debe devolverlas.
+  * La E2E puede reutilizar `tests/e2e_binario_fase12.rs` como plantilla: `Sesion::ejecutar` lanza el binario con `--json`.
+  * La GUI envía un `centro_id` fijo desde `app.js`. Usar los nuevos comandos de centros es trabajo de la Fase 14.

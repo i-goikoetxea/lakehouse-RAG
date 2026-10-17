@@ -1,6 +1,7 @@
 //! Data Transfer Objects (DTOs) para la comunicación entre capas
 
 pub mod agent;
+pub mod centros;
 pub mod ingestion;
 pub mod lakehouse_filas;
 pub mod tools;

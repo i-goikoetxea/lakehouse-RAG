@@ -59,6 +59,11 @@ impl PetgraphEngine {
         }
     }
 
+    /// Elimina todos los nodos y aristas (la proyección recarga el grafo desde LanceDB)
+    pub async fn vaciar(&self) {
+        *self.estado.write().await = GrafoInterno::new();
+    }
+
     /// Hidrata el grafo normativo a partir de un RecordBatch de Arrow de `06_grafo_referencias` (esquema v2; solo aristas COMMITTED y vigentes)
     pub async fn cargar_desde_record_batch(
         &self,
@@ -122,31 +127,43 @@ impl PetgraphEngine {
                 continue;
             }
 
-            let arista_id = arista_id_arr.value(i);
-            let doc_origen = DocId::new(doc_origen_arr.value(i))?;
-            let destino_texto = doc_destino_arr.value(i);
-            let doc_destino =
-                DocId::new(destino_texto).or_else(|_| DocId::desde_codigo_libre(destino_texto))?;
-            // Lectura tolerante: filas heredadas con vocabulario previo a §4 se degradan a REFERENCIA_A
-            let (tipo_rel, _fue_respaldo) =
-                TipoRelacionNormativa::parse_con_respaldo(tipo_rel_arr.value(i));
-            let peso = peso_arr.map_or(PESO_PRELACION_POR_DEFECTO, |a| a.value(i));
-            let contexto = contexto_arr
-                .filter(|a| a.is_valid(i))
-                .map(|a| a.value(i).to_string());
+            let fila = || -> Result<AristaGrafo, DomainError> {
+                // Los orígenes v2 pueden ser IDs versionados (`PO-ALM-03@v4-HIT-0002`)
+                let origen_texto = doc_origen_arr.value(i);
+                let doc_origen = DocId::new(origen_texto)
+                    .or_else(|_| DocId::desde_codigo_libre(origen_texto))?;
+                let destino_texto = doc_destino_arr.value(i);
+                let doc_destino = DocId::new(destino_texto)
+                    .or_else(|_| DocId::desde_codigo_libre(destino_texto))?;
+                // Lectura tolerante: filas heredadas con vocabulario previo a §4 se degradan a REFERENCIA_A
+                let (tipo_rel, _fue_respaldo) =
+                    TipoRelacionNormativa::parse_con_respaldo(tipo_rel_arr.value(i));
+                let peso = peso_arr.map_or(PESO_PRELACION_POR_DEFECTO, |a| a.value(i));
+                let contexto = contexto_arr
+                    .filter(|a| a.is_valid(i))
+                    .map(|a| a.value(i).to_string());
+                AristaGrafo::new(
+                    arista_id_arr.value(i),
+                    doc_origen,
+                    "Sección General",
+                    doc_destino,
+                    "Sección General",
+                    tipo_rel,
+                    peso,
+                    contexto,
+                )
+            };
 
-            let arista = AristaGrafo::new(
-                arista_id,
-                doc_origen,
-                "Sección General",
-                doc_destino,
-                "Sección General",
-                tipo_rel,
-                peso,
-                contexto,
-            )?;
-
-            aristas.push(arista);
+            // El grafo es por documento (sin versión): una arista que el modelo de dominio
+            // rechaza (p. ej. `DEROGA_A` de la Rev. 04 hacia el mismo código, que aquí es un
+            // bucle) se omite en vez de tumbar toda la proyección. La Fase 13 versiona los nodos.
+            match fila() {
+                Ok(arista) => aristas.push(arista),
+                Err(error) => tracing::warn!(
+                    "Arista '{}' omitida al cargar el grafo: {error}",
+                    arista_id_arr.value(i)
+                ),
+            }
         }
 
         let total = aristas.len();
@@ -287,6 +304,60 @@ impl GraphEnginePort for PetgraphEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+
+    fn lote_aristas(filas: &[(&str, &str, &str, &str)]) -> RecordBatch {
+        use arrow_schema::{DataType, Field, Schema};
+        let texto = |nombre: &str| Field::new(nombre, DataType::Utf8, false);
+        let columna = |i: usize| -> Arc<dyn Array> {
+            Arc::new(StringArray::from(
+                filas
+                    .iter()
+                    .map(|f| [f.0, f.1, f.2, f.3][i])
+                    .collect::<Vec<_>>(),
+            ))
+        };
+        RecordBatch::try_new(
+            Arc::new(Schema::new(vec![
+                texto("edge_id"),
+                texto("origen_id"),
+                texto("tipo_relacion"),
+                texto("destino_id"),
+                Field::new("vigente", DataType::Boolean, false),
+                texto("estado_ingesta"),
+            ])),
+            vec![
+                columna(0),
+                columna(1),
+                columna(2),
+                columna(3),
+                Arc::new(BooleanArray::from(vec![true; filas.len()])),
+                Arc::new(StringArray::from(vec!["COMMITTED"; filas.len()])),
+            ],
+        )
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_carga_v2_omite_la_autoderogacion_y_admite_origenes_versionados() {
+        let engine = PetgraphEngine::new();
+        let lote = lote_aristas(&[
+            ("E1", "PO-ALM-03", "DEROGA_A", "PO-ALM-03"),
+            (
+                "E2",
+                "PO-ALM-03@v4-HIT-0002",
+                "EXIGE_LLENAR_REGISTRO",
+                "FOR-ALM-05",
+            ),
+            ("E3", "PO-ALM-03", "SUBORDINADO_A_NORMA", "UNE-EN 1090-2"),
+        ]);
+        assert_eq!(engine.cargar_desde_record_batch(&lote).await.unwrap(), 2);
+        let (_, aristas) = engine.estadisticas_grafo().await.unwrap();
+        assert_eq!(aristas, 2);
+
+        engine.vaciar().await;
+        assert_eq!(engine.estadisticas_grafo().await.unwrap(), (0, 0));
+    }
 
     #[tokio::test]
     async fn test_petgraph_linaje_derogacion_sucesiva() {

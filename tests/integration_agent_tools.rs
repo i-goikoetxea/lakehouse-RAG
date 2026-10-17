@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use arrow_array::{BooleanArray, Float64Array, Int8Array, Int32Array, RecordBatch, StringArray};
+use arrow_array::{BooleanArray, Int8Array, Int32Array, RecordBatch, StringArray};
 use arrow_schema::{DataType, Field, Schema};
 use serde_json::json;
 
@@ -24,76 +24,95 @@ use lakehouse_rag::infrastructure::llm::mock_agent_runner::MockAgentRunner;
 use lakehouse_rag::infrastructure::query_engine::datafusion_engine::DataFusionEngine;
 use lakehouse_rag::infrastructure::query_engine::petgraph_engine::PetgraphEngine;
 
+/// Lote con la forma de la vista v2 `01_documentos_catalogo` (sin columnas vectoriales)
 fn crear_lote_catalogo_prueba() -> RecordBatch {
     let schema = Arc::new(Schema::new(vec![
         Field::new("doc_id", DataType::Utf8, false),
-        Field::new("titulo", DataType::Utf8, false),
-        Field::new("tipo", DataType::Utf8, false),
-        Field::new("nivel_prelacion", DataType::Int8, false),
-        Field::new("version", DataType::Int32, false),
-        Field::new("fecha_emision", DataType::Utf8, false),
+        Field::new("version_num", DataType::Int32, false),
         Field::new("vigente", DataType::Boolean, false),
+        Field::new("titulo", DataType::Utf8, false),
+        Field::new("tipo_documento", DataType::Utf8, false),
+        Field::new("nivel_prelacion", DataType::Int8, false),
+        Field::new("revision", DataType::Utf8, false),
+        Field::new("fecha_vigor", DataType::Utf8, false),
+        Field::new("fecha_derogacion", DataType::Utf8, true),
     ]));
-
-    let doc_ids = Arc::new(StringArray::from(vec!["DOC-001", "DOC-002"]));
-    let titulos = Arc::new(StringArray::from(vec![
-        "Especificación Acero",
-        "Procedimiento Soldadura Obsoleto",
-    ]));
-    let tipos = Arc::new(StringArray::from(vec!["Norma", "Procedimiento"]));
-    let prelaciones = Arc::new(Int8Array::from(vec![1, 3]));
-    let versiones = Arc::new(Int32Array::from(vec![2, 1]));
-    let fechas = Arc::new(StringArray::from(vec!["2026-03-01", "2024-01-01"]));
-    let vigentes = Arc::new(BooleanArray::from(vec![true, false]));
 
     RecordBatch::try_new(
         schema,
         vec![
-            doc_ids,
-            titulos,
-            tipos,
-            prelaciones,
-            versiones,
-            fechas,
-            vigentes,
+            Arc::new(StringArray::from(vec!["DOC-001", "DOC-002"])),
+            Arc::new(Int32Array::from(vec![2, 1])),
+            Arc::new(BooleanArray::from(vec![true, false])),
+            Arc::new(StringArray::from(vec![
+                "Especificación Acero",
+                "Procedimiento Soldadura Obsoleto",
+            ])),
+            Arc::new(StringArray::from(vec![
+                "NORMA_INTERNACIONAL",
+                "PROCEDIMIENTO_GENERAL",
+            ])),
+            Arc::new(Int8Array::from(vec![1, 3])),
+            Arc::new(StringArray::from(vec!["Rev. 02", "Rev. 01"])),
+            Arc::new(StringArray::from(vec!["2026-03-01", "2024-01-01"])),
+            Arc::new(StringArray::from(vec![None, Some("2026-03-01")])),
         ],
     )
     .unwrap()
 }
 
+/// Lote con la forma de la vista v2 `03_matriz_operativa` (un hito por fila)
 fn crear_lote_matriz_operativa_prueba() -> RecordBatch {
+    let texto = |nombre: &str, nulable: bool| Field::new(nombre, DataType::Utf8, nulable);
     let schema = Arc::new(Schema::new(vec![
-        Field::new("fase_operativa", DataType::Utf8, false),
-        Field::new("doc_id", DataType::Utf8, false),
-        Field::new("parametro_tecnico", DataType::Utf8, false),
-        Field::new("valor_nominal", DataType::Float64, false),
-        Field::new("valor_minimo", DataType::Float64, true),
-        Field::new("valor_maximo", DataType::Float64, true),
-        Field::new("unidad_medida", DataType::Utf8, false),
-        Field::new("condicion_aplicacion", DataType::Utf8, true),
+        texto("hito_id", false),
+        texto("doc_id", false),
+        Field::new("version_num", DataType::Int32, false),
         Field::new("vigente", DataType::Boolean, false),
+        Field::new("orden_secuencia", DataType::Int32, false),
+        texto("fase_operativa", false),
+        texto("objeto_alcance", false),
+        texto("rol_ejecutor", false),
+        texto("rol_responsable", false),
+        texto("registro_codigo", true),
+        texto("registro_nombre", true),
+        texto("criterio_aceptacion", false),
+        texto("condicion_aplicacion", true),
+        texto("calidad_extraccion", false),
     ]));
-
-    let fases = Arc::new(StringArray::from(vec!["Recepcion", "Inspeccion"]));
-    let doc_ids = Arc::new(StringArray::from(vec!["DOC-001", "DOC-001"]));
-    let params = Arc::new(StringArray::from(vec![
-        "Temperatura Almacén",
-        "Presión Hidráulica",
-    ]));
-    let nom = Arc::new(Float64Array::from(vec![20.0, 150.0]));
-    let min = Arc::new(Float64Array::from(vec![Some(15.0), Some(140.0)]));
-    let max = Arc::new(Float64Array::from(vec![Some(25.0), Some(160.0)]));
-    let unidades = Arc::new(StringArray::from(vec!["°C", "bar"]));
-    let conds = Arc::new(StringArray::from(vec![
-        Some("Ambiente controlado"),
-        Some("Carga máxima"),
-    ]));
-    let vigentes = Arc::new(BooleanArray::from(vec![true, true]));
 
     RecordBatch::try_new(
         schema,
         vec![
-            fases, doc_ids, params, nom, min, max, unidades, conds, vigentes,
+            Arc::new(StringArray::from(vec![
+                "DOC-001@v2-HIT-0001",
+                "DOC-001@v2-HIT-0002",
+            ])),
+            Arc::new(StringArray::from(vec!["DOC-001", "DOC-001"])),
+            Arc::new(Int32Array::from(vec![2, 2])),
+            Arc::new(BooleanArray::from(vec![true, true])),
+            Arc::new(Int32Array::from(vec![1, 2])),
+            Arc::new(StringArray::from(vec!["RECEPCION", "INSPECCION"])),
+            Arc::new(StringArray::from(vec![
+                "Temperatura Almacén",
+                "Presión Hidráulica",
+            ])),
+            Arc::new(StringArray::from(vec!["Almacenero", "Inspector QA/QC"])),
+            Arc::new(StringArray::from(vec![
+                "Jefe de Almacén",
+                "Jefe de Calidad",
+            ])),
+            Arc::new(StringArray::from(vec![
+                Some("FOR-ALM-01"),
+                Some("PPI-MAT-09"),
+            ])),
+            Arc::new(StringArray::from(vec![Some("Acta"), Some("PPI")])),
+            Arc::new(StringArray::from(vec!["15-25 °C", "140-160 bar"])),
+            Arc::new(StringArray::from(vec![
+                Some("Ambiente controlado"),
+                Some("Carga máxima"),
+            ])),
+            Arc::new(StringArray::from(vec!["OK", "OK"])),
         ],
     )
     .unwrap()
@@ -109,13 +128,17 @@ async fn test_integration_e2e_las_5_tools_del_lakehouse() {
 
     // 1. Poblado DataFusion
     datafusion
-        .registrar_centro(&centro, "doc_catalog", vec![crear_lote_catalogo_prueba()])
+        .registrar_centro(
+            &centro,
+            "01_documentos_catalogo",
+            vec![crear_lote_catalogo_prueba()],
+        )
         .await
         .unwrap();
     datafusion
         .registrar_centro(
             &centro,
-            "operational_matrix",
+            "03_matriz_operativa",
             vec![crear_lote_matriz_operativa_prueba()],
         )
         .await
@@ -177,13 +200,15 @@ async fn test_integration_e2e_las_5_tools_del_lakehouse() {
         name: LakehouseToolName::QueryOperationalMatrix
             .as_str()
             .to_string(),
-        arguments: json!({ "centro_id": "planta_norte", "fase": "Recepcion" }),
+        arguments: json!({ "centro_id": "planta_norte", "fase": "recepcion" }),
     };
     let res_2 = tool_service.ejecutar_herramienta(&call_2).await.unwrap();
     assert!(!res_2.is_error);
     let params = res_2.output.as_array().unwrap();
     assert_eq!(params.len(), 1);
-    assert_eq!(params[0]["parametro_tecnico"], "Temperatura Almacén");
+    assert_eq!(params[0]["objeto_alcance"], "Temperatura Almacén");
+    assert_eq!(params[0]["rol_responsable"], "Jefe de Almacén");
+    assert_eq!(params[0]["registro_codigo"], "FOR-ALM-01");
 
     // --- TOOL 3: lookup_double_entry_table ---
     let call_3 = ToolCall {
@@ -215,7 +240,7 @@ async fn test_integration_e2e_las_5_tools_del_lakehouse() {
         name: LakehouseToolName::ExecuteAthenaSql.as_str().to_string(),
         arguments: json!({
             "centro_id": "planta_norte",
-            "sql_query": "SELECT COUNT(*) as total FROM doc_catalog WHERE vigente = true"
+            "sql_query": "SELECT COUNT(*) as total FROM 01_documentos_catalogo WHERE vigente = true"
         }),
     };
     let res_4 = tool_service.ejecutar_herramienta(&call_4).await.unwrap();
@@ -249,7 +274,11 @@ async fn test_integration_agent_orchestrator_ciclo_completo() {
     let centro = CenterId::new("planta_alfa").unwrap();
 
     datafusion
-        .registrar_centro(&centro, "doc_catalog", vec![crear_lote_catalogo_prueba()])
+        .registrar_centro(
+            &centro,
+            "01_documentos_catalogo",
+            vec![crear_lote_catalogo_prueba()],
+        )
         .await
         .unwrap();
 

@@ -1,4 +1,7 @@
 //! Puerto de Repositorio para la Gestión y Registro de Centros de Conocimiento
+//!
+//! El adaptador real persiste `centers_registry.json` en el directorio de configuración de la
+//! app (especificación §3.1). Eliminar un centro solo lo quita del registro: nunca borra el disco.
 
 use async_trait::async_trait;
 
@@ -22,6 +25,9 @@ pub trait CenterRegistryPort: Send + Sync {
 
     /// Modifica el estado activo/inactivo de un centro existente
     async fn cambiar_estado(&self, id: &CenterId, activo: bool) -> Result<(), DomainError>;
+
+    /// Quita el centro del registro (sin tocar su directorio) y lo devuelve
+    async fn eliminar(&self, id: &CenterId) -> Result<CentroConocimiento, DomainError>;
 }
 
 #[cfg(test)]
@@ -89,6 +95,12 @@ mod tests {
                 )))
             }
         }
+
+        async fn eliminar(&self, id: &CenterId) -> Result<CentroConocimiento, DomainError> {
+            self.centros.lock().unwrap().remove(id).ok_or_else(|| {
+                DomainError::InvalidCenterId(format!("Centro no encontrado: '{id}'"))
+            })
+        }
     }
 
     #[tokio::test]
@@ -140,5 +152,10 @@ mod tests {
         registry.cambiar_estado(&id2, true).await.unwrap();
         let activos_tras_activacion = registry.listar_activos().await.unwrap();
         assert_eq!(activos_tras_activacion.len(), 2);
+
+        // 6. Eliminar del registro
+        assert_eq!(registry.eliminar(&id2).await.unwrap().id(), &id2);
+        assert!(registry.obtener(&id2).await.unwrap().is_none());
+        assert!(registry.eliminar(&id2).await.is_err());
     }
 }

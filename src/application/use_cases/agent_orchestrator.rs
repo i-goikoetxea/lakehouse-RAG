@@ -20,6 +20,16 @@ pub struct AgentOrchestrator {
     max_steps: usize,
 }
 
+/// Tablas v2 que `execute_athena_sql` acepta por su nombre canónico (esquema §4)
+pub const INVENTARIO_TABLAS_V2: &str = "TABLAS SQL (execute_athena_sql; usa estos nombres tal cual,     la herramienta los traduce a las vistas del centro; contienen todas las revisiones     confirmadas, así que filtra vigente = true para la normativa en vigor):
+    - 01_documentos_catalogo(doc_id, version_num, vigente, titulo, tipo_documento, nivel_prelacion, revision, fecha_vigor, fecha_derogacion, hash_sha256)
+    - 02_chunks_normativa(chunk_id, doc_id, version_num, vigente, nivel_prelacion, breadcrumb_jerarquia, condicion_aplicacion, texto_contenido)
+    - 03_matriz_operativa(hito_id, doc_id, version_num, vigente, orden_secuencia, fase_operativa, objeto_alcance, rol_ejecutor, rol_responsable, registro_codigo, registro_nombre, criterio_aceptacion, condicion_aplicacion, nivel_prelacion, calidad_extraccion)
+    - 04_catalogo_tablas(tabla_id, doc_id, version_num, vigente, titulo_tabla, eje_x_nombre, eje_x_tipo, eje_x_unidad, eje_y_nombre, eje_y_tipo, eje_y_unidad, valor_salida_nombre, instrucciones_uso_sql)
+    - 05_celdas_doble_entrada(celda_id, tabla_id, doc_id, version_num, vigente, eje_x_min, eje_x_max, eje_x_categoria, eje_y_min, eje_y_max, eje_y_categoria, valor_resultado_texto, valor_resultado_num, unidad_medida, nota_pie_condicion)
+    - 06_grafo_referencias(edge_id, doc_id, version_num, vigente, origen_id, origen_tipo, tipo_relacion, destino_id, destino_tipo, contexto_relacion)
+    Valores de fase_operativa en MAYÚSCULAS y sin tildes (RECEPCION, CUSTODIA, INSPECCION…).";
+
 impl AgentOrchestrator {
     pub const DEFAULT_MAX_STEPS: usize = 10;
 
@@ -47,8 +57,11 @@ impl AgentOrchestrator {
             'lookup_double_entry_table', 'execute_athena_sql', 'traverse_normative_graph') para consultar los datos.\n\
             3. Al responder, cita siempre el 'doc_id', la sección y si la norma es prevalente o derogada.\n\
             4. Si una tabla de doble entrada contiene notas al pie, inclúyelas explícitamente en tu dictamen.\n\
-            5. Mantén un tono técnico, formal y orientado a la ingeniería de procesos.",
-            centro_id.as_str()
+            5. Mantén un tono técnico, formal y orientado a la ingeniería de procesos.
+            6. Pasa siempre centro_id = '{0}' a las herramientas.
+            {1}",
+            centro_id.as_str(),
+            INVENTARIO_TABLAS_V2
         )
     }
 

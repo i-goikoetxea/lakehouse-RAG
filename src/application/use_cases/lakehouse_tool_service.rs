@@ -9,6 +9,10 @@ use serde_json::json;
 use crate::application::dtos::tools::*;
 use crate::application::ports::analytical_engine::AnalyticalEnginePort;
 use crate::application::ports::graph_engine::GraphEnginePort;
+use crate::application::ports::lakehouse_projection::nombre_vista;
+use crate::application::ports::lakehouse_store::{
+    TABLA_DOCUMENTOS_CATALOGO, TABLA_MATRIZ_OPERATIVA, TODAS_LAS_TABLAS,
+};
 use crate::application::ports::table_lookup::TableLookupPort;
 use crate::application::ports::tool_server::ToolServerPort;
 use crate::domain::errors::DomainError;
@@ -68,18 +72,10 @@ impl LakehouseToolService {
         s.replace('\'', "''").replace(';', "")
     }
 
-    /// Resuelve el nombre de la tabla calificada por el centro
-    async fn resolver_nombre_tabla(&self, centro_id: &CenterId, nombre_base: &str) -> String {
-        let con_prefijo = format!("{}_{}", centro_id.as_str(), nombre_base);
-        if let Ok(registradas) = self.analytical_engine.listar_tablas_registradas().await {
-            if registradas.contains(&con_prefijo) {
-                return con_prefijo;
-            }
-            if registradas.contains(&nombre_base.to_string()) {
-                return nombre_base.to_string();
-            }
-        }
-        con_prefijo
+    /// Nombre SQL (entrecomillado) de la vista de una tabla v2 del centro. Las vistas solo
+    /// existen mientras el centro está activo: si no, la consulta falla (cero acceso).
+    fn vista_sql(centro_id: &CenterId, tabla: &str) -> String {
+        format!("\"{}\"", nombre_vista(centro_id, tabla))
     }
 
     // --- Implementaciones internas de las 5 herramientas ---
@@ -97,7 +93,7 @@ impl LakehouseToolService {
             })?;
 
         let centro = CenterId::new(&params.centro_id)?;
-        let tabla = self.resolver_nombre_tabla(&centro, "doc_catalog").await;
+        let tabla = Self::vista_sql(&centro, TABLA_DOCUMENTOS_CATALOGO);
 
         let solo_vigentes = params.solo_vigentes.unwrap_or(true);
         let where_clause = if solo_vigentes {
@@ -106,7 +102,7 @@ impl LakehouseToolService {
             ""
         };
         let sql = format!(
-            "SELECT doc_id, titulo, tipo, nivel_prelacion, version, fecha_emision, vigente FROM {tabla}{where_clause} ORDER BY nivel_prelacion ASC"
+            "SELECT doc_id, titulo, tipo_documento, nivel_prelacion, revision, version_num, fecha_vigor, fecha_derogacion, vigente FROM {tabla}{where_clause} ORDER BY nivel_prelacion ASC, doc_id ASC, version_num DESC"
         );
 
         let batches = match self.analytical_engine.ejecutar_sql(&sql).await {
@@ -147,9 +143,7 @@ impl LakehouseToolService {
             })?;
 
         let centro = CenterId::new(&params.centro_id)?;
-        let tabla = self
-            .resolver_nombre_tabla(&centro, "operational_matrix")
-            .await;
+        let tabla = Self::vista_sql(&centro, TABLA_MATRIZ_OPERATIVA);
 
         let mut condiciones = vec!["vigente = true".to_string()];
 
@@ -170,7 +164,8 @@ impl LakehouseToolService {
             .filter(|p| !p.is_empty())
         {
             let limpia = Self::sanitizar_filtro(parametro);
-            condiciones.push(format!("LOWER(parametro_tecnico) LIKE LOWER('%{limpia}%')"));
+            // v2 no tiene `parametro_tecnico`: el filtro libre se aplica al objeto del hito
+            condiciones.push(format!("LOWER(objeto_alcance) LIKE LOWER('%{limpia}%')"));
         }
 
         let where_clause = if condiciones.is_empty() {
@@ -180,7 +175,7 @@ impl LakehouseToolService {
         };
 
         let sql = format!(
-            "SELECT fase_operativa, doc_id, parametro_tecnico, valor_nominal, valor_minimo, valor_maximo, unidad_medida, condicion_aplicacion, vigente FROM {tabla}{where_clause}"
+            "SELECT fase_operativa, doc_id, version_num, hito_id, orden_secuencia, objeto_alcance, rol_ejecutor, rol_responsable, registro_codigo, registro_nombre, criterio_aceptacion, condicion_aplicacion, calidad_extraccion, vigente FROM {tabla}{where_clause} ORDER BY doc_id, orden_secuencia"
         );
 
         let batches = match self.analytical_engine.ejecutar_sql(&sql).await {
@@ -302,30 +297,8 @@ impl LakehouseToolService {
             })?;
 
         let centro = CenterId::new(&params.centro_id)?;
-        let mut sql = params.sql_query.trim().to_string();
-
-        // Control de aislamiento: Si el SQL usa nombres de tablas canónicos no cualificados, sustituirlos por el prefijo del centro
-        let tablas_base = [
-            "doc_catalog",
-            "doc_chunks",
-            "operational_matrix",
-            "double_entry_tables",
-            "double_entry_cells",
-            "reference_graph",
-        ];
-
-        for t in tablas_base {
-            let prefijo_centro = format!("{}_{}", centro.as_str(), t);
-            // Reemplaza ocurrencias aisladas de la tabla sin prefijo
-            let patron_espacio = format!(" {t} ");
-            let reemplazo_espacio = format!(" {prefijo_centro} ");
-            sql = sql.replace(&patron_espacio, &reemplazo_espacio);
-
-            let patron_fin = format!(" {t}");
-            if sql.ends_with(&patron_fin) {
-                sql = format!("{} {prefijo_centro}", &sql[..sql.len() - patron_fin.len()]);
-            }
-        }
+        // Aislamiento: los nombres canónicos v2 se traducen a las vistas del centro
+        let sql = reescribir_tablas_canonicas(params.sql_query.trim(), &centro);
 
         let batches = match self.analytical_engine.ejecutar_sql(&sql).await {
             Ok(b) => b,
@@ -433,6 +406,48 @@ impl LakehouseToolService {
     }
 }
 
+fn es_caracter_de_identificador(c: char) -> bool {
+    c.is_alphanumeric() || c == '_' || c == '.'
+}
+
+/// Sustituye cada aparición aislada de `tabla` (sin distinguir mayúsculas) por la vista
+/// entrecomillada; respeta las ya entrecomilladas y las que forman parte de otro identificador.
+fn reemplazar_identificador(sql: &str, tabla: &str, vista: &str) -> String {
+    let minusculas = sql.to_ascii_lowercase();
+    let mut salida = String::with_capacity(sql.len() + vista.len());
+    let mut cursor = 0;
+    while let Some(relativo) = minusculas[cursor..].find(tabla) {
+        let inicio = cursor + relativo;
+        let fin = inicio + tabla.len();
+        let previo = sql[..inicio].chars().last();
+        let siguiente = sql[fin..].chars().next();
+        salida.push_str(&sql[cursor..inicio]);
+        if previo.is_some_and(es_caracter_de_identificador)
+            || siguiente.is_some_and(es_caracter_de_identificador)
+        {
+            salida.push_str(&sql[inicio..fin]);
+        } else if previo == Some('"') && siguiente == Some('"') {
+            salida.push_str(vista);
+        } else {
+            salida.push('"');
+            salida.push_str(vista);
+            salida.push('"');
+        }
+        cursor = fin;
+    }
+    salida.push_str(&sql[cursor..]);
+    salida
+}
+
+/// Traduce las 6 tablas canónicas v2 (`03_matriz_operativa`…) a las vistas del centro
+pub fn reescribir_tablas_canonicas(sql: &str, centro: &CenterId) -> String {
+    TODAS_LAS_TABLAS
+        .iter()
+        .fold(sql.to_string(), |acumulado, tabla| {
+            reemplazar_identificador(&acumulado, tabla, &nombre_vista(centro, tabla))
+        })
+}
+
 #[async_trait]
 impl ToolServerPort for LakehouseToolService {
     fn listar_herramientas(&self) -> Vec<ToolDefinition> {
@@ -490,10 +505,12 @@ mod tests {
         let schema = Arc::new(Schema::new(vec![
             Field::new("doc_id", DataType::Utf8, false),
             Field::new("titulo", DataType::Utf8, false),
-            Field::new("tipo", DataType::Utf8, false),
+            Field::new("tipo_documento", DataType::Utf8, false),
             Field::new("nivel_prelacion", DataType::Int8, false),
-            Field::new("version", DataType::Int32, false),
-            Field::new("fecha_emision", DataType::Utf8, false),
+            Field::new("revision", DataType::Utf8, false),
+            Field::new("version_num", DataType::Int32, false),
+            Field::new("fecha_vigor", DataType::Utf8, false),
+            Field::new("fecha_derogacion", DataType::Utf8, true),
             Field::new("vigente", DataType::Boolean, false),
         ]));
 
@@ -504,8 +521,10 @@ mod tests {
         ]));
         let tipos = Arc::new(StringArray::from(vec!["Norma", "Procedimiento"]));
         let prelaciones = Arc::new(Int8Array::from(vec![1, 3]));
+        let revisiones = Arc::new(StringArray::from(vec!["Rev. 01", "Rev. 02"]));
         let versiones = Arc::new(Int32Array::from(vec![1, 2]));
         let fechas = Arc::new(StringArray::from(vec!["2026-01-01", "2026-02-01"]));
+        let derogaciones = Arc::new(StringArray::from(vec![None, Some("2026-03-01")]));
         let vigentes = Arc::new(BooleanArray::from(vec![true, false]));
 
         RecordBatch::try_new(
@@ -515,12 +534,45 @@ mod tests {
                 titulos,
                 tipos,
                 prelaciones,
+                revisiones,
                 versiones,
                 fechas,
+                derogaciones,
                 vigentes,
             ],
         )
         .unwrap()
+    }
+
+    #[test]
+    fn test_reescritura_traduce_tablas_canonicas_a_vistas_del_centro() {
+        let centro = CenterId::new("obra-a").unwrap();
+        let sql = "SELECT rol_responsable, COUNT(*) FROM 03_matriz_operativa m JOIN \"01_documentos_catalogo\" d ON m.doc_id = d.doc_id GROUP BY 1";
+        let reescrita = reescribir_tablas_canonicas(sql, &centro);
+        assert!(
+            reescrita.contains("FROM \"obra-a_03_matriz_operativa\" m"),
+            "{reescrita}"
+        );
+        assert!(
+            reescrita.contains("JOIN \"obra-a_01_documentos_catalogo\" d"),
+            "{reescrita}"
+        );
+    }
+
+    #[test]
+    fn test_reescritura_respeta_identificadores_que_contienen_el_nombre() {
+        let centro = CenterId::new("obra-a").unwrap();
+        for intacta in [
+            "SELECT * FROM \"obra-a_03_matriz_operativa\"",
+            "SELECT * FROM x03_matriz_operativa",
+            "SELECT * FROM 03_matriz_operativa_bis",
+        ] {
+            assert_eq!(reescribir_tablas_canonicas(intacta, &centro), intacta);
+        }
+        assert_eq!(
+            reescribir_tablas_canonicas("select * from 06_GRAFO_REFERENCIAS", &centro),
+            "select * from \"obra-a_06_grafo_referencias\""
+        );
     }
 
     #[tokio::test]
@@ -531,7 +583,11 @@ mod tests {
 
         let centro = CenterId::new("planta_alfa").unwrap();
         datafusion
-            .registrar_centro(&centro, "doc_catalog", vec![fixture_catalog_batch()])
+            .registrar_centro(
+                &centro,
+                "01_documentos_catalogo",
+                vec![fixture_catalog_batch()],
+            )
             .await
             .unwrap();
 

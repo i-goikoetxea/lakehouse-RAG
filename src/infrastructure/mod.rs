@@ -3,6 +3,7 @@
 //! Implementa los puertos definidos en la capa de aplicación interactuando
 //! con el sistema de archivos, LanceDB, Apache DataFusion, FastEmbed y Claude CLI.
 
+pub mod bootstrap;
 pub mod embeddings;
 pub mod llm;
 pub mod mcp;

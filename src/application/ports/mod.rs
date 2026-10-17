@@ -3,10 +3,12 @@
 pub mod agent_runner;
 pub mod analytical_engine;
 pub mod center_registry;
+pub mod center_workspace;
 pub mod document_parser;
 pub mod embedding_engine;
 pub mod graph_engine;
 pub mod hybrid_search;
+pub mod lakehouse_projection;
 pub mod lakehouse_store;
 pub mod llm_distiller;
 pub mod model_catalog;

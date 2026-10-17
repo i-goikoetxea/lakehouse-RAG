@@ -30,6 +30,17 @@ impl TableLookupService {
         }
     }
 
+    /// Elimina todas las celdas (la proyección recarga TableLookup desde LanceDB)
+    pub fn vaciar(&self) -> Result<(), DomainError> {
+        self.celdas_por_tabla
+            .write()
+            .map_err(|_| {
+                DomainError::StorageError("Error de contención en lock de celdas".to_string())
+            })?
+            .clear();
+        Ok(())
+    }
+
     /// Registra directamente una lista de celdas de dominio
     pub fn registrar_celdas(&self, celdas: Vec<CeldaDobleEntrada>) -> Result<(), DomainError> {
         let mut mapa = self.celdas_por_tabla.write().map_err(|_| {
