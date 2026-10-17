@@ -16,7 +16,10 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 
-use arrow_array::{Array, BooleanArray, RecordBatch};
+use arrow_array::{
+    Array, BooleanArray, FixedSizeListArray, Float32Array, Int8Array, Int32Array, RecordBatch,
+    StringArray,
+};
 use arrow_schema::{DataType, SchemaRef};
 use async_trait::async_trait;
 use serde_json::json;
@@ -29,8 +32,11 @@ use crate::application::ports::lakehouse_projection::{
     LakehouseProjectionPort, ResumenProyeccion, VistaProyectada, nombre_vista,
 };
 use crate::application::ports::lakehouse_store::{
-    ConsultaTabla, LIMITE_MAXIMO_LECTURA, TABLA_CELDAS_DOBLE_ENTRADA, TABLA_GRAFO_REFERENCIAS,
-    TODAS_LAS_TABLAS,
+    ConsultaTabla, LIMITE_MAXIMO_LECTURA, TABLA_CELDAS_DOBLE_ENTRADA, TABLA_CHUNKS_NORMATIVA,
+    TABLA_GRAFO_REFERENCIAS, TABLA_MATRIZ_OPERATIVA, TODAS_LAS_TABLAS,
+};
+use crate::application::ports::semantic_index::{
+    FragmentoIndexado, IndiceSemanticoPort, OrigenFragmento,
 };
 use crate::application::use_cases::table_lookup_service::TableLookupService;
 use crate::domain::errors::DomainError;
@@ -63,6 +69,7 @@ pub struct LanceProjection {
     datafusion: Arc<DataFusionEngine>,
     lookup: Arc<TableLookupService>,
     grafo: Arc<PetgraphEngine>,
+    indice: Option<Arc<dyn IndiceSemanticoPort>>,
     proyectados: Mutex<HashMap<CenterId, LotesGlobales>>,
 }
 
@@ -76,8 +83,15 @@ impl LanceProjection {
             datafusion,
             lookup,
             grafo,
+            indice: None,
             proyectados: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// Alimenta también el índice semántico de `search_normative_context` (Fase 13)
+    pub fn con_indice_semantico(mut self, indice: Arc<dyn IndiceSemanticoPort>) -> Self {
+        self.indice = Some(indice);
+        self
     }
 
     async fn leer_tabla(
@@ -137,6 +151,138 @@ impl LanceProjection {
         }
         Ok((aristas, celdas))
     }
+}
+
+fn columna_texto<'a>(lote: &'a RecordBatch, nombre: &str) -> Option<&'a StringArray> {
+    lote.column_by_name(nombre)
+        .and_then(|c| c.as_any().downcast_ref::<StringArray>())
+}
+
+fn texto_en(lote: &RecordBatch, nombre: &str, fila: usize) -> Option<String> {
+    columna_texto(lote, nombre)
+        .filter(|c| c.is_valid(fila))
+        .map(|c| c.value(fila).to_string())
+        .filter(|t| !t.trim().is_empty())
+}
+
+fn entero_en(lote: &RecordBatch, nombre: &str, fila: usize) -> i64 {
+    let columna = lote.column_by_name(nombre);
+    if let Some(c) = columna.and_then(|c| c.as_any().downcast_ref::<Int32Array>()) {
+        return i64::from(c.value(fila));
+    }
+    columna
+        .and_then(|c| c.as_any().downcast_ref::<Int8Array>())
+        .map_or(0, |c| i64::from(c.value(fila)))
+}
+
+fn vector_en(lote: &RecordBatch, nombre: &str, fila: usize) -> Vec<f32> {
+    let Some(lista) = lote
+        .column_by_name(nombre)
+        .and_then(|c| c.as_any().downcast_ref::<FixedSizeListArray>())
+        .filter(|l| l.is_valid(fila))
+    else {
+        return Vec::new();
+    };
+    let valores = lista.value(fila);
+    valores
+        .as_any()
+        .downcast_ref::<Float32Array>()
+        .map(|f| f.values().to_vec())
+        .unwrap_or_default()
+}
+
+/// Fragmento con las columnas comunes a chunks e hitos
+fn fragmento_base(
+    lote: &RecordBatch,
+    fila: usize,
+    id_columna: &str,
+    origen: OrigenFragmento,
+) -> FragmentoIndexado {
+    FragmentoIndexado {
+        id: texto_en(lote, id_columna, fila).unwrap_or_default(),
+        origen,
+        doc_id: texto_en(lote, "doc_id", fila).unwrap_or_default(),
+        version_num: i32::try_from(entero_en(lote, "version_num", fila)).unwrap_or_default(),
+        nivel_prelacion: i8::try_from(entero_en(lote, "nivel_prelacion", fila)).unwrap_or(5),
+        breadcrumb_jerarquia: String::new(),
+        condicion_aplicacion: texto_en(lote, "condicion_aplicacion", fila),
+        texto: String::new(),
+        chunk_origen_id: None,
+        vector: Vec::new(),
+    }
+}
+
+fn fragmentos_de_chunks(lotes: &[RecordBatch]) -> Vec<FragmentoIndexado> {
+    let mut fragmentos = Vec::new();
+    for lote in lotes {
+        for fila in 0..lote.num_rows() {
+            let mut f = fragmento_base(lote, fila, "chunk_id", OrigenFragmento::Chunk);
+            f.breadcrumb_jerarquia =
+                texto_en(lote, "breadcrumb_jerarquia", fila).unwrap_or_default();
+            f.texto = texto_en(lote, "texto_contenido", fila).unwrap_or_default();
+            f.vector = vector_en(lote, "vector", fila);
+            fragmentos.push(f);
+        }
+    }
+    fragmentos
+}
+
+/// Texto legible de un hito: roles y registro en campos separados (anti-fusión)
+fn texto_hito(lote: &RecordBatch, fila: usize) -> String {
+    let campo = |nombre: &str| texto_en(lote, nombre, fila).unwrap_or_else(|| "-".to_string());
+    format!(
+        "Fase {}: {}. Ejecutor: {}. Responsable: {}. Registro: {} {}. Criterio: {}",
+        campo("fase_operativa"),
+        campo("objeto_alcance"),
+        campo("rol_ejecutor"),
+        campo("rol_responsable"),
+        campo("registro_codigo"),
+        campo("registro_nombre"),
+        campo("criterio_aceptacion"),
+    )
+}
+
+fn fragmentos_de_hitos(
+    lotes: &[RecordBatch],
+    breadcrumbs: &HashMap<String, String>,
+) -> Vec<FragmentoIndexado> {
+    let mut fragmentos = Vec::new();
+    for lote in lotes {
+        for fila in 0..lote.num_rows() {
+            let mut f = fragmento_base(lote, fila, "hito_id", OrigenFragmento::Hito);
+            f.chunk_origen_id = texto_en(lote, "chunk_origen_id", fila);
+            f.breadcrumb_jerarquia = f
+                .chunk_origen_id
+                .as_ref()
+                .and_then(|c| breadcrumbs.get(c).cloned())
+                .unwrap_or_default();
+            f.texto = texto_hito(lote, fila);
+            f.vector = vector_en(lote, "vector_hito", fila);
+            fragmentos.push(f);
+        }
+    }
+    fragmentos
+}
+
+/// Chunks e hitos (con vector) de todas las revisiones confirmadas del centro
+fn fragmentos_indexables(leidas: &[TablaLeida]) -> Vec<FragmentoIndexado> {
+    let lotes_de = |tabla: &str| {
+        leidas
+            .iter()
+            .find(|l| l.tabla == tabla)
+            .map(|l| l.lotes_completos.clone())
+            .unwrap_or_default()
+    };
+    let mut fragmentos = fragmentos_de_chunks(&lotes_de(TABLA_CHUNKS_NORMATIVA));
+    let breadcrumbs: HashMap<String, String> = fragmentos
+        .iter()
+        .map(|f| (f.id.clone(), f.breadcrumb_jerarquia.clone()))
+        .collect();
+    fragmentos.extend(fragmentos_de_hitos(
+        &lotes_de(TABLA_MATRIZ_OPERATIVA),
+        &breadcrumbs,
+    ));
+    fragmentos
 }
 
 fn es_vectorial(tipo: &DataType) -> bool {
@@ -257,8 +403,12 @@ impl LakehouseProjectionPort for LanceProjection {
             leidas.push(Self::leer_tabla(centro, tabla).await?);
         }
 
+        let fragmentos = fragmentos_indexables(&leidas);
         let mut proyectados = self.proyectados.lock().await;
         self.datafusion.desregistrar_centro(&centro.id).await?;
+        if let Some(indice) = &self.indice {
+            indice.reemplazar_centro(&centro.id, fragmentos).await;
+        }
         let mut globales = LotesGlobales::default();
         let mut inventario = Vec::with_capacity(leidas.len());
         for leida in leidas {
@@ -294,6 +444,9 @@ impl LakehouseProjectionPort for LanceProjection {
     async fn retirar_vistas(&self, centro_id: &CenterId) -> Result<(), DomainError> {
         let mut proyectados = self.proyectados.lock().await;
         self.datafusion.desregistrar_centro(centro_id).await?;
+        if let Some(indice) = &self.indice {
+            indice.retirar_centro(centro_id).await;
+        }
         if proyectados.remove(centro_id).is_some() {
             self.recargar_motores_globales(&proyectados).await?;
         }

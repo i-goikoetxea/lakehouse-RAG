@@ -1,199 +1,255 @@
-//! Suite de pruebas adversariales de seguridad y resiliencia para el Servidor de Herramientas y Agente (Fase 6)
+//! Suite de pruebas adversariales de seguridad y resiliencia para el Servidor de Herramientas y
+//! Agente (Fase 6, adaptada al contrato v2 de la Fase 13)
+
+mod comun_agent_tools;
 
 use std::sync::Arc;
 
-use arrow_array::{BooleanArray, Int8Array, Int32Array, RecordBatch, StringArray};
-use arrow_schema::{DataType, Field, Schema};
-use serde_json::json;
+use serde_json::{Value, json};
 
+use comun_agent_tools::*;
 use lakehouse_rag::application::dtos::agent::{AgentMessage, AgentTurnOutput, ClaudeModel};
-use lakehouse_rag::application::dtos::tools::{LakehouseToolName, ToolCall};
+use lakehouse_rag::application::dtos::tools::{LakehouseToolName, ToolCall, ToolResult};
 use lakehouse_rag::application::ports::agent_runner::AgentRunnerPort;
-use lakehouse_rag::application::ports::analytical_engine::AnalyticalEnginePort;
 use lakehouse_rag::application::ports::tool_server::ToolServerPort;
 use lakehouse_rag::application::use_cases::agent_orchestrator::AgentOrchestrator;
-use lakehouse_rag::application::use_cases::lakehouse_tool_service::LakehouseToolService;
-use lakehouse_rag::application::use_cases::table_lookup_service::TableLookupService;
 use lakehouse_rag::domain::errors::DomainError;
 use lakehouse_rag::domain::models::center::CenterId;
-use lakehouse_rag::infrastructure::query_engine::datafusion_engine::DataFusionEngine;
-use lakehouse_rag::infrastructure::query_engine::petgraph_engine::PetgraphEngine;
 
-fn lote_minimo_seguridad() -> RecordBatch {
-    let schema = Arc::new(Schema::new(vec![
-        Field::new("doc_id", DataType::Utf8, false),
-        Field::new("titulo", DataType::Utf8, false),
-        Field::new("tipo", DataType::Utf8, false),
-        Field::new("nivel_prelacion", DataType::Int8, false),
-        Field::new("version", DataType::Int32, false),
-        Field::new("fecha_emision", DataType::Utf8, false),
-        Field::new("vigente", DataType::Boolean, false),
-    ]));
+async fn invocar(servicio: &dyn ToolServerPort, nombre: &str, argumentos: Value) -> ToolResult {
+    servicio
+        .ejecutar_herramienta(&ToolCall {
+            id: format!("call_{nombre}"),
+            name: nombre.to_string(),
+            arguments: argumentos,
+        })
+        .await
+        .expect("los fallos de la tool se devuelven como ToolResult con is_error")
+}
 
-    let doc_ids = Arc::new(StringArray::from(vec!["DOC-CONFIDENCIAL"]));
-    let titulos = Arc::new(StringArray::from(vec!["Documento Secreto"]));
-    let tipos = Arc::new(StringArray::from(vec!["Norma"]));
-    let prelaciones = Arc::new(Int8Array::from(vec![1]));
-    let versiones = Arc::new(Int32Array::from(vec![1]));
-    let fechas = Arc::new(StringArray::from(vec!["2026-01-01"]));
-    let vigentes = Arc::new(BooleanArray::from(vec![true]));
+fn mensaje_error(resultado: &ToolResult) -> String {
+    assert!(
+        resultado.is_error,
+        "se esperaba error: {}",
+        resultado.output
+    );
+    resultado.output["error"]
+        .as_str()
+        .expect("el error viaja en output.error")
+        .to_string()
+}
 
-    RecordBatch::try_new(
-        schema,
-        vec![
-            doc_ids,
-            titulos,
-            tipos,
-            prelaciones,
-            versiones,
-            fechas,
-            vigentes,
-        ],
+async fn total_documentos(servicio: &dyn ToolServerPort, centro: &str) -> Value {
+    let resultado = invocar(
+        servicio,
+        LakehouseToolName::ExecuteAthenaSql.as_str(),
+        json!({ "centro_id": centro, "sql_query": "SELECT COUNT(*) AS n FROM 01_documentos_catalogo" }),
     )
-    .unwrap()
+    .await;
+    assert!(!resultado.is_error, "{}", resultado.output);
+    resultado.output["resultado"][0]["n"].clone()
 }
 
 #[tokio::test]
 async fn test_adv_bloqueo_inyecciones_sql_destructivas_en_herramienta() {
-    let datafusion = Arc::new(DataFusionEngine::new());
-    let lookup = Arc::new(TableLookupService::new());
-    let petgraph = Arc::new(PetgraphEngine::new());
-    let service = LakehouseToolService::new(datafusion, lookup, petgraph);
+    let entorno = entorno_vacio();
+    let centro = CenterId::new("planta_segura").unwrap();
+    sembrar_centro(&entorno, &centro).await;
+    let servicio = entorno.servicio.as_ref();
 
     let inyecciones = [
-        "DROP TABLE doc_catalog",
-        "DELETE FROM doc_catalog WHERE 1=1",
-        "INSERT INTO doc_catalog VALUES ('X', 'Y', 'Z', 1, 1, '2026', true)",
-        "ALTER TABLE doc_catalog ADD COLUMN backdoor TEXT",
-        "SELECT * FROM doc_catalog; DROP TABLE doc_catalog;",
-        "TRUNCATE TABLE doc_catalog",
+        "DROP TABLE 01_documentos_catalogo",
+        "DELETE FROM 01_documentos_catalogo WHERE 1=1",
+        "INSERT INTO 01_documentos_catalogo VALUES ('X', 'Y', 'Z', 1, 1, '2026', true)",
+        "ALTER TABLE 01_documentos_catalogo ADD COLUMN backdoor TEXT",
+        "SELECT * FROM 01_documentos_catalogo; DROP TABLE 01_documentos_catalogo;",
+        "TRUNCATE TABLE 01_documentos_catalogo",
+        "UPDATE 01_documentos_catalogo SET vigente = false",
+        "SELECT 1; DELETE FROM 01_documentos_catalogo",
     ];
 
     for iny in inyecciones {
-        let call = ToolCall {
-            id: "call_iny".to_string(),
-            name: LakehouseToolName::ExecuteAthenaSql.as_str().to_string(),
-            arguments: json!({
-                "centro_id": "planta_segura",
-                "sql_query": iny
-            }),
-        };
-
-        let res = service.ejecutar_herramienta(&call).await.unwrap();
-        assert!(res.is_error, "Se debió bloquear la consulta: {iny}");
+        let resultado = invocar(
+            servicio,
+            LakehouseToolName::ExecuteAthenaSql.as_str(),
+            json!({ "centro_id": "planta_segura", "sql_query": iny }),
+        )
+        .await;
+        let error = mensaje_error(&resultado);
         assert!(
-            res.output["error"]
-                .as_str()
-                .unwrap()
-                .contains("Operación no permitida")
-                || res.output["error"]
-                    .as_str()
-                    .unwrap()
-                    .contains("debe comenzar con SELECT")
+            error.contains("Operación no permitida")
+                || error.contains("debe comenzar con SELECT")
+                || error.contains("exactamente una sentencia"),
+            "Se debió bloquear la consulta: {iny} → {error}"
         );
     }
+
+    // Las vistas siguen intactas tras los intentos
+    assert_eq!(total_documentos(servicio, "planta_segura").await, 4);
 }
 
 #[tokio::test]
 async fn test_adv_aislamiento_estricto_anti_cross_center_en_sql_tool() {
-    let datafusion = Arc::new(DataFusionEngine::new());
-    let lookup = Arc::new(TableLookupService::new());
-    let petgraph = Arc::new(PetgraphEngine::new());
-
+    let entorno = entorno_vacio();
     let centro_a = CenterId::new("planta_alfa").unwrap();
     let centro_b = CenterId::new("planta_beta").unwrap();
 
-    // Solo registramos datos en planta_alfa
-    datafusion
-        .registrar_centro(&centro_a, "doc_catalog", vec![lote_minimo_seguridad()])
-        .await
-        .unwrap();
+    // Solo planta_alfa tiene documentos; planta_beta está activo pero vacío
+    sembrar_centro(&entorno, &centro_a).await;
+    registrar_centro_vacio(&entorno, &centro_b).await;
+    let servicio = entorno.servicio.as_ref();
 
-    let service = LakehouseToolService::new(datafusion, lookup, petgraph);
+    // La tabla no cualificada se resuelve contra las vistas del centro que consulta
+    assert_eq!(total_documentos(servicio, centro_b.as_str()).await, 0);
+    assert_eq!(total_documentos(servicio, centro_a.as_str()).await, 4);
 
-    // Intentamos consultar desde planta_beta hacia las tablas de planta_alfa o tabla no cualificada
-    let call_aislamiento = ToolCall {
-        id: "call_aisla".to_string(),
-        name: LakehouseToolName::ExecuteAthenaSql.as_str().to_string(),
-        arguments: json!({
-            "centro_id": centro_b.as_str(),
-            "sql_query": "SELECT * FROM doc_catalog"
-        }),
-    };
+    // Intentos explícitos de leer las vistas de planta_alfa desde planta_beta
+    for sql in [
+        "SELECT * FROM \"planta_alfa_01_documentos_catalogo\"".to_string(),
+        "SELECT * FROM planta_alfa_03_matriz_operativa".to_string(),
+        "SELECT doc_id FROM 01_documentos_catalogo UNION ALL SELECT doc_id FROM \"planta_alfa_01_documentos_catalogo\"".to_string(),
+        "WITH robo AS (SELECT * FROM \"planta_alfa_06_grafo_referencias\") SELECT * FROM robo".to_string(),
+    ] {
+        let resultado = invocar(
+            servicio,
+            LakehouseToolName::ExecuteAthenaSql.as_str(),
+            json!({ "centro_id": centro_b.as_str(), "sql_query": sql }),
+        )
+        .await;
+        let error = mensaje_error(&resultado);
+        assert!(error.contains("Acceso denegado"), "{sql} → {error}");
+    }
 
-    let res = service
-        .ejecutar_herramienta(&call_aislamiento)
-        .await
-        .unwrap();
-    // Debe dar error porque la tabla mapeada planta_beta_doc_catalog no existe para planta_beta
-    assert!(res.is_error);
-    assert!(
-        res.output["error"]
-            .as_str()
-            .unwrap()
-            .contains("Error de sintaxis o ejecución SQL")
-    );
+    // Un centro sin vistas proyectadas no puede usar ninguna tool
+    let resultado = invocar(
+        servicio,
+        LakehouseToolName::ExecuteAthenaSql.as_str(),
+        json!({ "centro_id": "planta_gamma", "sql_query": "SELECT * FROM 01_documentos_catalogo" }),
+    )
+    .await;
+    assert!(mensaje_error(&resultado).contains("no está activo"));
+
+    // Las tools no SQL tampoco ven datos de planta_alfa desde planta_beta
+    let matriz = invocar(
+        servicio,
+        LakehouseToolName::QueryOperationalMatrix.as_str(),
+        json!({ "centro_id": centro_b.as_str() }),
+    )
+    .await;
+    assert!(!matriz.is_error, "{}", matriz.output);
+    assert_eq!(matriz.output["total"], 0);
 }
 
 #[tokio::test]
 async fn test_adv_tolerancia_a_argumentos_json_corruptos_o_incompletos() {
-    let datafusion = Arc::new(DataFusionEngine::new());
-    let lookup = Arc::new(TableLookupService::new());
-    let petgraph = Arc::new(PetgraphEngine::new());
-    let service = LakehouseToolService::new(datafusion, lookup, petgraph);
+    let entorno = entorno_vacio();
+    let centro = CenterId::new("p").unwrap();
+    sembrar_centro(&entorno, &centro).await;
+    let servicio = entorno.servicio.as_ref();
 
     let payloads_corruptos = [
         ("inspect_lakehouse_catalog", json!({})), // Falta centro_id
+        (
+            "inspect_lakehouse_catalog",
+            json!({ "centro_id": "p", "solo_vigentes": true }),
+        ), // Campo v1 ya inexistente
         ("query_operational_matrix", json!({ "fase": 12345 })), // centro_id ausente y tipo incorrecto
         (
+            "query_operational_matrix",
+            json!({ "centro_id": "p", "parametro": "temp" }),
+        ), // Campo v1 ya inexistente
+        (
             "lookup_double_entry_table",
-            json!({ "centro_id": "p", "valor_x": "no_es_numero" }),
+            json!({ "centro_id": "p", "tabla_id": "4-A", "valor_x": [15], "valor_y": "Acero" }),
         ),
+        (
+            "lookup_double_entry_table",
+            json!({ "centro_id": "p", "tabla_id": "4-A", "valor_x": 15, "categoria_y": "Acero" }),
+        ), // valor_y ausente y campo v1
         ("execute_athena_sql", json!({ "sql_query": 42 })),
         (
             "traverse_normative_graph",
-            json!({ "centro_id": "p", "modo": 999 }),
+            json!({ "centro_id": "p", "nodo_origen": "DOC-001", "modo": 999 }),
+        ),
+        (
+            "traverse_normative_graph",
+            json!({ "centro_id": "p", "doc_origen_id": "DOC-001" }),
+        ),
+        (
+            "search_normative_context",
+            json!({ "centro_id": "p", "consulta": "x", "top_k": "muchos" }),
         ),
     ];
 
     for (name, payload) in payloads_corruptos {
-        let call = ToolCall {
-            id: "call_err".to_string(),
-            name: name.to_string(),
-            arguments: payload,
-        };
-
-        let err = service.ejecutar_herramienta(&call).await.unwrap_err();
-        assert!(matches!(err, DomainError::ToolExecutionError(_)));
-        assert!(err.to_string().contains("Argumentos inválidos"));
+        let resultado = invocar(servicio, name, payload.clone()).await;
+        let error = mensaje_error(&resultado);
+        assert!(
+            error.contains("Argumentos inválidos"),
+            "{name} {payload} → {error}"
+        );
     }
+
+    let desconocida = invocar(servicio, "herramienta_inexistente", json!({})).await;
+    assert!(desconocida.is_error);
 }
 
 #[tokio::test]
 async fn test_adv_resistencia_a_inyecciones_en_filtros_de_matriz_operativa() {
-    let datafusion = Arc::new(DataFusionEngine::new());
-    let lookup = Arc::new(TableLookupService::new());
-    let petgraph = Arc::new(PetgraphEngine::new());
+    let entorno = entorno_vacio();
     let centro = CenterId::new("planta_alfa").unwrap();
+    sembrar_centro(&entorno, &centro).await;
+    let servicio = entorno.servicio.as_ref();
 
-    let service = LakehouseToolService::new(datafusion, lookup, petgraph);
+    // Intentar romper el WHERE de SQL inyectando comillas y sentencias en los filtros
+    for filtros in [
+        json!({ "rol": "Almacenero' OR '1'='1" }),
+        json!({ "registro": "FOR-ALM-01'; DROP TABLE \"planta_alfa_03_matriz_operativa\"; --" }),
+        json!({ "doc_id": "DOC-001' OR '1'='1" }),
+        json!({ "objeto": "%' UNION SELECT * FROM \"planta_alfa_01_documentos_catalogo\" --" }),
+    ] {
+        let mut argumentos = filtros.clone();
+        argumentos["centro_id"] = json!(centro.as_str());
+        let resultado = invocar(
+            servicio,
+            LakehouseToolName::QueryOperationalMatrix.as_str(),
+            argumentos,
+        )
+        .await;
+        assert!(!resultado.is_error, "{filtros}: {}", resultado.output);
+        assert_eq!(
+            resultado.output["total"], 0,
+            "{filtros}: {}",
+            resultado.output
+        );
+    }
 
-    // Intentar romper el WHERE de SQL inyectando comillas y sentencias
-    let call_iny = ToolCall {
-        id: "call_mat_iny".to_string(),
-        name: LakehouseToolName::QueryOperationalMatrix
-            .as_str()
-            .to_string(),
-        arguments: json!({
-            "centro_id": centro.as_str(),
-            "fase": "Recepcion' OR '1'='1",
-            "parametro": "temp'; DROP TABLE operational_matrix; --"
-        }),
-    };
+    // La fase se normaliza a su vocabulario canónico y se filtra en Rust: el «OR '1'='1»
+    // nunca amplía el resultado a otras fases (sin inyección sería RECEPCION → 1 fila)
+    let fase = invocar(
+        servicio,
+        LakehouseToolName::QueryOperationalMatrix.as_str(),
+        json!({ "centro_id": centro.as_str(), "fase": "Recepcion' OR '1'='1" }),
+    )
+    .await;
+    if !fase.is_error {
+        let filas = fase.output["filas"].as_array().unwrap();
+        assert!(filas.len() <= 1, "{}", fase.output);
+        assert!(
+            filas.iter().all(|f| f["fase_operativa"] == "RECEPCION"),
+            "{}",
+            fase.output
+        );
+    }
 
-    let res = service.ejecutar_herramienta(&call_iny).await.unwrap();
-    // No debe paniquear ni romper el motor (sanitización de comillas simples escapadas)
-    assert!(res.is_error || res.output.as_array().is_some());
+    // Los datos siguen intactos
+    let intacta = invocar(
+        servicio,
+        LakehouseToolName::QueryOperationalMatrix.as_str(),
+        json!({ "centro_id": centro.as_str() }),
+    )
+    .await;
+    assert_eq!(intacta.output["total"], 2, "{}", intacta.output);
 }
 
 #[tokio::test]
@@ -221,7 +277,7 @@ async fn test_adv_bucle_infinito_de_herramientas_cortado_por_max_steps() {
             Ok(AgentTurnOutput::ToolCalls(vec![ToolCall {
                 id: format!("call_{c}"),
                 name: "inspect_lakehouse_catalog".to_string(),
-                arguments: json!({ "centro_id": "planta_loop", "solo_vigentes": true }),
+                arguments: json!({ "centro_id": "planta_loop" }),
             }]))
         }
     }
@@ -229,14 +285,12 @@ async fn test_adv_bucle_infinito_de_herramientas_cortado_por_max_steps() {
     let runner = Arc::new(InfiniteLoopRunner {
         contador: Mutex::new(0),
     });
-    let datafusion = Arc::new(DataFusionEngine::new());
-    let lookup = Arc::new(TableLookupService::new());
-    let petgraph = Arc::new(PetgraphEngine::new());
-    let tools = Arc::new(LakehouseToolService::new(datafusion, lookup, petgraph));
+    let entorno = entorno_vacio();
+    let centro = CenterId::new("planta_loop").unwrap();
+    sembrar_centro(&entorno, &centro).await;
 
     // Configuramos max_steps a 3
-    let orchestrator = AgentOrchestrator::new(runner, tools).with_max_steps(3);
-    let centro = CenterId::new("planta_loop").unwrap();
+    let orchestrator = AgentOrchestrator::new(runner, entorno.servicio.clone()).with_max_steps(3);
     let mut historial = vec![AgentMessage::user("Inicia bucle")];
 
     let err = orchestrator

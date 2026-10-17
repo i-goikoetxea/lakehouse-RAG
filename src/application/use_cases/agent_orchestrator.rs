@@ -21,14 +21,7 @@ pub struct AgentOrchestrator {
 }
 
 /// Tablas v2 que `execute_athena_sql` acepta por su nombre canónico (esquema §4)
-pub const INVENTARIO_TABLAS_V2: &str = "TABLAS SQL (execute_athena_sql; usa estos nombres tal cual,     la herramienta los traduce a las vistas del centro; contienen todas las revisiones     confirmadas, así que filtra vigente = true para la normativa en vigor):
-    - 01_documentos_catalogo(doc_id, version_num, vigente, titulo, tipo_documento, nivel_prelacion, revision, fecha_vigor, fecha_derogacion, hash_sha256)
-    - 02_chunks_normativa(chunk_id, doc_id, version_num, vigente, nivel_prelacion, breadcrumb_jerarquia, condicion_aplicacion, texto_contenido)
-    - 03_matriz_operativa(hito_id, doc_id, version_num, vigente, orden_secuencia, fase_operativa, objeto_alcance, rol_ejecutor, rol_responsable, registro_codigo, registro_nombre, criterio_aceptacion, condicion_aplicacion, nivel_prelacion, calidad_extraccion)
-    - 04_catalogo_tablas(tabla_id, doc_id, version_num, vigente, titulo_tabla, eje_x_nombre, eje_x_tipo, eje_x_unidad, eje_y_nombre, eje_y_tipo, eje_y_unidad, valor_salida_nombre, instrucciones_uso_sql)
-    - 05_celdas_doble_entrada(celda_id, tabla_id, doc_id, version_num, vigente, eje_x_min, eje_x_max, eje_x_categoria, eje_y_min, eje_y_max, eje_y_categoria, valor_resultado_texto, valor_resultado_num, unidad_medida, nota_pie_condicion)
-    - 06_grafo_referencias(edge_id, doc_id, version_num, vigente, origen_id, origen_tipo, tipo_relacion, destino_id, destino_tipo, contexto_relacion)
-    Valores de fase_operativa en MAYÚSCULAS y sin tildes (RECEPCION, CUSTODIA, INSPECCION…).";
+pub const INVENTARIO_TABLAS_V2: &str = crate::application::dtos::tools::DESCRIPCION_VISTAS_SQL;
 
 impl AgentOrchestrator {
     pub const DEFAULT_MAX_STEPS: usize = 10;
@@ -46,19 +39,27 @@ impl AgentOrchestrator {
         self
     }
 
-    /// Construye el System Prompt base inyectando el aislamiento de centro y rigor de citas
+    /// System prompt v2 (plan v2 §1): aislamiento de centro, elección de herramienta, citas,
+    /// notas al pie, condiciones de aplicación, prelación normativa y prohibición de inventar
     pub fn build_system_prompt(centro_id: &CenterId) -> String {
         format!(
             "Eres el Asistente Técnico y Normativo del Lakehouse Industrial.\n\
-            Estás operando exclusivamente sobre el Centro de Conocimiento activo: '{0}'.\n\
+            Operas exclusivamente sobre el Centro de Conocimiento activo '{0}': pasa siempre centro_id = '{0}' a las herramientas.\n\
+            ELECCIÓN DE HERRAMIENTA:\n\
+            - Roles (quién ejecuta, quién es responsable o firma) y registros/formatos de una fase → query_operational_matrix (filtra por fase, rol con rol_en o registro). Cada fila es un hito: nunca combines el responsable de una fila con el registro de otra.\n\
+            - Valores de una tabla de doble entrada (temperaturas, espesores, tolerancias…) → lookup_double_entry_table con tabla_id (o busqueda_tabla) y los valores de los ejes; si no conoces la tabla, consulta antes inspect_lakehouse_catalog.\n\
+            - Listados exhaustivos, recuentos y agregaciones (todos los registros que firma un rol, cuántos procedimientos…) → execute_athena_sql (una sola SELECT/WITH; filtra vigente = true salvo que se pida otra fecha).\n\
+            - Contexto, alcance, condiciones y texto normativo → search_normative_context.\n\
+            - Relaciones entre documentos, derogaciones y remisiones → traverse_normative_graph.\n\
+            - Qué documentos y tablas hay, su prelación y su vigencia → inspect_lakehouse_catalog.\n\
+            VIGENCIA: sin fecha, responde con lo vigente. Si la pregunta se refiere a una fecha o a una revisión anterior, pasa fecha_referencia (AAAA-MM-DD) a las herramientas.\n\
             REGLAS INNEGOCIABLES:\n\
-            1. No inventes tolerancias, valores nominales ni normas vigentes.\n\
-            2. Usa las herramientas provistas ('inspect_lakehouse_catalog', 'query_operational_matrix', \
-            'lookup_double_entry_table', 'execute_athena_sql', 'traverse_normative_graph') para consultar los datos.\n\
-            3. Al responder, cita siempre el 'doc_id', la sección y si la norma es prevalente o derogada.\n\
-            4. Si una tabla de doble entrada contiene notas al pie, inclúyelas explícitamente en tu dictamen.\n\
-            5. Mantén un tono técnico, formal y orientado a la ingeniería de procesos.
-            6. Pasa siempre centro_id = '{0}' a las herramientas.
+            1. No inventes valores, roles, registros ni normas: responde solo con lo que devuelven las herramientas. Si una herramienta devuelve sin_coincidencia, ambiguo o vacío, dilo explícitamente y no interpoles.\n\
+            2. Cita siempre doc_id y revisión (y el apartado o breadcrumb si lo hay).\n\
+            3. Si una celda trae nota_pie_condicion, inclúyela literalmente en la respuesta junto al valor (p. ej. «125 °C (*): …»).\n\
+            4. Incluye siempre la condicion_aplicacion del dato (p. ej. «solo cuando el acopio supera 7 días»).\n\
+            5. Prelación: 1 = especificación del cliente, 2 = procedimiento de obra, 3 = procedimiento general, 4 = instructivo técnico, 5 = norma o formato. Ante un conflicto prevalece el nivel menor (prevalece: true): responde con él y menciona el otro como supletorio.\n\
+            6. Mantén un tono técnico, formal y orientado a la ingeniería de procesos.\n\
             {1}",
             centro_id.as_str(),
             INVENTARIO_TABLAS_V2
@@ -254,5 +255,25 @@ mod tests {
 
         assert!(matches!(err, DomainError::AgentError(_)));
         assert!(err.to_string().contains("límite máximo de iteraciones"));
+    }
+
+    #[test]
+    fn test_system_prompt_v2_guia_herramientas_citas_notas_y_prelacion() {
+        let centro = CenterId::new("obra-a").unwrap();
+        let prompt = AgentOrchestrator::build_system_prompt(&centro);
+        for nombre in crate::application::dtos::tools::LakehouseToolName::TODAS {
+            assert!(prompt.contains(nombre.as_str()), "{}", nombre.as_str());
+        }
+        for regla in [
+            "centro_id = 'obra-a'",
+            "fecha_referencia",
+            "doc_id y revisión",
+            "nota_pie_condicion",
+            "condicion_aplicacion",
+            "supletorio",
+            "No inventes",
+        ] {
+            assert!(prompt.contains(regla), "{regla}");
+        }
     }
 }

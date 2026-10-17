@@ -21,7 +21,7 @@
 | **10** | Esquemas v2 y store transaccional (staged/commit/rollback, idempotencia por hash) | Sesión 10 | `[COMPLETADO]` | 214 / 214 |
 | **11** | Ingesta v2: breadcrumb, herencia de condición, destilador con json-schema y enums | Sesión 11 | `[COMPLETADO]` | 246 / 246 |
 | **12** | Centros en disco y proyección LanceDB → DataFusion/Petgraph | Sesión 12 | `[COMPLETADO]` | 291 / 291 |
-| **13** | Tools v2: matriz exacta, lookup, SQL de solo lectura, grafo antisupernodos, `search_normative_context` | - | `[NO INICIADO]` | - |
+| **13** | Tools v2: matriz exacta, lookup, SQL de solo lectura, grafo antisupernodos, `search_normative_context` | Sesión 13 | `[COMPLETADO]` | 322 / 322 |
 | **14** | Cableado de la app: `ingestar_documento`, gestión de centros, system prompt de prelación | - | `[NO INICIADO]` | - |
 | **15** | Aceptación: `tests/acceptance_8_problemas.rs` y prueba manual de la GUI | - | `[NO INICIADO]` | - |
 
@@ -140,6 +140,19 @@
 - [x] Tools: lo mínimo para leer las vistas v2 (nombres canónicos `01_…`–`06_…`, columnas v2 en catálogo y matriz) e inventario v2 en el system prompt.
 - [x] Suites `tests/integration_lakehouse_app.rs` (9) y `tests/adversarial_centros_proyeccion_tests.rs` (11).
 - [x] Puerta E2E `tests/e2e_binario_fase12.rs` (2 tests `#[ignore]`, binario real).
+
+### Fase 13: Tools v2 (plan v2 §1 filas 2, 3, 4, 5, 6 y 7; §2.4)
+- [x] Contrato de las 6 tools (`application/dtos/tools.rs`): JSON Schema estricto escrito a mano (`additionalProperties: false`), parámetros `deny_unknown_fields`, `centro_id` obligatorio y `fecha_referencia` ISO opcional en todas (1900–9999).
+- [x] Todas las tools leen las vistas DataFusion **del centro activo** (historial completo) con la ventana `fecha_vigor <= D < fecha_derogacion` de `01_documentos_catalogo`; los filtros del agente se aplican en Rust, nunca se interpolan en SQL.
+- [x] `inspect_lakehouse_catalog`: documentos (tipo, prelación, revisión y vigencia) + tablas de doble entrada (ejes, unidades, `instrucciones_uso_sql`).
+- [x] `query_operational_matrix`: fase con `FaseOperativa::parse`, rol exacto (ejecutor/responsable/cualquiera, sin tildes ni mayúsculas), registro, doc y objeto; filas atómicas con cita (doc_id, revisión, chunk y breadcrumb).
+- [x] `lookup_double_entry_table`: tabla por id versionado o por código del título (`4-A`) o por búsqueda; cruce en Rust con la inclusividad de cada extremo; nota al pie obligatoria; `resuelto` / `sin_coincidencia` / `ambiguo` / `tabla_no_encontrada` / `tabla_ambigua`; rechaza NaN e infinitos.
+- [x] `execute_athena_sql`: puerto `ejecutar_consulta_lectura` (parser de DataFusion: una sola `SELECT`/`WITH`; tablas del plan ⊆ vistas del centro; límite 1000 filas con `truncado`; timeout 30 s en un runtime dedicado y cancelable); `fecha_referencia` envuelve las tablas en CTE con la ventana.
+- [x] `traverse_normative_graph`: grafo por llamada desde `06` vigente (o a fecha), filtro por `tipo_relacion`, ≤ 2 saltos, `max_vecinos` 15, `hub_resumido` (grado > 25, top relaciones) sin expandir, ≤ 50 nodos, orden por prelación.
+- [x] `search_normative_context` (nueva): índice semántico en memoria por centro (`IndiceSemanticoPort`, alimentado por la proyección con chunks e hitos y sus vectores) + coseno/BM25/RRF; filtros de vigencia, prelación y documento; agrupación por tema con `prevalece` / `supletorio`.
+- [x] System prompt v2 del `AgentOrchestrator` (elección de tool, citas doc_id + revisión, notas, condiciones, prelación, no inventar) y MCP con las 6 tools (`MCP_GUIDE.md` actualizado).
+- [x] Suites `tests/integration_tools_v2.rs` (6) y `tests/adversarial_tools_v2_tests.rs` (10); fixtures `tests/comun_tools_v2/`.
+- [x] Puerta E2E `tests/e2e_binario_fase13.rs` (`#[ignore]`, binario real) con dos fixtures nuevos (`pliego_cliente_pcc01.md`, `norma_soldeo_nt_sol_01.md`).
 
 ---
 
@@ -612,3 +625,44 @@
   * `glue_catalog/inventario_tablas.json` tiene las columnas reales de cada vista, por si `inspect_lakehouse_catalog` debe devolverlas.
   * La E2E puede reutilizar `tests/e2e_binario_fase12.rs` como plantilla: `Sesion::ejecutar` lanza el binario con `--json`.
   * La GUI envía un `centro_id` fijo desde `app.js`. Usar los nuevos comandos de centros es trabajo de la Fase 14.
+
+### Sesión 13 (2026-10-17) — Fase 13: Tools v2
+* **Objetivo:** plan v2 §1 (problemas 2, 3, 4, 5, 6 y 7) y §2.4: las 6 tools sobre las vistas que reconstruye la Fase 12.
+* **Contratos nuevos:**
+  * `application/dtos/tools.rs`: `LakehouseToolName::TODAS` (6), JSON Schema escrito a mano (`additionalProperties: false`), parámetros `deny_unknown_fields`, `ValorEje` (número o texto), `parsear_fecha_referencia` (ISO estricto, 1900–9999) y `DESCRIPCION_VISTAS_SQL` (vistas y columnas; también es `INVENTARIO_TABLAS_V2`).
+  * `AnalyticalEnginePort::ejecutar_consulta_lectura(sql, &PoliticaConsultaLectura { tablas_permitidas, limite_filas, timeout })` → `ResultadoConsultaLectura { lotes, filas, truncado }`. En DataFusion: `DFParser` (exactamente una sentencia y solo `Statement::Query`), plan lógico con `apply_with_subqueries` (todo `TableScan` debe ser una vista del centro: bloquea otros centros, `read_csv`/`generate_series`…), `LIMIT limite+1` y ejecución en un runtime dedicado (hilo propio) con timeout y cancelación.
+  * `ports/semantic_index.rs` (`IndiceSemanticoPort`, `FragmentoIndexado`) + `query_engine/indice_semantico_memoria.rs`. `LanceProjection::con_indice_semantico` lo rellena con chunks (02) e hitos (03) **con vectores** de todas las revisiones confirmadas.
+  * `LakehouseToolService::new(motor, indice, embeddings)` + `ConfiguracionHerramientas` (SQL 1000 filas / 30 s, `max_vecinos` 15, `umbral_hub` 25, `max_nodos` 50, `top_k` 8). Submódulos `lakehouse_tool_service/{catalogo,matriz,lookup,sql_lectura,grafo,busqueda}.rs`.
+  * `bootstrap::motores_consulta(embeddings)`.
+* **Decisiones:**
+  * Todas las tools leen solo las vistas del centro (las exigen proyectadas: centro inactivo → error) y aplican la vigencia con `vigente = true` o con la ventana de `01` a `fecha_referencia`. Los filtros del agente se evalúan en Rust (normalizados), nunca se interpolan en SQL.
+  * `TableLookupService` y `PetgraphEngine` (globales, sin centro ni fecha) dejan de usarse en las tools; la proyección aún los carga.
+  * Lookup: acepta el id versionado (`PO-ALM-03@v4-TAB-0000`) o el código del título (`4-A`, por segmentos: no casa `14-A`); con eje z prefiere la coincidencia exacta; varias candidatas → `ambiguo` (con `prevalece` si difieren en prelación); nunca interpola.
+  * SQL con `fecha_referencia`: las 6 tablas canónicas se sustituyen por CTE con la ventana (`WITH RECURSIVE` + fecha → rechazo).
+  * Grafo: nodos = códigos canónicos (origen = `doc_id` de la arista; destino sin revisión). El origen siempre se expande con tope de vecinos; los demás nodos con grado > 25 son `hub_resumido`.
+  * Búsqueda: tema = último segmento del breadcrumb sin numeración; `prevalece` en el nivel menor y `supletorio` en el resto cuando hay varios niveles.
+  * System prompt v2: tabla de elección de tool, cita doc_id + revisión, nota al pie literal, condición de aplicación, prelación con supletorio y prohibición de inventar o interpolar.
+* **Tests añadidos (+31; 322 pasando + 8 ignorados):** unitarios (DTOs 4, matriz 1, lookup 6, SQL 3, grafo 3, búsqueda 3, índice 1, prompt 1; MCP ampliado a 6 tools); `tests/integration_tools_v2.rs` (6: fronteras e = 20 / 20,0001, nota (*), time travel 125 → 100, matriz exacta y a fecha, agregación exhaustiva y truncado a 1000, hub de 1.000 aristas ≤ 50 nodos, prelación pliego 100 % / norma 10 %, condición heredada, catálogo y aislamiento de centro en las 6 tools); `tests/adversarial_tools_v2_tests.rs` (10). Adaptados al contrato v2: `tests/adversarial_agent_tools_tests.rs`, `tests/integration_agent_tools.rs` y `tests/acceptance_gui_chat_claude_headless.rs`. La infraestructura E2E pasa a `tests/comun_e2e/` (la usan las Fases 12 y 13).
+* **TDD:** en rojo antes de corregir: el timeout (vencía a los 7,8 s: la agregación cartesiana saturaba el runtime → runtime dedicado), el `tabla_id` versionado (el lookup por «4-A» no encontraba la tabla) y la expectativa del grafo (los hitos también generan aristas `EXIGE_LLENAR_REGISTRO`). El resto se escribió con su test (rojo por compilación).
+* **Verificación:** `cargo test` 322 OK + 8 ignorados; `cargo clippy --all-targets -- -D warnings` sin avisos; `cargo fmt --check` OK. Además se adaptaron a la salida-objeto de las tools `tests/comun_centros` (`escalar`), `tests/integration_lakehouse_app.rs`, `tests/adversarial_centros_proyeccion_tests.rs` (un `centro_id` hostil ahora es `ToolResult` con `is_error`, no `Err`), la E2E de la Fase 12 y los argumentos del modo heurístico de `MockAgentRunner`.
+* **Puerta E2E real** (`cargo test --test e2e_binario_fase13 -- --ignored --nocapture --test-threads=1`; binario debug, Claude `sonnet`, FastEmbed E5-large): **1/1 OK en 387 s**, a la primera.
+
+  | Paso | Tiempo | Tools usadas | Resultado |
+  | --- | ---: | --- | --- |
+  | Ingesta Rev. 03 / Rev. 04 / PCC-01 / NT-SOL-01 | 47,6 / 40,6 / 19,6 / 21,9 s | — | v3 (9 chunks, 3 hitos, 9 celdas, 10 aristas); v4 (11 aristas); PCC-01 v1 (3 chunks); NT-SOL-01 v2 (5 chunks, 3 hitos) |
+  | (a) Responsable y registro de la custodia | 32,7 s | `query_operational_matrix(fase=CUSTODIA)` | **Jefe de Producción**, **FOR-ALM-05** (Rev. 04, breadcrumb «2.2 Fase 2 — CUSTODIA») |
+  | (b) Tabla 4-A, e = 30 mm, CE = 0,42 | 44,4 s | `lookup` ×2 | 1.ª con `tabla_id: "4-A"` → `tabla_no_encontrada` + lista; 2.ª con `PO-ALM-03@v4-TAB-0000` → `resuelto`: **125 °C (*)** con la nota |
+  | (c) Igual a 2026-06-01 | 62,4 s | `lookup` ×2 con `fecha_referencia` | Mismo patrón; `PO-ALM-03@v3-TAB-0000` → **100 °C (*)** (Rev. 03) |
+  | (d) Registros que firma el Jefe de Producción | 56,4 s | `execute_athena_sql` ×2 (JOIN 03–01, `vigente`) | Solo **FOR-ALM-05**; no cita FOR-ALM-02 |
+  | (e) NT-SOL-01: temperatura y cuándo | 34,4 s | `search_normative_context(doc_id=NT-SOL-01)` | **80 °C** con la condición heredada **«bajo cero (< 0 °C)»** |
+  | (f) % de radiografía en uniones a tope | 26,8 s | `search_normative_context` | `conflicto_prelacion: true` → **100 % (PCC-01, prevalece)** y NT-SOL-01 10 % como supletorio |
+
+* **Desviaciones y pendientes:**
+  * El destilador guarda el `tabla_id` versionado y el título sin el código «4-A» (`mapeo_destilacion.rs`, `fila_tabla`: el título sustituye al id humano). El lookup lo compensa con la lista de tablas, pero cuesta una llamada extra. Propuesta: conservar el código humano en `titulo_tabla` (o una columna `codigo_tabla`) en la ingesta.
+  * El agrupado por tema de la búsqueda depende de que las secciones se titulen igual; documentos con títulos distintos para el mismo tema no se marcan como conflicto (el system prompt sigue obligando a aplicar la prelación).
+  * `TableLookupService`, `PetgraphEngine` y `HybridSearchService` (LanceDB directo) ya no los usan las tools: candidatos a retirarse.
+  * La consulta SQL que vence el timeout sigue consumiendo CPU en su runtime dedicado hasta el siguiente punto de cesión (la respuesta vuelve a tiempo).
+* **Notas para la Fase 14:**
+  * La salida de cada tool es ahora un objeto: matriz → `filas[]` con `cita { doc_id, revision, version_num, chunk_origen_id, breadcrumb }`; lookup → `estado`, `valor_resultado_texto`, `nota_pie_condicion`, `cita`; grafo → `nodos[]` (`hub_resumido`, `resumen_hub`) y `aristas[]` con `cita` (graphResult); búsqueda → `grupos[].resultados[]` con `prevalece`/`supletorio` y `cita`; SQL → `resultado[]`, `truncado`. `app.js` (citas, matrixResult, graphResult) debe leer estas formas.
+  * El MCP expone las mismas 6 tools (`MCP_GUIDE.md` §5 actualizado).
+  * Notas de traspaso en la carpeta compartida de sesiones: `fase13_tools_v2_handover.md`.

@@ -309,7 +309,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_mcp_tools_list_retorna_las_5_herramientas() {
+    async fn test_mcp_tools_list_retorna_las_6_herramientas() {
         let server = McpServer::new(Arc::new(DummyToolServer));
         let req = json!({
             "jsonrpc": "2.0",
@@ -321,7 +321,7 @@ mod tests {
         let resp: JsonRpcResponse = serde_json::from_str(&resp_str).unwrap();
 
         let tools = resp.result.unwrap()["tools"].as_array().unwrap().clone();
-        assert_eq!(tools.len(), 5);
+        assert_eq!(tools.len(), 6);
 
         let nombres: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
         assert!(nombres.contains(&"inspect_lakehouse_catalog"));
@@ -329,6 +329,11 @@ mod tests {
         assert!(nombres.contains(&"lookup_double_entry_table"));
         assert!(nombres.contains(&"execute_athena_sql"));
         assert!(nombres.contains(&"traverse_normative_graph"));
+        assert!(nombres.contains(&"search_normative_context"));
+        for tool in &tools {
+            assert_eq!(tool["inputSchema"]["additionalProperties"], false);
+            assert!(tool["inputSchema"]["properties"]["fecha_referencia"].is_object());
+        }
     }
 
     #[tokio::test]

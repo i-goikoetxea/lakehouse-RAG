@@ -60,7 +60,7 @@ Modelo **multilingüe** de 1024 dims (`MultilingualE5Large` de fastembed; BGE-M3
 | **10** | Esquemas v2 y store transaccional: staged/commit/rollback, idempotencia por hash, retirada de vigencia en las 6 tablas (`raw_docs` pasa a la 12) | 3, 8 | Completado (Sesión 10, 2026-10-17; 214 tests) |
 | **11** | Ingesta v2: parser con breadcrumb y herencia de condición; destilador con json-schema y enums; normalización; vectores hito/tabla; embeddings multilingües | 1, 2, 7 | Completado (Sesión 11, 2026-10-17; 246 tests; E2E real 52/52 OK) |
 | **12** | Centros en disco + proyección LanceDB → DataFusion/Petgraph (activar/desactivar, reconstrucción tras ingesta) + `raw_docs/` y `center_manifest.json` (`schema_version = 2`) | 6, 8 | Completado (Sesión 12, 2026-10-17; 291 tests; puerta E2E con el binario real) |
-| **13** | Tools v2: matriz exacta, lookup con fronteras, SQL de solo lectura, grafo antisupernodos, `search_normative_context` con prelación y *time travel* | 2, 3, 4, 5, 6, 7 | Pendiente |
+| **13** | Tools v2: matriz exacta, lookup con fronteras, SQL de solo lectura, grafo antisupernodos, `search_normative_context` con prelación y *time travel* | 2, 3, 4, 5, 6, 7 | Completado (Sesión 13, 2026-10-17; 322 tests; puerta E2E real 1/1 OK, 6 preguntas) |
 | **14** | Cableado de la app: `ingestar_documento` (GUI, MCP y CLI), gestión de centros en la GUI, system prompt de prelación y citas | todos | Pendiente |
 | **15** | Aceptación: suite `tests/acceptance_8_problemas.rs` (Claude y FastEmbed reales) + criterios §9 + prueba manual de la GUI | todos | Pendiente |
 

@@ -114,8 +114,8 @@ async fn test_ciclo_activar_ingerir_consultar_y_desactivar() {
     )
     .await;
     assert!(!catalogo.is_error, "{}", catalogo.output);
-    assert_eq!(catalogo.output[0]["n"], 2);
-    assert_eq!(catalogo.output[0]["v"], 1);
+    assert_eq!(catalogo.output["resultado"][0]["n"], 2);
+    assert_eq!(catalogo.output["resultado"][0]["v"], 1);
 
     // Agregación global sobre la tabla completa (problema 6)
     let agregado = sql(
@@ -125,7 +125,7 @@ async fn test_ciclo_activar_ingerir_consultar_y_desactivar() {
     )
     .await;
     assert!(!agregado.is_error, "{}", agregado.output);
-    let filas = agregado.output.as_array().unwrap();
+    let filas = agregado.output["resultado"].as_array().unwrap();
     assert_eq!(filas.len(), 2);
     assert_eq!(filas[1]["rol_responsable"], "Jefe de Producción");
 
@@ -140,10 +140,10 @@ async fn test_ciclo_activar_ingerir_consultar_y_desactivar() {
         .await
         .unwrap();
     assert!(!matriz.is_error, "{}", matriz.output);
-    let hitos = matriz.output.as_array().unwrap();
+    let hitos = matriz.output["filas"].as_array().unwrap();
     assert_eq!(hitos.len(), 1, "{}", matriz.output);
     assert_eq!(hitos[0]["registro_codigo"], "FOR-ALM-05");
-    assert_eq!(hitos[0]["version_num"], 4);
+    assert_eq!(hitos[0]["cita"]["version_num"], 4);
 
     // Catálogo de la tool sobre la vista v2
     let inspeccion = entorno
@@ -156,7 +156,7 @@ async fn test_ciclo_activar_ingerir_consultar_y_desactivar() {
         .await
         .unwrap();
     assert!(!inspeccion.is_error, "{}", inspeccion.output);
-    assert_eq!(inspeccion.output[0]["version_num"], 4);
+    assert_eq!(inspeccion.output["documentos"][0]["version_num"], 4);
 
     // glue_catalog exportado con las vistas y las filas reales
     let inventario: serde_json::Value = serde_json::from_str(
@@ -241,7 +241,7 @@ async fn test_preguntar_registra_herramientas_y_datos_reales() {
     let uso = &respuesta.herramientas[0];
     assert_eq!(uso.nombre, "execute_athena_sql");
     assert!(!uso.es_error, "{}", uso.resultado);
-    assert_eq!(uso.resultado[0]["hitos"], 2);
+    assert_eq!(uso.resultado["resultado"][0]["hitos"], 2);
 }
 
 #[tokio::test]
@@ -267,7 +267,7 @@ async fn test_un_proceso_nuevo_proyecta_bajo_demanda_los_centros_activos() {
         .preguntar("¿Cuántos documentos?", CENTRO, None)
         .await
         .unwrap();
-    assert_eq!(respuesta.herramientas[0].resultado[0]["n"], 1);
+    assert_eq!(respuesta.herramientas[0].resultado["resultado"][0]["n"], 1);
 
     // Y la hidratación de arranque (GUI/MCP) proyecta todos los activos
     let (app, herramientas) = entorno.reabrir(Arc::new(MockAgentRunner::new_scripted(Vec::new())));
@@ -329,7 +329,10 @@ async fn test_multi_centro_solo_el_activo_es_visible() {
         "SELECT DISTINCT centro_id FROM 03_matriz_operativa",
     )
     .await;
-    assert_eq!(centros.output, json!([{ "centro_id": "obra-a" }]));
+    assert_eq!(
+        centros.output["resultado"],
+        json!([{ "centro_id": "obra-a" }])
+    );
 
     // Al activar B aparecen sus 2 revisiones; al desactivar A, A desaparece
     app.activar_centro("obra-b").await.unwrap();
@@ -422,7 +425,7 @@ async fn test_ingesta_fallida_no_deja_filas_ni_toca_las_vistas() {
         "SELECT version_num FROM 01_documentos_catalogo WHERE vigente = true",
     )
     .await;
-    assert_eq!(vigente.output, json!([{ "version_num": 3 }]));
+    assert_eq!(vigente.output["resultado"], json!([{ "version_num": 3 }]));
     let _ = (ARCHIVO_V3, CONTENIDO_V3);
 }
 

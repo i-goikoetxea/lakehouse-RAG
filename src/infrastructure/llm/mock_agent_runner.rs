@@ -82,8 +82,7 @@ impl MockAgentRunner {
                     .as_str()
                     .to_string(),
                 arguments: json!({
-                    "centro_id": "planta_alfa",
-                    "solo_vigentes": true
+                    "centro_id": "planta_alfa"
                 }),
             }]))
         } else if prompt.contains("matriz")
@@ -113,7 +112,7 @@ impl MockAgentRunner {
                     "centro_id": "planta_alfa",
                     "tabla_id": "tabla_soldadura",
                     "valor_x": 12.5,
-                    "categoria_y": "Acero"
+                    "valor_y": "Acero"
                 }),
             }]))
         } else if prompt.contains("sql") || prompt.contains("select") || prompt.contains("athena") {
@@ -122,7 +121,7 @@ impl MockAgentRunner {
                 name: LakehouseToolName::ExecuteAthenaSql.as_str().to_string(),
                 arguments: json!({
                     "centro_id": "planta_alfa",
-                    "sql_query": "SELECT * FROM doc_catalog WHERE vigente = true"
+                    "sql_query": "SELECT * FROM 01_documentos_catalogo WHERE vigente = true"
                 }),
             }]))
         } else if prompt.contains("prevalen")
@@ -136,8 +135,8 @@ impl MockAgentRunner {
                     .to_string(),
                 arguments: json!({
                     "centro_id": "planta_alfa",
-                    "doc_origen_id": "DOC-NORM-001",
-                    "modo": "prevalencia"
+                    "nodo_origen": "DOC-NORM-001",
+                    "tipo_relacion": ["DEROGA_A"]
                 }),
             }]))
         } else {

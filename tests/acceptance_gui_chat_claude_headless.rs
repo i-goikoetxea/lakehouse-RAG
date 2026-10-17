@@ -5,12 +5,12 @@ use std::sync::Arc;
 
 use lakehouse_rag::application::use_cases::agent_orchestrator::AgentOrchestrator;
 use lakehouse_rag::application::use_cases::lakehouse_tool_service::LakehouseToolService;
-use lakehouse_rag::application::use_cases::table_lookup_service::TableLookupService;
+use lakehouse_rag::infrastructure::embeddings::mock_engine::MockEmbeddingEngine;
 use lakehouse_rag::infrastructure::llm::{
     ClaudeAgentConfig, ClaudeAgentRunner, ClaudeHeadlessModelCatalog, ClaudeModelCatalogConfig,
 };
 use lakehouse_rag::infrastructure::query_engine::datafusion_engine::DataFusionEngine;
-use lakehouse_rag::infrastructure::query_engine::petgraph_engine::PetgraphEngine;
+use lakehouse_rag::infrastructure::query_engine::indice_semantico_memoria::IndiceSemanticoMemoria;
 use lakehouse_rag::presentation::gui::chat_service::GuiChatService;
 
 #[tokio::test]
@@ -18,8 +18,8 @@ use lakehouse_rag::presentation::gui::chat_service::GuiChatService;
 async fn test_chat_gui_responde_con_modelo_del_catalogo_real() {
     let herramientas = Arc::new(LakehouseToolService::new(
         Arc::new(DataFusionEngine::new()),
-        Arc::new(TableLookupService::new()),
-        Arc::new(PetgraphEngine::new()),
+        Arc::new(IndiceSemanticoMemoria::new()),
+        Arc::new(MockEmbeddingEngine::new(Some(1024))),
     ));
     let runner = Arc::new(ClaudeAgentRunner::new(ClaudeAgentConfig::default()));
     let servicio = GuiChatService::new(

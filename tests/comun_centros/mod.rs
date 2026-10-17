@@ -89,7 +89,8 @@ pub fn construir_app(
     agente: Arc<MockAgentRunner>,
     modelo: ModeloEmbeddingsActivo,
 ) -> (LakehouseApp, Arc<dyn ToolServerPort>) {
-    let motores = motores_consulta();
+    let embeddings = Arc::new(MockEmbeddingEngine::new(Some(DIMENSION)));
+    let motores = motores_consulta(embeddings.clone());
     let herramientas: Arc<dyn ToolServerPort> = motores.herramientas.clone();
     let app = LakehouseApp::new(DependenciasLakehouse {
         registro: Arc::new(JsonCenterRegistry::new(config)),
@@ -97,7 +98,7 @@ pub fn construir_app(
         proyeccion: motores.proyeccion,
         parser: Arc::new(MarkdownParser::new()),
         destilador,
-        embeddings: Arc::new(MockEmbeddingEngine::new(Some(DIMENSION))),
+        embeddings,
         modelo_embeddings: modelo,
         agente,
         herramientas: herramientas.clone(),
@@ -155,7 +156,10 @@ pub async fn sql(
 
 /// Primer valor numérico de la primera fila de un resultado SQL
 pub fn escalar(resultado: &ToolResult) -> i64 {
-    let fila = resultado.output.as_array().and_then(|f| f.first()).cloned();
+    let fila = resultado.output["resultado"]
+        .as_array()
+        .and_then(|f| f.first())
+        .cloned();
     fila.and_then(|f| f.as_object().and_then(|o| o.values().next().cloned()))
         .and_then(|v| v.as_i64())
         .unwrap_or_else(|| panic!("sin escalar en {}", resultado.output))

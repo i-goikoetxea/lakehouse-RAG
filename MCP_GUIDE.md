@@ -74,15 +74,16 @@ En la configuración del editor (`Settings` $\rightarrow$ `Features` $\rightarro
 
 ## 5. Herramientas Expuestas por el Servidor MCP
 
-El servidor expone automáticamente **5 herramientas analíticas deterministas**:
+El servidor expone las **6 herramientas v2** (las mismas que usa el agente de la GUI y de la CLI). Todas filtran por el centro activo y aceptan `fecha_referencia` opcional (ISO `AAAA-MM-DD`; sin ella → lo vigente). Los esquemas son estrictos (`additionalProperties: false`).
 
-| Nombre de la Herramienta | Entrada (`inputSchema`) | Propósito |
+| Herramienta | Entrada (`inputSchema`) | Propósito |
 | :--- | :--- | :--- |
-| **`inspect_lakehouse_catalog`** | `{ "centro_id": string, "solo_vigentes": boolean }` | Lista documentos, normas y fichas técnicas registradas en el catálogo Arrow 01. |
-| **`query_operational_matrix`** | `{ "centro_id": string, "fase_id": string?, "parametro": string? }` | Consulta tolerancias numéricas y rangos de operación en la matriz operacional Arrow 03. |
-| **`evaluate_double_entry_table`** | `{ "tabla_id": string, "valor_x": any, "valor_y": any }` | Resuelve celdas en tablas bidireccionales con evaluación continua de rangos y notas técnicas. |
-| **`traverse_normative_graph`** | `{ "doc_id": string, "centro_id": string? }` | Consulta el grafo Petgraph para determinar si una norma está vigente, derogada o su precedencia jurídica. |
-| **`execute_deterministic_sql`** | `{ "centro_id": string, "sql": string }` | Ejecuta consultas analíticas `SELECT` DataFusion con aislamiento estricto entre centros (prohíbe mutaciones). |
+| **`inspect_lakehouse_catalog`** | `centro_id`, `fecha_referencia?` | Documentos (tipo, prelación, revisión y vigencia) e inventario de tablas de doble entrada (ejes, unidades, instrucciones). |
+| **`query_operational_matrix`** | `centro_id`, `fase?`, `rol?`, `rol_en?` (`ejecutor`/`responsable`/`cualquiera`), `registro?`, `doc_id?`, `objeto?`, `fecha_referencia?` | Filas atómicas de la matriz con filtros exactos normalizados y cita (doc_id, revisión, breadcrumb). |
+| **`lookup_double_entry_table`** | `centro_id`, `tabla_id?` o `busqueda_tabla?`, `valor_x`, `valor_y` (número o categoría), `eje_z?`, `fecha_referencia?` | Cruce exacto con la inclusividad de cada extremo; devuelve la nota al pie obligatoria o informa de ambigüedad / sin coincidencia (no interpola). |
+| **`execute_athena_sql`** | `centro_id`, `sql_query`, `fecha_referencia?` | Una sola sentencia `SELECT`/`WITH` validada con el parser de DataFusion, solo sobre las vistas del centro, con límite de filas (1000) y timeout. |
+| **`traverse_normative_graph`** | `centro_id`, `nodo_origen`, `tipo_relacion?`, `max_saltos?` (≤ 2), `max_vecinos?` (15), `fecha_referencia?` | Recorrido acotado (≤ 50 nodos) con `hub_resumido` para supernodos y orden por prelación. |
+| **`search_normative_context`** | `centro_id`, `consulta`, `top_k?`, `nivel_prelacion_max?`, `doc_id?`, `fecha_referencia?` | Búsqueda híbrida con breadcrumb, condición heredada y agrupación por tema con `prevalece`/`supletorio`. |
 
 ---
 

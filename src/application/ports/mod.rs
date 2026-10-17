@@ -12,6 +12,7 @@ pub mod lakehouse_projection;
 pub mod lakehouse_store;
 pub mod llm_distiller;
 pub mod model_catalog;
+pub mod semantic_index;
 pub mod table_lookup;
 pub mod tool_server;
 

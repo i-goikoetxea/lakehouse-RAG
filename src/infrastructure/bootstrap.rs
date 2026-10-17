@@ -4,6 +4,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use crate::application::ports::embedding_engine::EmbeddingEnginePort;
 use crate::application::use_cases::lakehouse_app::{DependenciasLakehouse, LakehouseApp};
 use crate::application::use_cases::lakehouse_tool_service::LakehouseToolService;
 use crate::application::use_cases::table_lookup_service::TableLookupService;
@@ -15,6 +16,7 @@ use crate::infrastructure::llm::{
 };
 use crate::infrastructure::parsers::markdown_parser::MarkdownParser;
 use crate::infrastructure::query_engine::datafusion_engine::DataFusionEngine;
+use crate::infrastructure::query_engine::indice_semantico_memoria::IndiceSemanticoMemoria;
 use crate::infrastructure::query_engine::lakehouse_projection::LanceProjection;
 use crate::infrastructure::query_engine::petgraph_engine::PetgraphEngine;
 use crate::infrastructure::storage::center_registry_json::{
@@ -47,29 +49,33 @@ pub struct MotoresConsulta {
     pub herramientas: Arc<LakehouseToolService>,
 }
 
-/// DataFusion, TableLookup y Petgraph vacíos, enlazados con la proyección y las tools
-pub fn motores_consulta() -> MotoresConsulta {
+/// DataFusion, TableLookup, Petgraph y el índice semántico vacíos, enlazados con la
+/// proyección y las tools (que vectorizan la consulta de búsqueda con `embeddings`)
+pub fn motores_consulta(embeddings: Arc<dyn EmbeddingEnginePort>) -> MotoresConsulta {
     let datafusion = Arc::new(DataFusionEngine::new());
     let lookup = Arc::new(TableLookupService::new());
     let grafo = Arc::new(PetgraphEngine::new());
+    let indice = Arc::new(IndiceSemanticoMemoria::new());
     let herramientas = Arc::new(LakehouseToolService::new(
         datafusion.clone(),
-        lookup.clone(),
-        grafo.clone(),
+        indice.clone(),
+        embeddings,
     ));
     MotoresConsulta {
-        proyeccion: Arc::new(LanceProjection::new(datafusion, lookup, grafo)),
+        proyeccion: Arc::new(
+            LanceProjection::new(datafusion, lookup, grafo).con_indice_semantico(indice),
+        ),
         herramientas,
     }
 }
 
 /// Composición real: registro JSON, centros en disco, LanceDB, FastEmbed diferido y Claude Code
 pub fn componer_lakehouse(config: &ConfiguracionComposicion) -> Arc<LakehouseApp> {
-    let motores = motores_consulta();
     let embeddings = Arc::new(LazyFastEmbedEngine::new(
         MODELO_POR_DEFECTO,
         config.directorio_cache_embeddings.clone(),
     ));
+    let motores = motores_consulta(embeddings.clone());
     Arc::new(LakehouseApp::new(DependenciasLakehouse {
         registro: Arc::new(JsonCenterRegistry::new(&config.directorio_config)),
         espacio: Arc::new(DiskCenterWorkspace::new()),

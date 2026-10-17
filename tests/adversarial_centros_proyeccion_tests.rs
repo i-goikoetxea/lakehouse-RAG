@@ -393,7 +393,8 @@ async fn test_sql_hostil_sobre_las_vistas_reconstruidas_no_escapa_del_centro() {
                 }),
             })
             .await
-            .is_err()
+            .unwrap()
+            .is_error
     );
     assert_eq!(
         escalar(
