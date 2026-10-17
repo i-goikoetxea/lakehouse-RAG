@@ -55,7 +55,7 @@ impl AgentOrchestrator {
     /// Ejecuta el bucle de turnos hasta obtener una respuesta final o agotar max_steps
     pub async fn procesar_turno(
         &self,
-        modelo: ClaudeModel,
+        modelo: &ClaudeModel,
         centro_id: &CenterId,
         historial: &mut Vec<AgentMessage>,
         on_event: Option<EventCallback>,
@@ -159,7 +159,7 @@ mod tests {
     impl AgentRunnerPort for MockRunnerScripted {
         async fn ejecutar_turno(
             &self,
-            _modelo: ClaudeModel,
+            _modelo: &ClaudeModel,
             _system_prompt: &str,
             _historial: &[AgentMessage],
             _herramientas: &[ToolDefinition],
@@ -196,7 +196,7 @@ mod tests {
         let mut historial = vec![AgentMessage::user("¿Qué documentos existen?")];
 
         let res = orchestrator
-            .procesar_turno(ClaudeModel::Sonnet, &centro, &mut historial, None)
+            .procesar_turno(&ClaudeModel::sonnet(), &centro, &mut historial, None)
             .await
             .unwrap();
 
@@ -230,7 +230,12 @@ mod tests {
         let mut historial = vec![AgentMessage::user("Bucle infinito")];
 
         let err = orchestrator
-            .procesar_turno(ClaudeModel::Haiku, &centro, &mut historial, None)
+            .procesar_turno(
+                &ClaudeModel::new("haiku").unwrap(),
+                &centro,
+                &mut historial,
+                None,
+            )
             .await
             .unwrap_err();
 

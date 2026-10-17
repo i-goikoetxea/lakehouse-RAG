@@ -1,0 +1,268 @@
+<!DOCTYPE html>
+<html lang="es" data-theme="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Lakehouse RAG Industrial</title>
+  <link rel="stylesheet" href="styles.css">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+</head>
+<body>
+  <!-- Custom Frameless Titlebar (Linear Style) -->
+  <header class="titlebar" data-tauri-drag-region>
+    <div class="titlebar-brand" data-tauri-drag-region>
+      <div class="brand-logo">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <polygon points="12 2 2 7 12 12 22 7 12 2"></polygon>
+          <polyline points="2 17 12 22 22 17"></polyline>
+          <polyline points="2 12 12 17 22 12"></polyline>
+        </svg>
+      </div>
+      <span class="brand-title" data-tauri-drag-region>Lakehouse RAG Industrial</span>
+      <span class="brand-badge">SOTA 2026</span>
+    </div>
+
+    <!-- Center active selector pill -->
+    <div class="titlebar-center-pill">
+      <span class="pill-label">Centro Activo:</span>
+      <select id="select-centro" class="center-dropdown">
+        <option value="planta_alfa" selected>🏭 Planta Alfa (Tuberías & Presión)</option>
+        <option value="planta_beta">⚡ Planta Beta (Estructuras Soldadas)</option>
+        <option value="laboratorio_central">🔬 Laboratorio Central de Ensayos</option>
+      </select>
+    </div>
+
+    <!-- Window controls & Theme switcher -->
+    <div class="titlebar-actions">
+      <button id="btn-theme-toggle" class="titlebar-btn theme-btn" title="Alternar Modo Oscuro / Claro">
+        <span class="theme-icon-dark">🌙</span>
+        <span class="theme-icon-light">☀️</span>
+      </button>
+
+      <div class="window-controls">
+        <button id="btn-minimize" class="titlebar-btn ctrl-btn" title="Minimizar">
+          <svg width="10" height="1" viewBox="0 0 10 1"><rect width="10" height="1" fill="currentColor"/></svg>
+        </button>
+        <button id="btn-maximize" class="titlebar-btn ctrl-btn" title="Maximizar / Restaurar">
+          <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor"><rect x="1" y="1" width="8" height="8" rx="1"/></svg>
+        </button>
+        <button id="btn-close" class="titlebar-btn ctrl-btn close-btn" title="Cerrar">
+          <svg width="10" height="10" viewBox="0 0 10 10" stroke="currentColor" stroke-width="1.2">
+            <line x1="1" y1="1" x2="9" y2="9"/>
+            <line x1="9" y1="1" x2="1" y2="9"/>
+          </svg>
+        </button>
+      </div>
+    </div>
+  </header>
+
+  <!-- Main 3-Panel Workspace (NotebookLM Architecture) -->
+  <main class="app-workspace">
+    <!-- PANEL 1: FUENTES Y DRAG & DROP (NotebookLM Left Panel) -->
+    <section class="panel panel-sources">
+      <div class="panel-header">
+        <div class="panel-title-wrapper">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
+            <polyline points="14 2 14 8 20 8"></polyline>
+          </svg>
+          <h2 class="panel-title">Fuentes de Conocimiento</h2>
+        </div>
+        <span id="sources-count" class="badge-count">3 docs</span>
+      </div>
+
+      <!-- Drag & Drop Interactive Dropzone -->
+      <div id="drop-zone" class="dropzone">
+        <input type="file" id="file-input" multiple accept=".pdf,.md,.txt,.json" class="file-input-hidden">
+        <div class="dropzone-content">
+          <div class="dropzone-icon">
+            <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+              <polyline points="17 8 12 3 7 8"></polyline>
+              <line x1="12" y1="3" x2="12" y2="15"></line>
+            </svg>
+          </div>
+          <p class="dropzone-text"><strong>Arrastra manuales o planos</strong></p>
+          <p class="dropzone-subtext">PDF, Markdown o haz clic para explorar</p>
+        </div>
+        <div id="dropzone-progress" class="dropzone-progress-bar"></div>
+      </div>
+
+      <!-- Documents Catalog List -->
+      <div class="sources-list-container">
+        <div class="sources-list-header">
+          <span>Documentos Ingestados (Arrow 01)</span>
+          <button id="btn-refresh-sources" class="btn-icon" title="Recargar catálogo">↻</button>
+        </div>
+        <ul id="sources-list" class="sources-list">
+          <!-- Injected dynamically via app.js -->
+        </ul>
+      </div>
+
+      <!-- Bottom Panel Status -->
+      <div class="panel-footer-status">
+        <div class="status-indicator">
+          <span class="status-dot online"></span>
+          <span>LanceDB & FastEmbed Online</span>
+        </div>
+      </div>
+    </section>
+
+    <!-- PANEL 2: CHAT CON GROUNDING Y OBSERVABILIDAD DE TOOLS (Center Panel) -->
+    <section class="panel panel-chat">
+      <div class="panel-header chat-header">
+        <div class="chat-agent-info">
+          <div class="agent-avatar">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <circle cx="12" cy="12" r="10"></circle>
+              <path d="M12 16v-4"></path>
+              <path d="M12 8h.01"></path>
+            </svg>
+          </div>
+          <div>
+            <h2 class="panel-title">Asistente Técnico Lakehouse</h2>
+            <p class="chat-subtitle">Respuestas fundamentadas con citas rigurosas y llamadas a tools</p>
+          </div>
+        </div>
+
+        <!-- Model selector pill -->
+        <div class="model-selector-pill">
+          <span class="model-label">Modelo:</span>
+          <!-- Opciones cargadas dinámicamente desde Claude Code headless (listar_modelos_claude) -->
+          <select id="select-modelo" class="model-dropdown" disabled>
+            <option value="" selected>Cargando modelos…</option>
+          </select>
+        </div>
+      </div>
+
+      <!-- Messages Thread Scroll Area -->
+      <div id="chat-messages" class="chat-messages">
+        <!-- Welcome Message -->
+        <div class="message message-assistant">
+          <div class="message-bubble">
+            <div class="message-meta">
+              <span class="sender-name">Asistente Lakehouse</span>
+              <span class="timestamp">Ahora</span>
+            </div>
+            <div class="message-text">
+              Bienvenido al sistema <strong>Lakehouse RAG Industrial</strong>. Las especificaciones y tablas de <strong>Planta Alfa</strong> están cargadas y listas para consulta determinista.<br><br>
+              Puedes hacerme preguntas operativas como:<br>
+              • <em>"¿Cuál es la temperatura máxima en fase de Recepción?"</em><br>
+              • <em>"¿Qué electrodo se especifica para soldar 15 mm en acero inoxidable?"</em><br>
+              • <em>"¿La norma DOC-NORM-001 sigue vigente o fue derogada?"</em>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Prompt Input Bar (Linear Pill Style) -->
+      <div class="chat-input-wrapper">
+        <form id="chat-form" class="chat-form">
+          <div class="chat-input-container">
+            <input 
+              type="text" 
+              id="chat-input" 
+              class="chat-input" 
+              placeholder="Haz una consulta técnica o normativa sobre el centro activo..." 
+              autocomplete="off"
+            />
+            <button type="submit" id="btn-send" class="btn-send" title="Enviar consulta">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <line x1="22" y1="2" x2="11" y2="13"></line>
+                <polygon points="22 2 15 22 11 13 2 9 22 2"></polygon>
+              </svg>
+            </button>
+          </div>
+        </form>
+      </div>
+    </section>
+
+    <!-- PANEL 3: STUDIO & LAKEHOUSE EXPLORER (Right Panel) -->
+    <section class="panel panel-studio">
+      <div class="panel-header">
+        <div class="panel-title-wrapper">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect>
+            <line x1="3" y1="9" x2="21" y2="9"></line>
+            <line x1="9" y1="21" x2="9" y2="9"></line>
+          </svg>
+          <h2 class="panel-title">Lakehouse Studio</h2>
+        </div>
+        <span class="badge-tag">Apache Arrow</span>
+      </div>
+
+      <!-- Tabs for Lakehouse Explorer -->
+      <div class="studio-tabs">
+        <button class="tab-btn active" data-tab="tab-schemas">Tablas (01-06)</button>
+        <button class="tab-btn" data-tab="tab-matrices">Matriz & Celdas</button>
+        <button class="tab-btn" data-tab="tab-graph">Grafo Normativo</button>
+      </div>
+
+      <!-- Tab 1: 6 Arrow Schemas Overview -->
+      <div id="tab-schemas" class="tab-content active">
+        <div class="explorer-card">
+          <div class="explorer-card-title">
+            <span>01_doc_catalog</span>
+            <span class="chip-badge success">Arrow RecordBatch</span>
+          </div>
+          <p class="explorer-desc">Metadatos, versiones SHA-256 y control transaccional de vigencia.</p>
+        </div>
+
+        <div class="explorer-card">
+          <div class="explorer-card-title">
+            <span>03_operational_matrix</span>
+            <span class="chip-badge cyan">DataFusion SQL</span>
+          </div>
+          <p class="explorer-desc">Parámetros técnicos, tolerancias numéricas y condiciones por fase.</p>
+        </div>
+
+        <div class="explorer-card">
+          <div class="explorer-card-title">
+            <span>04_double_entry_tables & 05_cells</span>
+            <span class="chip-badge purple">Rango Continuo</span>
+          </div>
+          <p class="explorer-desc">Cruce bidireccional determinista con interpolación y notas al pie.</p>
+        </div>
+
+        <div class="explorer-card">
+          <div class="explorer-card-title">
+            <span>06_reference_graph</span>
+            <span class="chip-badge warning">Petgraph DiGraph</span>
+          </div>
+          <p class="explorer-desc">Precedencia jurídica, derogaciones sucesivas y detección de ciclos.</p>
+        </div>
+      </div>
+
+      <!-- Tab 2: Live Table Lookup Inspector -->
+      <div id="tab-matrices" class="tab-content">
+        <div class="inspector-section">
+          <h3 class="inspector-title">Resolución de Tabla de Doble Entrada</h3>
+          <div id="matrix-inspector-result" class="inspector-card">
+            <p class="empty-state-text">Ejecuta una consulta en el chat para inspeccionar la celda resuelta en tiempo real.</p>
+          </div>
+        </div>
+      </div>
+
+      <!-- Tab 3: Normative Graph Viewer -->
+      <div id="tab-graph" class="tab-content">
+        <div class="inspector-section">
+          <h3 class="inspector-title">Linaje y Prevalencia Jurídica</h3>
+          <div id="graph-inspector-result" class="inspector-card">
+            <div class="graph-node-chain">
+              <div class="graph-node deprecated">DOC-NORM-2015 <span class="node-tag">Derogada</span></div>
+              <div class="graph-arrow">↓ deroga</div>
+              <div class="graph-node deprecated">DOC-NORM-2020 <span class="node-tag">Derogada</span></div>
+              <div class="graph-arrow">↓ deroga</div>
+              <div class="graph-node active">DOC-NORM-2026 <span class="node-tag">PREVALENTE</span></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <script src="app.js"></script>
+</body>
+</html>

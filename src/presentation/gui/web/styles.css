@@ -1,0 +1,843 @@
+/* ==========================================================================
+   LAKEHOUSE RAG INDUSTRIAL — DESIGN SYSTEM (LINEAR + NOTEBOOKLM)
+   Tokens, Surface Ladder, Frameless Titlebar & Dual Theme (Dark/Light)
+   ========================================================================== */
+
+:root {
+  /* Surface Ladder (Modo Oscuro por defecto - Linear Dark) */
+  --color-canvas: #08090a;
+  --color-surface-1: #0f1011;
+  --color-surface-2: #141516;
+  --color-surface-3: #18191a;
+  --color-surface-hover: #1c1d1f;
+
+  /* Ink / Tipografía */
+  --color-ink: #f7f8f8;
+  --color-ink-muted: #d0d6e0;
+  --color-ink-subtle: #8a8f98;
+  --color-ink-tertiary: #62666d;
+
+  /* Brand / Acento Linear */
+  --color-primary: #5e6ad2;
+  --color-primary-hover: #828fff;
+  --color-primary-active: #5e69d1;
+  --color-primary-glow: rgba(94, 106, 210, 0.2);
+  --color-on-primary: #ffffff;
+
+  /* Semántica Industrial */
+  --color-success: #27c93f;
+  --color-success-bg: rgba(39, 201, 63, 0.12);
+  --color-warning: #ffbd2e;
+  --color-warning-bg: rgba(255, 189, 46, 0.12);
+  --color-danger: #ff5f56;
+  --color-danger-bg: rgba(255, 95, 86, 0.12);
+  --color-cyan: #38bdf8;
+  --color-cyan-bg: rgba(56, 189, 248, 0.12);
+  --color-purple: #c084fc;
+  --color-purple-bg: rgba(192, 132, 252, 0.12);
+
+  /* Bordes Hairline (1px) */
+  --color-border: rgba(255, 255, 255, 0.08);
+  --color-border-subtle: rgba(255, 255, 255, 0.05);
+  --color-border-focus: rgba(94, 106, 210, 0.6);
+
+  /* Radios */
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --radius-lg: 10px;
+  --radius-pill: 9999px;
+
+  /* Fuentes */
+  --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+  --font-mono: 'JetBrains Mono', 'Berkeley Mono', monospace;
+
+  /* Transiciones */
+  --transition-fast: 0.15s ease;
+  --transition-normal: 0.2s ease;
+}
+
+/* Modo Claro (Linear Light) */
+[data-theme="light"] {
+  --color-canvas: #f8f9fa;
+  --color-surface-1: #ffffff;
+  --color-surface-2: #f1f3f5;
+  --color-surface-3: #e9ecef;
+  --color-surface-hover: #dee2e6;
+
+  --color-ink: #111827;
+  --color-ink-muted: #374151;
+  --color-ink-subtle: #6b7280;
+  --color-ink-tertiary: #9ca3af;
+
+  --color-primary: #4f46e5;
+  --color-primary-hover: #6366f1;
+  --color-primary-active: #4338ca;
+  --color-primary-glow: rgba(79, 70, 229, 0.15);
+
+  --color-border: rgba(0, 0, 0, 0.08);
+  --color-border-subtle: rgba(0, 0, 0, 0.04);
+  --color-border-focus: rgba(79, 70, 229, 0.5);
+}
+
+/* Reset y base */
+*, *::before, *::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+  -webkit-font-smoothing: antialiased;
+}
+
+body {
+  font-family: var(--font-sans);
+  background-color: var(--color-canvas);
+  color: var(--color-ink);
+  height: 100vh;
+  width: 100vw;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  user-select: none;
+}
+
+/* ==========================================================================
+   FRAMELESS CUSTOM TITLEBAR (Tauri Window Header)
+   ========================================================================== */
+.titlebar {
+  height: 44px;
+  background-color: var(--color-surface-1);
+  border-bottom: 1px solid var(--color-border);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 12px;
+  z-index: 1000;
+  flex-shrink: 0;
+}
+
+.titlebar-brand {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: default;
+}
+
+.brand-logo {
+  color: var(--color-primary);
+  display: flex;
+  align-items: center;
+}
+
+.brand-title {
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  color: var(--color-ink);
+}
+
+.brand-badge {
+  font-size: 10px;
+  font-family: var(--font-mono);
+  font-weight: 500;
+  padding: 2px 6px;
+  border-radius: var(--radius-pill);
+  background-color: var(--color-surface-3);
+  color: var(--color-ink-subtle);
+  border: 1px solid var(--color-border);
+}
+
+.titlebar-center-pill {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background-color: var(--color-surface-2);
+  padding: 4px 10px;
+  border-radius: var(--radius-pill);
+  border: 1px solid var(--color-border-subtle);
+}
+
+.pill-label {
+  font-size: 11px;
+  color: var(--color-ink-subtle);
+  font-weight: 500;
+}
+
+.center-dropdown, .model-dropdown {
+  background: transparent;
+  border: none;
+  color: var(--color-ink);
+  font-size: 12px;
+  font-weight: 500;
+  font-family: var(--font-sans);
+  cursor: pointer;
+  outline: none;
+}
+
+.center-dropdown option, .model-dropdown option {
+  background-color: var(--color-surface-1);
+  color: var(--color-ink);
+}
+
+.titlebar-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.titlebar-btn {
+  background: transparent;
+  border: none;
+  color: var(--color-ink-muted);
+  width: 28px;
+  height: 28px;
+  border-radius: var(--radius-sm);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: background-color var(--transition-fast), color var(--transition-fast);
+}
+
+.titlebar-btn:hover {
+  background-color: var(--color-surface-hover);
+  color: var(--color-ink);
+}
+
+.theme-btn {
+  font-size: 13px;
+}
+
+[data-theme="dark"] .theme-icon-light { display: none; }
+[data-theme="dark"] .theme-icon-dark { display: inline-block; }
+[data-theme="light"] .theme-icon-dark { display: none; }
+[data-theme="light"] .theme-icon-light { display: inline-block; }
+
+.window-controls {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.close-btn:hover {
+  background-color: #e81123 !important;
+  color: #ffffff !important;
+}
+
+/* ==========================================================================
+   WORKSPACE 3-PANEL LAYOUT (NotebookLM Architecture)
+   ========================================================================== */
+.app-workspace {
+  display: grid;
+  grid-template-columns: 310px 1fr 340px;
+  height: calc(100vh - 44px);
+  width: 100vw;
+  overflow: hidden;
+  background-color: var(--color-canvas);
+}
+
+.panel {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  overflow: hidden;
+  background-color: var(--color-surface-1);
+  border-right: 1px solid var(--color-border);
+}
+
+.panel:last-child {
+  border-right: none;
+}
+
+.panel-header {
+  height: 48px;
+  padding: 0 16px;
+  border-bottom: 1px solid var(--color-border);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-shrink: 0;
+  background-color: var(--color-surface-1);
+}
+
+.panel-title-wrapper {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--color-ink);
+}
+
+.panel-title {
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+.badge-count, .badge-tag {
+  font-size: 11px;
+  font-family: var(--font-mono);
+  padding: 2px 7px;
+  border-radius: var(--radius-pill);
+  background-color: var(--color-surface-2);
+  color: var(--color-ink-muted);
+  border: 1px solid var(--color-border-subtle);
+}
+
+/* ==========================================================================
+   PANEL 1: FUENTES Y DRAG & DROP
+   ========================================================================== */
+.panel-sources {
+  background-color: var(--color-surface-1);
+}
+
+.dropzone {
+  margin: 14px;
+  padding: 20px 14px;
+  border: 2px dashed var(--color-border);
+  border-radius: var(--radius-lg);
+  background-color: var(--color-surface-2);
+  text-align: center;
+  cursor: pointer;
+  position: relative;
+  overflow: hidden;
+  transition: all var(--transition-normal);
+}
+
+.dropzone:hover, .dropzone.dragover {
+  border-color: var(--color-primary);
+  background-color: var(--color-primary-glow);
+  transform: translateY(-1px);
+}
+
+.file-input-hidden {
+  display: none;
+}
+
+.dropzone-icon {
+  color: var(--color-primary);
+  margin-bottom: 8px;
+  display: flex;
+  justify-content: center;
+}
+
+.dropzone-text {
+  font-size: 12px;
+  color: var(--color-ink);
+  margin-bottom: 3px;
+}
+
+.dropzone-subtext {
+  font-size: 11px;
+  color: var(--color-ink-subtle);
+}
+
+.dropzone-progress-bar {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  height: 3px;
+  background-color: var(--color-primary);
+  width: 0%;
+  transition: width 0.3s ease;
+}
+
+.sources-list-container {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  padding: 0 14px;
+}
+
+.sources-list-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--color-ink-subtle);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin-bottom: 8px;
+}
+
+.btn-icon {
+  background: transparent;
+  border: none;
+  color: var(--color-ink-subtle);
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.btn-icon:hover { color: var(--color-ink); }
+
+.sources-list {
+  list-style: none;
+  overflow-y: auto;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-bottom: 14px;
+}
+
+.source-item {
+  padding: 10px 12px;
+  background-color: var(--color-surface-2);
+  border: 1px solid var(--color-border-subtle);
+  border-radius: var(--radius-md);
+  transition: all var(--transition-fast);
+  cursor: pointer;
+}
+
+.source-item:hover {
+  background-color: var(--color-surface-hover);
+  border-color: var(--color-border);
+}
+
+.source-item-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 4px;
+}
+
+.source-item-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--color-ink);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 190px;
+}
+
+.source-item-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+  color: var(--color-ink-subtle);
+}
+
+.chip-status {
+  font-size: 9px;
+  font-family: var(--font-mono);
+  font-weight: 600;
+  padding: 2px 5px;
+  border-radius: 3px;
+  text-transform: uppercase;
+}
+
+.chip-status.vigente {
+  background-color: var(--color-success-bg);
+  color: var(--color-success);
+}
+
+.chip-status.derogado {
+  background-color: var(--color-danger-bg);
+  color: var(--color-danger);
+}
+
+.panel-footer-status {
+  padding: 10px 14px;
+  border-top: 1px solid var(--color-border);
+  background-color: var(--color-surface-1);
+}
+
+.status-indicator {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+  color: var(--color-ink-muted);
+}
+
+.status-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+}
+
+.status-dot.online {
+  background-color: var(--color-success);
+  box-shadow: 0 0 6px var(--color-success);
+}
+
+/* ==========================================================================
+   PANEL 2: CHAT CON GROUNDING Y TARJETAS TOOL-USE (Linear Style)
+   ========================================================================== */
+.panel-chat {
+  background-color: var(--color-canvas);
+  border-left: 1px solid var(--color-border);
+  border-right: 1px solid var(--color-border);
+}
+
+.chat-header {
+  background-color: var(--color-surface-1);
+}
+
+.chat-agent-info {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.agent-avatar {
+  width: 28px;
+  height: 28px;
+  border-radius: var(--radius-sm);
+  background-color: var(--color-primary-glow);
+  color: var(--color-primary);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.chat-subtitle {
+  font-size: 11px;
+  color: var(--color-ink-subtle);
+}
+
+.model-selector-pill {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background-color: var(--color-surface-2);
+  padding: 4px 8px;
+  border-radius: var(--radius-pill);
+  border: 1px solid var(--color-border);
+}
+
+.model-label {
+  font-size: 10px;
+  color: var(--color-ink-subtle);
+}
+
+.chat-messages {
+  flex: 1;
+  overflow-y: auto;
+  padding: 20px 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.message {
+  display: flex;
+  flex-direction: column;
+  max-width: 85%;
+}
+
+.message-user {
+  align-self: flex-end;
+}
+
+.message-user .message-bubble {
+  background-color: var(--color-primary);
+  color: #ffffff;
+  border-radius: var(--radius-lg) var(--radius-lg) var(--radius-sm) var(--radius-lg);
+}
+
+.message-assistant {
+  align-self: flex-start;
+  max-width: 92%;
+}
+
+.message-assistant .message-bubble {
+  background-color: var(--color-surface-1);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm) var(--radius-lg) var(--radius-lg) var(--radius-lg);
+}
+
+.message-bubble {
+  padding: 14px 16px;
+  font-size: 13.5px;
+  line-height: 1.55;
+}
+
+.message-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 6px;
+  font-size: 11px;
+  color: var(--color-ink-subtle);
+}
+
+.message-user .message-meta {
+  color: rgba(255, 255, 255, 0.7);
+}
+
+/* Tool execution card (Claude / Linear Cards) */
+.tool-card {
+  margin: 10px 0;
+  border: 1px solid var(--color-border);
+  border-left: 3px solid var(--color-cyan);
+  border-radius: var(--radius-md);
+  background-color: var(--color-surface-2);
+  overflow: hidden;
+  font-size: 12px;
+}
+
+.tool-card-header {
+  padding: 8px 12px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  background-color: var(--color-surface-3);
+  font-family: var(--font-mono);
+  font-weight: 500;
+  color: var(--color-cyan);
+  cursor: pointer;
+}
+
+.tool-card-body {
+  padding: 10px 12px;
+  background-color: var(--color-surface-2);
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--color-ink-muted);
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+/* Citas al pie (NotebookLM Citations) */
+.citation-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background-color: var(--color-primary-glow);
+  color: var(--color-primary);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 600;
+  width: 16px;
+  height: 16px;
+  border-radius: 4px;
+  margin: 0 2px;
+  cursor: pointer;
+  vertical-align: super;
+  transition: transform var(--transition-fast);
+}
+
+.citation-badge:hover {
+  transform: scale(1.15);
+  background-color: var(--color-primary);
+  color: #ffffff;
+}
+
+.chat-input-wrapper {
+  padding: 16px 20px;
+  background-color: var(--color-canvas);
+  border-top: 1px solid var(--color-border);
+}
+
+.chat-input-container {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background-color: var(--color-surface-1);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  padding: 4px 6px 4px 14px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+  transition: border-color var(--transition-fast);
+}
+
+.chat-input-container:focus-within {
+  border-color: var(--color-primary);
+  box-shadow: 0 0 0 2px var(--color-primary-glow);
+}
+
+.chat-input {
+  flex: 1;
+  background: transparent;
+  border: none;
+  outline: none;
+  font-size: 13px;
+  color: var(--color-ink);
+  font-family: var(--font-sans);
+}
+
+.chat-input::placeholder {
+  color: var(--color-ink-tertiary);
+}
+
+.btn-send {
+  width: 32px;
+  height: 32px;
+  background-color: var(--color-primary);
+  color: #ffffff;
+  border: none;
+  border-radius: var(--radius-md);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: background-color var(--transition-fast), transform var(--transition-fast);
+}
+
+.btn-send:hover {
+  background-color: var(--color-primary-hover);
+}
+
+.btn-send:active {
+  transform: scale(0.96);
+}
+
+/* ==========================================================================
+   PANEL 3: STUDIO & LAKEHOUSE EXPLORER
+   ========================================================================== */
+.panel-studio {
+  background-color: var(--color-surface-1);
+}
+
+.studio-tabs {
+  display: flex;
+  padding: 8px 12px;
+  gap: 4px;
+  background-color: var(--color-surface-2);
+  border-bottom: 1px solid var(--color-border);
+}
+
+.tab-btn {
+  flex: 1;
+  padding: 6px 8px;
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-sm);
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--color-ink-subtle);
+  cursor: pointer;
+  transition: all var(--transition-fast);
+}
+
+.tab-btn.active {
+  background-color: var(--color-surface-1);
+  color: var(--color-ink);
+  font-weight: 600;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+}
+
+.tab-content {
+  display: none;
+  padding: 14px;
+  overflow-y: auto;
+  flex: 1;
+}
+
+.tab-content.active {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.explorer-card {
+  padding: 12px;
+  background-color: var(--color-surface-2);
+  border: 1px solid var(--color-border-subtle);
+  border-radius: var(--radius-md);
+}
+
+.explorer-card-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--color-ink);
+  margin-bottom: 4px;
+}
+
+.chip-badge {
+  font-size: 9.5px;
+  font-family: var(--font-mono);
+  font-weight: 600;
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+
+.chip-badge.success { background: var(--color-success-bg); color: var(--color-success); }
+.chip-badge.cyan { background: var(--color-cyan-bg); color: var(--color-cyan); }
+.chip-badge.purple { background: var(--color-purple-bg); color: var(--color-purple); }
+.chip-badge.warning { background: var(--color-warning-bg); color: var(--color-warning); }
+
+.explorer-desc {
+  font-size: 11.5px;
+  color: var(--color-ink-subtle);
+  line-height: 1.4;
+}
+
+.inspector-section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.inspector-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--color-ink-muted);
+}
+
+.inspector-card {
+  padding: 14px;
+  background-color: var(--color-surface-2);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+}
+
+.empty-state-text {
+  font-size: 11.5px;
+  color: var(--color-ink-tertiary);
+  font-style: italic;
+  text-align: center;
+}
+
+/* Grafo normativo visual */
+.graph-node-chain {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+}
+
+.graph-node {
+  padding: 6px 12px;
+  border-radius: var(--radius-sm);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 600;
+  width: 100%;
+  text-align: center;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.graph-node.deprecated {
+  background-color: var(--color-danger-bg);
+  border: 1px solid var(--color-danger);
+  color: var(--color-danger);
+  opacity: 0.85;
+}
+
+.graph-node.active {
+  background-color: var(--color-success-bg);
+  border: 1px solid var(--color-success);
+  color: var(--color-success);
+}
+
+.graph-arrow {
+  font-size: 10px;
+  font-family: var(--font-mono);
+  color: var(--color-ink-tertiary);
+}
+
+.node-tag {
+  font-size: 9px;
+  padding: 1px 4px;
+  border-radius: 2px;
+  background-color: rgba(255, 255, 255, 0.1);
+}

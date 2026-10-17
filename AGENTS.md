@@ -100,3 +100,36 @@ Antes de finalizar la sesión, el agente **DEBE**:
      git push origin main
      ```
 
+---
+
+## 6. Estado de la Fase 7 y Guía de Continuación (Hand-off para Claude Code)
+
+### Estado General del Código:
+- **124 / 124 tests pasando al 100%** (73 unitarios + 51 adversariales y de integración).
+- `cargo clippy --all-targets -- -D warnings` pasa con **0 advertencias**.
+- `cargo fmt --check` verificado al **100%**.
+
+### Componentes Listos y Validados:
+1. **Servidor MCP Stdio (`src/infrastructure/mcp/`):**
+   - Protocolo JSON-RPC 2.0 operativo sobre stdio.
+   - 5 herramientas del Lakehouse expuestas con esquemas JSON Schema.
+   - Verificado con 4 tests unitarios y 4 tests adversariales en `tests/adversarial_mcp_tests.rs`.
+   - Herramientas de instalación en la raíz: `MCP_GUIDE.md`, `install_mcp.ps1` y flag CLI `--mcp-info`.
+2. **Frontend GUI SOTA (`src/presentation/gui/web/`):**
+   - `index.html`: 3 paneles (NotebookLM) con titlebar frameless personalizada y controles de ventana.
+   - `styles.css`: Dark mode nativo Linear (`#08090a`), variables CSS, tema claro/oscuro y componentes.
+   - `app.js`: Lógica completa de drag & drop, tarjetas de tools, citas interactivas, alternancia de tema y visor Arrow/Grafo.
+
+### Diagnóstico Técnico del Despliegue de GUI (Tauri 2 en Windows) para Claude Code:
+1. **Supresión de Terminal en Windows:**
+   - La aplicación gráfica debe ejecutarse sin abrir ventana de consola `cmd.exe`.
+   - Se debe mantener `#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]` (o `#![windows_subsystem = "windows"]`) en `src/main.rs`.
+2. **Bucle de Eventos (Event Loop) en el Hilo Principal:**
+   - `tauri::Builder::default().run(...)` requiere ejecutarse en un hilo principal síncrono. No debe envolverse `main()` en `#[tokio::main]`; Tokio debe instanciarse bajo demanda solo cuando se active el flag `--mcp-server`.
+3. **Configuración de Tauri 2 (`tauri.conf.json` y `capabilities/`):**
+   - La ventana en `tauri.conf.json` debe tener explícitamente `"label": "main"`, `"url": "index.html"`, `"decorations": false`, `"width": 1280`, `"height": 720`.
+   - Las `capabilities` en Tauri 2 deben residir en `capabilities/default.json` con los permisos `core:window:allow-minimize`, `core:window:allow-maximize`, `core:window:allow-toggle-maximize`, `core:window:allow-close`. No deben declararse propiedades no reconocidas en `"security"` dentro de `tauri.conf.json`.
+4. **Comprobación de WebView2 Runtime:**
+   - Si la ventana se cierra de inmediato en el entorno local, verificar que el runtime de WebView2 de Windows no falle en el arranque o lanzar en modo dev con `cargo tauri dev`.
+
+

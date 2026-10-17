@@ -262,7 +262,7 @@ async fn test_integration_agent_orchestrator_ciclo_completo() {
     )];
 
     let respuesta_final = orchestrator
-        .procesar_turno(ClaudeModel::Sonnet, &centro, &mut historial, None)
+        .procesar_turno(&ClaudeModel::sonnet(), &centro, &mut historial, None)
         .await
         .unwrap();
 

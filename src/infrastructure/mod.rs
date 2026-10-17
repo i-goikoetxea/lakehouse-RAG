@@ -5,6 +5,7 @@
 
 pub mod embeddings;
 pub mod llm;
+pub mod mcp;
 pub mod parsers;
 pub mod query_engine;
 pub mod storage;

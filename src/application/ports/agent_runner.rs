@@ -12,7 +12,7 @@ pub trait AgentRunnerPort: Send + Sync {
     /// Ejecuta un turno del agente recibiendo el historial, modelo y catálogo de herramientas
     async fn ejecutar_turno(
         &self,
-        modelo: ClaudeModel,
+        modelo: &ClaudeModel,
         system_prompt: &str,
         historial: &[AgentMessage],
         herramientas: &[ToolDefinition],

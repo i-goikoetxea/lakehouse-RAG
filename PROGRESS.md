@@ -15,8 +15,10 @@
 | **4** | Embeddings Locales y Búsqueda Híbrida | Sesión 4 | `[COMPLETADO]` | 70 / 70 |
 | **5** | Pipeline de Ingesta y Destilación Claude Headless | Sesión 5 | `[COMPLETADO]` | 88 / 88 |
 | **6** | Servidor de Herramientas Data Lake y Agente | Sesión 6 | `[COMPLETADO]` | 108 / 108 |
-| **7** | Interfaz de Usuario TUI (Ratatui) y Chat | Sesión 7 | `[NO INICIADO]` | - |
+| **7** | Servidor MCP y App Gráfica (Linear + NotebookLM 16:9) | Sesión 7 | `[EN PROGRESO]` | 124 / 124 |
 | **8** | Auditoría Adversarial E2E y Criterios DoD | Sesión 8 | `[NO INICIADO]` | - |
+
+
 
 *Estados posibles:* `[NO INICIADO]`, `[EN PROGRESO]`, `[COMPLETADO]`, `[BLOQUEADO]`
 
@@ -72,11 +74,16 @@
 - [x] Selector dinámico de modelos Claude (`sonnet`, `opus`, `haiku`) y wrapper asíncrono con streaming.
 - [x] Tests TDD de ejecución de tools y parsing de eventos JSON.
 
-### Fase 7: Interfaz de Usuario TUI (Ratatui) y Chat
-- [ ] Estructura de estado de aplicación (`AppState`) reactiva y desacoplada.
-- [ ] Vista 1: Gestor de Centros de Conocimiento (CRUD, activación, stats) e Ingesta.
-- [ ] Vista 2: Consola de Chat interactiva con conmutador rápido de modelo y visualización en tiempo real de Tools/SQL ejecutadas.
-- [ ] Tests de lógica de estado UI.
+### Fase 7: Servidor MCP y Aplicación Gráfica (Linear + NotebookLM Frameless 16:9)
+- [x] Servidor MCP Stdio (`--mcp-server`) con protocolo JSON-RPC 2.0 compatible con Claude Desktop, Claude Code y Gemini.
+- [x] Configuración de ventana de escritorio frameless (sin bordes del SO, aspecto 16:9 inicial de 1280x720, controles propios de minimizar/maximizar/cerrar y tema claro/oscuro).
+- [x] Panel 1 (Fuentes & Ingesta): Selector de centros y zona de Drag & Drop interactiva con progreso en vivo del pipeline.
+- [x] Panel 2 (Chat & Grounding): Consola conversacional con tarjetas visuales colapsables de Tool Use y citas normativas al pie.
+- [x] Panel 3 (Studio & Lakehouse Explorer): Visor interactivo de los 6 esquemas Arrow (catálogo, matriz, tablas cruzadas y grafo).
+- [x] Tests de integración del protocolo MCP y lógica UI.
+- [x] Herramientas de autoinstalación en la raíz: `MCP_GUIDE.md`, `install_mcp.ps1` y comando CLI `--mcp-info`.
+- [x] Chat de la GUI conectado a Claude Code headless mediante comandos Tauri (`enviar_mensaje_chat`, `listar_modelos_claude`) con catálogo dinámico de modelos.
+- [ ] Comando Tauri `ingestar_documento` (el frontend aún solo envía el nombre del archivo, no su ruta/contenido).
 
 ### Fase 8: Auditoría Adversarial E2E y Criterios DoD
 - [ ] Prueba de Multi-Centro: Verificación de aislamiento estricto al alternar centros activos.
@@ -187,7 +194,56 @@
   * Implementación de la suite adversarial en `tests/adversarial_agent_tools_tests.rs`: neutralización de inyecciones SQL destructivas (`DROP`, `DELETE`, `INSERT`), bloqueo estricto anti-cross-center en consultas `execute_athena_sql`, tolerancia a argumentos JSON corruptos o mal tipados, sanitización ante inyecciones en filtros WHERE de la matriz operativa y corte seguro ante bucles infinitos de herramientas (`max_steps`).
   * Verificación rigurosa: 108 / 108 tests pasando (61 unitarios + 9 adversariales de dominio + 5 adversariales de almacenamiento + 5 adversariales de query + 5 adversariales de embeddings + 5 adversariales de ingesta + 5 adversariales de agent/tools + 4 integración LanceDB + 4 integración DataFusion/Petgraph + 4 integración híbrida + 3 integración ingesta + 2 integración agent/tools al 100%), `cargo clippy --all-targets -- -D warnings` (0 advertencias) y `cargo fmt --check` (100% formateado).
 * **Notas para la Sesión 7:**
-  * Proceder con la **Fase 7: Interfaz de Usuario TUI (Ratatui) y Chat**.
-  * Diseñar la estructura de estado reactiva desacoplada `AppState` en `src/presentation/tui/`.
-  * Implementar Vista 1: Gestor de Centros de Conocimiento (CRUD, activación/conmutación de centro, visualización de estadísticas de ingesta).
-  * Implementar Vista 2: Consola de Chat interactiva con conmutador rápido de modelo Claude (`sonnet`, `opus`, `haiku`) y renderizado en vivo del panel de observabilidad de herramientas (Tools/SQL ejecutadas en tiempo real).
+  * Proceder con la **Fase 7: Servidor MCP y Aplicación Gráfica (Linear + NotebookLM Frameless 16:9)**.
+
+### Sesión 7 (2026-10-17)
+* **Objetivo:** Fase 7 — Servidor MCP Stdio y Aplicación Gráfica Moderna (Linear + Google NotebookLM Frameless 16:9).
+* **Acciones realizadas:**
+  * Reorientación arquitectónica autorizada: implementación dual de Servidor MCP Universal y Aplicación Gráfica Frameless moderna inspirada en Linear y NotebookLM.
+  * Implementación del Servidor MCP Stdio en `src/infrastructure/mcp/mcp_server.rs` y `src/infrastructure/mcp/mod.rs`: protocolo JSON-RPC 2.0 sobre `stdin`/`stdout`, respuestas deterministas a `initialize`, `tools/list` y `tools/call` invocando directamente a `LakehouseToolService`.
+  * Implementación de suite adversarial para el servidor MCP en `tests/adversarial_mcp_tests.rs`: tolerancia a JSON corrupto (`-32700`), manejo de notificaciones sin ID, validación estricta de parámetros de herramientas (`-32602`) y captura de errores sin pánico (`isError: true`).
+  * Implementación de los activos de presentación GUI en `src/presentation/gui/web/`:
+    * `index.html`: barra de título personalizada frameless, controles de ventana propios, selector de plantas/centros activos, selector de modelos Claude, Panel 1 de Fuentes & Drag & Drop, Panel 2 de Chat interactivo con observabilidad de herramientas y Panel 3 de Lakehouse Studio con los 6 esquemas Arrow y grafo.
+    * `styles.css`: paleta de colores nativa de Linear (Dark `#08090a` y Light theme), escala de superficies (*Surface Ladder*), acento índigo `#5e6ad2`, bordes sutiles de 1px y componentes interactivos.
+    * `app.js`: lógica de cliente completa con control de ventana frameless (minimizar, maximizar, restaurar, cerrar), conmutador de tema con persistencia `localStorage`, ingesta interactiva Drag & Drop, renderizado reactivo de tarjetas colapsables de Tool Use, citas interactivas y visor dinámico de matrices y grafo.
+  * Implementación de contratos de ventana y DTOs IPC en `src/presentation/gui/mod.rs` (validación de relación 16:9 1280x720, frameless y serialización).
+  * Implementación de comandos CLI en `src/presentation/cli/mod.rs` con soporte de flags `--mcp-server`, `--mcp-info`, `--gui`, `--help`.
+  * Integración del punto de entrada en `src/main.rs`: despacho entre servidor MCP stdio con redirección de logs a stderr, generador de configuración JSON y lanzador de GUI.
+  * Creación de herramientas de autoinstalación en la raíz del repositorio:
+    * `MCP_GUIDE.md`: guía paso a paso para Claude Desktop, Claude Code, Cursor y Gemini.
+    * `install_mcp.ps1`: script interactivo PowerShell para registro en un clic.
+  * Verificación rigurosa: 124 / 124 tests pasando (73 unitarios + 9 adversariales de dominio + 5 adversariales de almacenamiento + 5 adversariales de query + 5 adversariales de embeddings + 5 adversariales de ingesta + 5 adversariales de agent/tools + 4 adversariales MCP + 4 integración LanceDB + 4 integración DataFusion/Petgraph + 4 integración híbrida + 3 integración ingesta + 2 integración agent/tools al 100%), `cargo clippy --all-targets -- -D warnings` (0 advertencias) y `cargo fmt --check` (100% formateado).
+
+### Traspaso Técnico para Claude Code (Resolución de Despliegue de GUI Tauri 2):
+* **Estado Actual:**
+  * Toda la lógica de negocio, los 6 esquemas Arrow, LanceDB, DataFusion, FastEmbed, Petgraph y el servidor MCP por Stdio están 100% operativos y probados.
+  * El frontend (`src/presentation/gui/web/`) está completo con diseño Linear + Google NotebookLM (16:9 frameless).
+  * Las dependencias de `tauri = "2"` y `tauri-build = "2"` ya están añadidas y compilan limpiamente (`cargo build --release` compila con éxito).
+  * Se crearon los iconos de Windows en `icons/icon.ico` y el favicon para WebView2.
+* **Diagnóstico de los Desafíos Encontrados en Windows:**
+  1. **Consola de Terminal no Deseada:** Al ejecutarse en Windows, el binario por defecto lanza una ventana `cmd.exe`. Se configuró `#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]` en `src/main.rs`. Al compilar en `--release`, no debe aparecer consola.
+  2. **Bucle de Eventos (Event Loop) de Tauri:** Tauri 2 requiere un hilo principal síncrono. No debe usarse `#[tokio::main]` sobre `main()`. En `src/main.rs`, `main()` debe ser síncrono y Tokio debe instanciarse mediante `tokio::runtime::Runtime::new()` únicamente cuando se detecte el flag `--mcp-server`.
+  3. **Esquema de `tauri.conf.json`:** En Tauri 2, la propiedad `"capabilities"` no va dentro de `"security"`. La configuración debe declarar `url: "index.html"`, `label: "main"` y los permisos residen en `capabilities/default.json`.
+  4. **Instrucción para Claude Code:** Para levantar la GUI interactivamente en desarrollo y depurar cualquier excepción de WebView2, ejecutar directamente `cargo tauri dev` o revisar el ciclo de vida de la ventana en `src/presentation/gui/mod.rs`.
+
+### Sesión 8 (2026-10-17)
+* **Objetivo:** Reparar el chat de la GUI (no funcionaba) y listar dinámicamente los modelos disponibles en Claude Code headless.
+* **Diagnóstico:**
+  * `iniciar_app_tauri()` no registraba `invoke_handler`: toda llamada `invoke('enviar_mensaje_chat')` fallaba con "command not found".
+  * El selector de modelos estaba fijo en `index.html` con modelos obsoletos (Claude 3.x) y `ClaudeModel` era un enum cerrado de 3 variantes.
+  * `ChatResponsePayload` se serializaba en snake_case mientras `app.js` lee camelCase (`replyHtml`, `toolsUsed`).
+  * `ClaudeAgentRunner` pasaba toda la conversación como argumento de línea de comandos (límite de 32 KB en Windows), sin protocolo de tools explícito y con las herramientas nativas de Claude Code activas.
+* **Acciones realizadas:**
+  * `ClaudeModel` pasa a ser un newtype validado (`ClaudeModel::new`) que admite cualquier alias o ID (`opus`, `fable`, `claude-opus-5-5`, `sonnet[1m]`) y rechaza flags (`--…`), metacaracteres y longitudes > 128. Serde valida al deserializar. Nuevo DTO `ModelDescriptor` (camelCase).
+  * Nuevo puerto `application/ports/model_catalog.rs` (`ModelCatalogPort`).
+  * Nuevo adaptador `infrastructure/llm/claude_model_catalog.rs` (`ClaudeHeadlessModelCatalog`): envía `control_request {subtype: initialize}` por stdin a `claude -p --input-format stream-json --output-format stream-json --verbose` y extrae `response.models`; descarta entradas inválidas y duplicadas, con timeout y límite de líneas.
+  * `ClaudeAgentRunner`: conversación por stdin, `--system-prompt`, `--tools ""`, `--no-session-persistence`, `--strict-mcp-config`, protocolo `tool_calls` explícito, timeout 180 s. Helper `ocultar_consola_en_windows` (`CREATE_NO_WINDOW`) en ambos adaptadores.
+  * Nuevo `presentation/gui/chat_service.rs` (`GuiChatService`): valida mensaje/centro/modelo, historial por centro acotado a 40 mensajes con rollback ante error, tool cards con duración y escape HTML de la respuesta (`texto_a_html_seguro`).
+  * Comandos Tauri `listar_modelos_claude` y `enviar_mensaje_chat` registrados; composición en `main.rs` (`construir_servicio_chat_gui`).
+  * Frontend: selector de modelos poblado desde `listar_modelos_claude` (respaldo estático solo sin Tauri) y validación de modelo vacío.
+* **Tests añadidos:** 4 unitarios de `ClaudeModel`/`ModelDescriptor`, 6 del catálogo, 2 del runner, 1 de escape HTML, 6 adversariales en `tests/adversarial_gui_chat_tests.rs`, y 2 `#[ignore]` contra la CLI real (`integration_claude_model_catalog`, `acceptance_gui_chat_claude_headless`), ambos verificados en verde en local.
+* **Verificación:** 146 tests pasando + 2 ignorados (reales, ejecutados manualmente con éxito), `cargo clippy --all-targets -- -D warnings` sin avisos, `cargo fmt --check` OK.
+* **Notas para la siguiente sesión:**
+  * No se ha verificado visualmente la ventana Tauri; probar con `cargo tauri dev` el chat y el selector.
+  * Pendiente el comando `ingestar_documento` (requiere enviar ruta o bytes desde el frontend).
+  * Las citas (`citations`), `matrixResult` y `graphResult` aún se devuelven vacíos desde el backend.

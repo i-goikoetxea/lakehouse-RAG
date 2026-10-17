@@ -152,7 +152,7 @@ impl MockAgentRunner {
 impl AgentRunnerPort for MockAgentRunner {
     async fn ejecutar_turno(
         &self,
-        _modelo: ClaudeModel,
+        _modelo: &ClaudeModel,
         _system_prompt: &str,
         historial: &[AgentMessage],
         _herramientas: &[ToolDefinition],
@@ -189,7 +189,7 @@ mod tests {
         let tools = ToolDefinition::lakehouse_tools();
 
         let output = runner
-            .ejecutar_turno(ClaudeModel::Sonnet, "prompt", &historial, &tools)
+            .ejecutar_turno(&ClaudeModel::sonnet(), "prompt", &historial, &tools)
             .await
             .unwrap();
 
@@ -207,7 +207,7 @@ mod tests {
         let runner = MockAgentRunner::with_error("Fallo de conexión simulado");
         let historial = vec![AgentMessage::user("test")];
         let err = runner
-            .ejecutar_turno(ClaudeModel::Haiku, "", &historial, &[])
+            .ejecutar_turno(&ClaudeModel::new("haiku").unwrap(), "", &historial, &[])
             .await
             .unwrap_err();
 

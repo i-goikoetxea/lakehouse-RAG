@@ -1,10 +1,12 @@
 //! Adaptador para invocar el agente Claude Headless CLI con selección dinámica de modelo
 
 use std::path::PathBuf;
+use std::process::Stdio;
 use std::time::Duration;
 
 use async_trait::async_trait;
 use serde_json::Value;
+use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 use tokio::time::timeout;
 
@@ -12,6 +14,7 @@ use crate::application::dtos::agent::{AgentMessage, AgentTurnOutput, ClaudeModel
 use crate::application::dtos::tools::{ToolCall, ToolDefinition};
 use crate::application::ports::agent_runner::AgentRunnerPort;
 use crate::domain::errors::DomainError;
+use crate::infrastructure::llm::ocultar_consola_en_windows;
 
 /// Configuración para la ejecución de Claude Headless
 #[derive(Debug, Clone)]
@@ -25,7 +28,7 @@ impl Default for ClaudeAgentConfig {
     fn default() -> Self {
         Self {
             binary_path: PathBuf::from("claude"),
-            timeout_duration: Duration::from_secs(60),
+            timeout_duration: Duration::from_secs(180),
             extra_args: Vec::new(),
         }
     }
@@ -126,63 +129,121 @@ impl ClaudeAgentRunner {
         // Si no es un bloque de llamadas a herramientas, es el mensaje final
         AgentTurnOutput::FinalMessage(stdout.trim().to_string())
     }
+
+    /// Protocolo textual que permite al modelo solicitar herramientas del Lakehouse
+    const PROTOCOLO_HERRAMIENTAS: &'static str = "PROTOCOLO DE HERRAMIENTAS:\n\
+        - Si necesitas consultar datos del Lakehouse, responde ÚNICAMENTE con un objeto JSON \
+        de la forma {\"tool_calls\": [{\"id\": \"call_1\", \"name\": \"<herramienta>\", \
+        \"arguments\": { ... }}]}, sin texto adicional.\n\
+        - Los mensajes con role 'tool' contienen los resultados de tus llamadas previas.\n\
+        - Cuando dispongas de la información necesaria, responde al operador en texto plano \
+        (Markdown), sin JSON.";
+
+    /// Construye el documento de conversación que se envía por stdin a Claude CLI
+    pub fn construir_entrada_conversacion(
+        historial: &[AgentMessage],
+        herramientas: &[ToolDefinition],
+    ) -> Result<String, DomainError> {
+        let conversacion = serde_json::json!({
+            "tools": herramientas,
+            "messages": historial,
+        });
+        let conversacion_json = serde_json::to_string_pretty(&conversacion).map_err(|e| {
+            DomainError::AgentError(format!("Error serializando conversación para Claude: {e}"))
+        })?;
+        Ok(format!(
+            "{}\n\nCONVERSACIÓN Y HERRAMIENTAS DISPONIBLES:\n{conversacion_json}\n\n\
+            Responde al último mensaje siguiendo el protocolo.",
+            Self::PROTOCOLO_HERRAMIENTAS
+        ))
+    }
+
+    /// Argumentos de Claude CLI: modo headless sin herramientas nativas ni persistencia
+    pub fn construir_argumentos(&self, modelo: &ClaudeModel, system_prompt: &str) -> Vec<String> {
+        let mut args: Vec<String> = [
+            "-p",
+            "--model",
+            modelo.cli_model_name(),
+            "--system-prompt",
+            system_prompt,
+            "--tools",
+            "",
+            "--no-session-persistence",
+            "--strict-mcp-config",
+        ]
+        .iter()
+        .map(|a| a.to_string())
+        .collect();
+        args.extend(self.config.extra_args.iter().cloned());
+        args
+    }
+
+    async fn ejecutar_cli(
+        &self,
+        args: Vec<String>,
+        entrada: String,
+    ) -> Result<String, DomainError> {
+        let error_io = |e: std::io::Error| {
+            DomainError::AgentError(format!(
+                "Fallo ejecutando binario Claude CLI en '{:?}': {e}",
+                self.config.binary_path
+            ))
+        };
+
+        let mut cmd = Command::new(&self.config.binary_path);
+        cmd.args(&args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+        ocultar_consola_en_windows(&mut cmd);
+
+        let mut child = cmd.spawn().map_err(error_io)?;
+        if let Some(mut stdin) = child.stdin.take() {
+            stdin
+                .write_all(entrada.as_bytes())
+                .await
+                .map_err(error_io)?;
+        }
+
+        let output = timeout(self.config.timeout_duration, child.wait_with_output())
+            .await
+            .map_err(|_| {
+                DomainError::AgentError(format!(
+                    "Timeout agotado ({:?}) esperando respuesta de Claude CLI",
+                    self.config.timeout_duration
+                ))
+            })?
+            .map_err(error_io)?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            return Err(DomainError::AgentError(format!(
+                "Claude CLI terminó con error (código {:?}): {} {}",
+                output.status.code(),
+                stderr.trim(),
+                stdout.trim()
+            )));
+        }
+
+        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    }
 }
 
 #[async_trait]
 impl AgentRunnerPort for ClaudeAgentRunner {
     async fn ejecutar_turno(
         &self,
-        modelo: ClaudeModel,
+        modelo: &ClaudeModel,
         system_prompt: &str,
         historial: &[AgentMessage],
         herramientas: &[ToolDefinition],
     ) -> Result<AgentTurnOutput, DomainError> {
-        let prompt_payload = serde_json::json!({
-            "system": system_prompt,
-            "tools": herramientas,
-            "messages": historial,
-        });
-
-        let prompt_str = serde_json::to_string(&prompt_payload).map_err(|e| {
-            DomainError::AgentError(format!("Error serializando payload para Claude: {e}"))
-        })?;
-
-        let mut cmd = Command::new(&self.config.binary_path);
-        cmd.arg("-p")
-            .arg(&prompt_str)
-            .arg("--model")
-            .arg(modelo.cli_model_name());
-
-        for arg in &self.config.extra_args {
-            cmd.arg(arg);
-        }
-
-        let child_future = cmd.output();
-
-        let output = match timeout(self.config.timeout_duration, child_future).await {
-            Ok(res) => res.map_err(|e| {
-                DomainError::AgentError(format!(
-                    "Fallo ejecutando binario Claude CLI en '{:?}': {e}",
-                    self.config.binary_path
-                ))
-            })?,
-            Err(_) => {
-                return Err(DomainError::AgentError(format!(
-                    "Timeout agotado ({:?}) esperando respuesta de Claude CLI",
-                    self.config.timeout_duration
-                )));
-            }
-        };
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(DomainError::AgentError(format!(
-                "Claude CLI terminó con error (código {:?}): {stderr}",
-                output.status.code()
-            )));
-        }
-
-        let stdout = String::from_utf8_lossy(&output.stdout);
+        let entrada = Self::construir_entrada_conversacion(historial, herramientas)?;
+        let stdout = self
+            .ejecutar_cli(self.construir_argumentos(modelo, system_prompt), entrada)
+            .await?;
         Ok(Self::parsear_salida_claude(&stdout))
     }
 }
@@ -224,6 +285,34 @@ mod tests {
         assert_eq!(res, AgentTurnOutput::FinalMessage(raw.to_string()));
     }
 
+    #[test]
+    fn test_entrada_conversacion_incluye_protocolo_herramientas_e_historial() {
+        let historial = vec![AgentMessage::user("¿Temperatura máxima en Recepción?")];
+        let herramientas = ToolDefinition::lakehouse_tools();
+
+        let entrada = ClaudeAgentRunner::construir_entrada_conversacion(&historial, &herramientas)
+            .expect("Serialización válida");
+
+        assert!(entrada.contains("\"tool_calls\""));
+        assert!(entrada.contains("inspect_lakehouse_catalog"));
+        assert!(entrada.contains("Temperatura máxima en Recepción"));
+    }
+
+    #[test]
+    fn test_argumentos_cli_desactivan_herramientas_nativas_y_fijan_modelo() {
+        let runner = ClaudeAgentRunner::new(ClaudeAgentConfig::default());
+        let modelo = ClaudeModel::new("claude-opus-5-5").unwrap();
+
+        let args = runner.construir_argumentos(&modelo, "Eres el asistente");
+
+        let posicion = |flag: &str| args.iter().position(|a| a == flag).expect(flag);
+        assert_eq!(args[posicion("--model") + 1], "claude-opus-5-5");
+        assert_eq!(args[posicion("--tools") + 1], "");
+        assert_eq!(args[posicion("--system-prompt") + 1], "Eres el asistente");
+        assert!(args.contains(&"-p".to_string()));
+        assert!(args.contains(&"--no-session-persistence".to_string()));
+    }
+
     #[tokio::test]
     async fn test_claude_runner_binario_inexistente_retorna_error_controlado() {
         let runner = ClaudeAgentRunner::new(ClaudeAgentConfig {
@@ -233,7 +322,7 @@ mod tests {
         });
 
         let err = runner
-            .ejecutar_turno(ClaudeModel::Sonnet, "sys", &[], &[])
+            .ejecutar_turno(&ClaudeModel::sonnet(), "sys", &[], &[])
             .await
             .unwrap_err();
 

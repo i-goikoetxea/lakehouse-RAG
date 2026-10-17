@@ -210,7 +210,7 @@ async fn test_adv_bucle_infinito_de_herramientas_cortado_por_max_steps() {
     impl AgentRunnerPort for InfiniteLoopRunner {
         async fn ejecutar_turno(
             &self,
-            _modelo: ClaudeModel,
+            _modelo: &ClaudeModel,
             _system_prompt: &str,
             _historial: &[AgentMessage],
             _herramientas: &[ToolDefinition],
@@ -240,7 +240,12 @@ async fn test_adv_bucle_infinito_de_herramientas_cortado_por_max_steps() {
     let mut historial = vec![AgentMessage::user("Inicia bucle")];
 
     let err = orchestrator
-        .procesar_turno(ClaudeModel::Opus, &centro, &mut historial, None)
+        .procesar_turno(
+            &ClaudeModel::new("opus").unwrap(),
+            &centro,
+            &mut historial,
+            None,
+        )
         .await
         .unwrap_err();
 

@@ -1,0 +1,33 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Lakehouse RAG Industrial",
+  "version": "0.1.0",
+  "identifier": "com.lakehouse.rag",
+  "build": {
+    "frontendDist": "src/presentation/gui/web"
+  },
+  "app": {
+    "withGlobalTauri": true,
+    "windows": [
+      {
+        "label": "main",
+        "title": "Lakehouse RAG Industrial",
+        "url": "index.html",
+        "width": 1280,
+        "height": 720,
+        "resizable": true,
+        "fullscreen": false,
+        "decorations": false,
+        "center": true,
+        "transparent": false
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+
+  "bundle": {
+    "active": false
+  }
+}
