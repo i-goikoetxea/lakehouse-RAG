@@ -228,6 +228,52 @@ pub fn json_schema_destilacion() -> String {
     serde_json::to_string(&schema).unwrap_or_else(|_| "{}".to_string())
 }
 
+/// Etapas observables de una ingesta (la GUI las muestra como progreso)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EtapaIngesta {
+    /// Copia inmutable del original en `raw_docs/`
+    Copia,
+    Parseo,
+    /// Destilación con Claude (la etapa más larga)
+    Destilacion,
+    /// Vectorización (la primera vez carga el modelo de embeddings)
+    Embeddings,
+    /// Escritura STAGED y commit en LanceDB
+    Escritura,
+    /// Reconstrucción de las vistas del centro
+    Proyeccion,
+}
+
+impl EtapaIngesta {
+    /// Texto para el operador
+    pub fn descripcion(self) -> &'static str {
+        match self {
+            Self::Copia => "Copiando el original a raw_docs",
+            Self::Parseo => "Analizando el documento",
+            Self::Destilacion => "Destilando con Claude",
+            Self::Embeddings => "Calculando embeddings",
+            Self::Escritura => "Escribiendo en LanceDB",
+            Self::Proyeccion => "Reconstruyendo las vistas del centro",
+        }
+    }
+
+    /// Avance aproximado (0–100) al **empezar** la etapa
+    pub fn porcentaje(self) -> u8 {
+        match self {
+            Self::Copia => 5,
+            Self::Parseo => 10,
+            Self::Destilacion => 20,
+            Self::Embeddings => 65,
+            Self::Escritura => 80,
+            Self::Proyeccion => 90,
+        }
+    }
+}
+
+/// Recibe cada etapa al empezar (no debe bloquear: se llama dentro del pipeline)
+pub type ObservadorIngesta = std::sync::Arc<dyn Fn(EtapaIngesta) + Send + Sync>;
+
 #[cfg(test)]
 mod tests {
     use super::*;

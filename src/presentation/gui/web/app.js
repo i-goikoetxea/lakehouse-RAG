@@ -1,642 +1,848 @@
 /**
- * Lakehouse RAG Industrial — Frontend Client (Linear + NotebookLM)
- * Arquitectura SOTA 2026: Soporte dual Tauri IPC y Web Fallback
+ * Lakehouse RAG Industrial — Cliente de la ventana Tauri 2 (Linear + NotebookLM)
+ *
+ * Todo dato viene de los comandos IPC sobre LakehouseApp: no hay datos simulados.
+ * Seguridad: el texto de documentos, tools y modelo se pinta SIEMPRE con textContent.
+ * La única excepción es `replyHtml`, que el backend entrega saneado
+ * (markdown_seguro.rs: Markdown real con todo el HTML crudo escapado y enlaces inertes).
  */
 
 (function () {
   'use strict';
 
-  // 1. Detección de entorno Tauri IPC
-  const isTauri = typeof window.__TAURI__ !== 'undefined';
-  const tauriInvoke = isTauri && window.__TAURI__.core ? window.__TAURI__.core.invoke : (isTauri && window.__TAURI__.invoke ? window.__TAURI__.invoke : null);
+  // 1. Puente con Tauri
+  const tauri = window.__TAURI__;
+  const invoke = tauri && tauri.core ? tauri.core.invoke : null;
+  const listen = tauri && tauri.event ? tauri.event.listen : null;
 
-  // 2. Elementos del DOM
+  const AVISO_MODELO_EMBEDDINGS =
+    'La primera vez se carga el modelo de embeddings (~2,2 GB): puede tardar unos 100 s. La ventana sigue operativa.';
+  const PREF = { centro: 'lakehouse_centro', modelo: 'lakehouse_modelo', tema: 'lakehouse_theme', paneles: 'lakehouse_paneles' };
+  const LIMITES = { fuentes: [220, 520, 300], studio: [280, 760, 380] };
+  const ANCHO_PLEGADO = 40;
+
+  // 2. DOM
+  const $ = (id) => document.getElementById(id);
   const htmlEl = document.documentElement;
-  const btnThemeToggle = document.getElementById('btn-theme-toggle');
-  const btnMinimize = document.getElementById('btn-minimize');
-  const btnMaximize = document.getElementById('btn-maximize');
-  const btnClose = document.getElementById('btn-close');
-
-  const selectCentro = document.getElementById('select-centro');
-  const selectModelo = document.getElementById('select-modelo');
-  const dropZone = document.getElementById('drop-zone');
-  const fileInput = document.getElementById('file-input');
-  const dropProgress = document.getElementById('dropzone-progress');
-  const sourcesList = document.getElementById('sources-list');
-  const sourcesCount = document.getElementById('sources-count');
-  const btnRefreshSources = document.getElementById('btn-refresh-sources');
-
-  const chatForm = document.getElementById('chat-form');
-  const chatInput = document.getElementById('chat-input');
-  const chatMessages = document.getElementById('chat-messages');
-
+  const workspace = $('workspace');
+  const selectCentro = $('select-centro');
+  const centroEstado = $('centro-estado');
+  const btnToggleCentro = $('btn-toggle-centro');
+  const btnEliminarCentro = $('btn-eliminar-centro');
+  const selectModelo = $('select-modelo');
+  const dropZone = $('drop-zone');
+  const ingestaProgreso = $('ingesta-progreso');
+  const dropProgress = $('dropzone-progress');
+  const ingestaEstado = $('ingesta-estado');
+  const sourcesList = $('sources-list');
+  const sourcesCount = $('sources-count');
+  const chatMessages = $('chat-messages');
+  const chatColumna = $('chat-columna');
+  const chatVacio = $('chat-vacio');
+  const chatForm = $('chat-form');
+  const chatInput = $('chat-input');
+  const btnSend = $('btn-send');
+  const btnIrFinal = $('btn-ir-final');
   const tabButtons = document.querySelectorAll('.studio-tabs .tab-btn');
-  const tabContents = document.querySelectorAll('.panel-studio .tab-content');
-  const matrixInspector = document.getElementById('matrix-inspector-result');
-  const graphInspector = document.getElementById('graph-inspector-result');
+  const tabContents = document.querySelectorAll('.studio-cuerpo .tab-content');
 
-  // 3. Catálogo en memoria de documentos activos
-  let documentsCatalog = [
-    {
-      id: 'DOC-NORM-2026',
-      name: 'Norma Técnica de Soldadura y Recipientes 2026',
-      type: 'PDF',
-      size: '2.4 MB',
-      status: 'vigente',
-      hash: 'sha256:7f83b165...',
-      date: '15/01/2026'
-    },
-    {
-      id: 'DOC-ESPEC-042',
-      name: 'Matriz Operativa de Presión y Temperatura Alfa',
-      type: 'Markdown',
-      size: '480 KB',
-      status: 'vigente',
-      hash: 'sha256:c912e58a...',
-      date: '10/02/2026'
-    },
-    {
-      id: 'DOC-NORM-2020',
-      name: 'Reglamento Histórico de Soldadura 2020',
-      type: 'PDF',
-      size: '1.8 MB',
-      status: 'derogada',
-      hash: 'sha256:3a15f029...',
-      date: '04/05/2020'
-    }
-  ];
+  // 3. Estado
+  let centros = [];
+  let ingestasEnCurso = 0;
+  let colaIngesta = Promise.resolve();
+  let avisoEmbeddingsMostrado = false;
+  let consultaEnCurso = false;
+  let pestanaElegidaPorUsuario = false;
+  let fuentesUltimaRespuesta = [];
 
-  // 4. Gestión del Tema Oscuro / Claro (Persistencia en LocalStorage)
-  function initTheme() {
-    const savedTheme = localStorage.getItem('lakehouse_theme') || 'dark';
-    htmlEl.setAttribute('data-theme', savedTheme);
+  // 4. Utilidades seguras
+  function el(tag, clase, texto) {
+    const nodo = document.createElement(tag);
+    if (clase) nodo.className = clase;
+    if (texto !== undefined && texto !== null) nodo.textContent = String(texto);
+    return nodo;
   }
+  function vaciar(nodo) { while (nodo.firstChild) nodo.removeChild(nodo.firstChild); }
+  function mensajeError(err) { return err && err.message ? err.message : String(err); }
+  function leer(clave) { try { return localStorage.getItem(clave); } catch (_) { return null; } }
+  function guardar(clave, valor) { try { localStorage.setItem(clave, valor); } catch (_) { /* opcional */ } }
+  function hora() { return new Date().toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit' }); }
+  function plural(n, singular, pluralTexto) { return `${n} ${n === 1 ? singular : pluralTexto}`; }
+  function centroSeleccionado() { return centros.find((c) => c.id === selectCentro.value) || null; }
 
-  function toggleTheme() {
-    const currentTheme = htmlEl.getAttribute('data-theme') || 'dark';
-    const newTheme = currentTheme === 'dark' ? 'light' : 'dark';
-    htmlEl.setAttribute('data-theme', newTheme);
-    localStorage.setItem('lakehouse_theme', newTheme);
-  }
-
-  btnThemeToggle.addEventListener('click', toggleTheme);
-  initTheme();
-
-  // 3b. Catálogo dinámico de modelos (Claude Code headless vía IPC)
-  const MODELOS_RESPALDO = [
-    { alias: 'sonnet', displayName: 'Sonnet', description: 'Modo demostración sin Tauri' },
-    { alias: 'haiku', displayName: 'Haiku', description: 'Modo demostración sin Tauri' },
-    { alias: 'opus', displayName: 'Opus', description: 'Modo demostración sin Tauri' }
-  ];
-
-  function renderModelOptions(modelos) {
-    selectModelo.innerHTML = '';
-    modelos.forEach((modelo) => {
-      const option = document.createElement('option');
-      option.value = modelo.alias;
-      option.textContent = modelo.description
-        ? `${modelo.displayName} — ${modelo.description}`
-        : modelo.displayName;
-      option.title = modelo.resolvedModel || modelo.alias;
-      option.dataset.label = modelo.displayName;
-      selectModelo.appendChild(option);
+  function ficha(pares) {
+    const dl = el('dl', 'ficha');
+    pares.filter(([, v]) => v !== null && v !== undefined && v !== '').forEach(([k, v]) => {
+      dl.appendChild(el('dt', null, k));
+      dl.appendChild(el('dd', null, v));
     });
-    selectModelo.disabled = modelos.length === 0;
+    return dl;
   }
 
-  async function loadModelCatalog() {
-    if (!tauriInvoke) {
-      renderModelOptions(MODELOS_RESPALDO);
+  /** Ruta de apartados; sin el primer segmento si solo repite el documento («PO-ALM-03 Título…») */
+  function miga(breadcrumb, docId) {
+    const span = el('span', 'ruta-miga');
+    let partes = String(breadcrumb || '').split(' > ');
+    if (docId && partes.length > 1 && partes[0].startsWith(docId)) partes = partes.slice(1);
+    partes.forEach((parte, i) => {
+      if (i > 0) span.appendChild(el('span', 'sep', '›'));
+      span.appendChild(document.createTextNode(parte));
+    });
+    return span;
+  }
+
+  // 5. Avisos: toast efímero + registro de actividad (fuera de la conversación)
+  function registrar(texto, tipo = 'info', conToast = true) {
+    const lista = $('actividad-lista');
+    const li = el('li', tipo === 'error' ? 'error' : null);
+    li.appendChild(el('time', null, hora()));
+    li.appendChild(document.createTextNode(texto));
+    lista.insertBefore(li, lista.firstChild);
+    while (lista.children.length > 50) lista.removeChild(lista.lastChild);
+    $('actividad-contador').textContent = String(lista.children.length);
+    if (conToast) toast(texto, tipo);
+  }
+
+  function toast(texto, tipo) {
+    const nodo = el('div', `toast ${tipo}`, texto);
+    $('toasts').appendChild(nodo);
+    setTimeout(() => nodo.remove(), tipo === 'error' ? 9000 : 4500);
+  }
+
+  // 6. Tema y ventana
+  htmlEl.setAttribute('data-theme', leer(PREF.tema) || 'dark');
+  $('btn-theme-toggle').addEventListener('click', () => {
+    const nuevo = htmlEl.getAttribute('data-theme') === 'dark' ? 'light' : 'dark';
+    htmlEl.setAttribute('data-theme', nuevo);
+    guardar(PREF.tema, nuevo);
+  });
+
+  function ventanaActual() {
+    return tauri && tauri.window && tauri.window.getCurrentWindow ? tauri.window.getCurrentWindow() : null;
+  }
+  [['btn-minimize', 'minimize'], ['btn-maximize', 'toggleMaximize'], ['btn-close', 'close']].forEach(([id, accion]) => {
+    $(id).addEventListener('click', async () => {
+      const ventana = ventanaActual();
+      if (!ventana) return;
+      try { await ventana[accion](); } catch (e) { registrar(`No se pudo ${accion}: ${mensajeError(e)}`, 'error'); }
+    });
+  });
+
+  // 7. Paneles redimensionables y plegables (anchos recordados)
+  const paneles = (() => {
+    try { return JSON.parse(leer(PREF.paneles)) || {}; } catch (_) { return {}; }
+  })();
+
+  function aplicarPaneles() {
+    ['fuentes', 'studio'].forEach((panel) => {
+      const [min, max, defecto] = LIMITES[panel];
+      const ancho = Math.min(max, Math.max(min, Number(paneles[`ancho_${panel}`]) || defecto));
+      const plegado = Boolean(paneles[`plegado_${panel}`]);
+      // El estilo en línea manda sobre la clase: el ancho plegado se fija aquí
+      workspace.style.setProperty(`--ancho-${panel}`, plegado ? `${ANCHO_PLEGADO}px` : `${ancho}px`);
+      workspace.classList.toggle(`${panel}-plegado`, plegado);
+    });
+  }
+
+  function fijarAncho(panel, ancho) {
+    const [min, max] = LIMITES[panel];
+    paneles[`ancho_${panel}`] = Math.round(Math.min(max, Math.max(min, ancho)));
+    paneles[`plegado_${panel}`] = false;
+    aplicarPaneles();
+  }
+
+  function guardarPaneles() { guardar(PREF.paneles, JSON.stringify(paneles)); }
+
+  document.querySelectorAll('.separador').forEach((separador) => {
+    const panel = separador.dataset.separador;
+    separador.addEventListener('pointerdown', (e) => {
+      e.preventDefault();
+      try { separador.setPointerCapture(e.pointerId); } catch (_) { /* puntero sintético */ }
+      separador.classList.add('activo');
+      workspace.classList.add('redimensionando');
+      const caja = workspace.getBoundingClientRect();
+      const mover = (ev) => fijarAncho(panel, panel === 'fuentes' ? ev.clientX - caja.left : caja.right - ev.clientX);
+      const soltar = () => {
+        separador.removeEventListener('pointermove', mover);
+        separador.classList.remove('activo');
+        workspace.classList.remove('redimensionando');
+        guardarPaneles();
+      };
+      separador.addEventListener('pointermove', mover);
+      separador.addEventListener('pointerup', soltar, { once: true });
+      separador.addEventListener('pointercancel', soltar, { once: true });
+    });
+    separador.addEventListener('dblclick', () => { fijarAncho(panel, LIMITES[panel][2]); guardarPaneles(); });
+    separador.addEventListener('keydown', (e) => {
+      if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
+      const actual = Number(paneles[`ancho_${panel}`]) || LIMITES[panel][2];
+      const crece = (e.key === 'ArrowRight') === (panel === 'fuentes');
+      fijarAncho(panel, actual + (crece ? 24 : -24));
+      guardarPaneles();
+    });
+  });
+
+  document.querySelectorAll('[data-plegar]').forEach((b) => b.addEventListener('click', () => {
+    paneles[`plegado_${b.dataset.plegar}`] = true; aplicarPaneles(); guardarPaneles();
+  }));
+  document.querySelectorAll('[data-desplegar]').forEach((b) => b.addEventListener('click', () => {
+    paneles[`plegado_${b.dataset.desplegar}`] = false; aplicarPaneles(); guardarPaneles();
+  }));
+  aplicarPaneles();
+
+  // 8. Pestañas del Studio (no roban el foco si el usuario eligió otra)
+  function activarPestana(tabId) {
+    tabButtons.forEach((b) => {
+      const activa = b.dataset.tab === tabId;
+      b.classList.toggle('active', activa);
+      if (activa) b.classList.remove('novedad');
+    });
+    tabContents.forEach((c) => c.classList.toggle('active', c.id === tabId));
+    if (paneles.plegado_studio) { paneles.plegado_studio = false; aplicarPaneles(); guardarPaneles(); }
+  }
+
+  function marcarNovedad(tabId) {
+    tabButtons.forEach((b) => { if (b.dataset.tab === tabId && !b.classList.contains('active')) b.classList.add('novedad'); });
+  }
+
+  tabButtons.forEach((b) => b.addEventListener('click', () => { pestanaElegidaPorUsuario = true; activarPestana(b.dataset.tab); }));
+
+  // 9. Modelos (cambio en caliente: cada turno usa el modelo elegido)
+  async function cargarModelos() {
+    try {
+      const modelos = await invoke('listar_modelos_claude');
+      vaciar(selectModelo);
+      modelos.forEach((m) => {
+        const opcion = el('option', null, m.displayName);
+        opcion.value = m.alias;
+        opcion.title = [m.description, m.resolvedModel || m.alias].filter(Boolean).join(' · ');
+        selectModelo.appendChild(opcion);
+      });
+      const preferido = leer(PREF.modelo);
+      if (preferido && modelos.some((m) => m.alias === preferido)) selectModelo.value = preferido;
+      selectModelo.disabled = modelos.length === 0;
+      selectModelo.title = selectModelo.selectedOptions[0] ? selectModelo.selectedOptions[0].title : '';
+    } catch (err) {
+      vaciar(selectModelo);
+      selectModelo.appendChild(el('option', null, 'Claude Code no disponible'));
+      selectModelo.disabled = true;
+      registrar(`No se pudo obtener el catálogo de modelos de Claude Code: ${mensajeError(err)}`, 'error');
+    }
+  }
+
+  function etiquetaModelo() {
+    const opcion = selectModelo.selectedOptions[0];
+    return opcion ? opcion.textContent : '';
+  }
+
+  selectModelo.addEventListener('change', () => {
+    guardar(PREF.modelo, selectModelo.value);
+    selectModelo.title = selectModelo.selectedOptions[0] ? selectModelo.selectedOptions[0].title : '';
+    registrar(`Modelo: ${etiquetaModelo()} (desde la próxima pregunta).`, 'info');
+  });
+
+  // 10. Centros
+  async function cargarCentros(preferido) {
+    try {
+      centros = await invoke('listar_centros');
+    } catch (err) {
+      centros = [];
+      registrar(`No se pudo leer el registro de centros: ${mensajeError(err)}`, 'error');
+    }
+    vaciar(selectCentro);
+    if (centros.length === 0) selectCentro.appendChild(el('option', null, 'Sin centros: crea uno'));
+    centros.forEach((c) => {
+      const opcion = el('option', null, `${c.nombre} (${c.id})`);
+      opcion.value = c.id;
+      opcion.title = c.rutaDisco;
+      selectCentro.appendChild(opcion);
+    });
+    const objetivo = preferido || leer(PREF.centro);
+    if (objetivo && centros.some((c) => c.id === objetivo)) selectCentro.value = objetivo;
+    selectCentro.disabled = centros.length === 0;
+    await alCambiarCentro();
+  }
+
+  async function alCambiarCentro() {
+    const centro = centroSeleccionado();
+    btnToggleCentro.disabled = !centro;
+    btnEliminarCentro.disabled = !centro;
+    if (centro) guardar(PREF.centro, centro.id);
+    centroEstado.textContent = centro ? (centro.activo ? 'Activo' : 'Inactivo') : '—';
+    centroEstado.className = `chip ${centro && centro.activo ? 'chip-ok' : 'chip-aviso'}`;
+    btnToggleCentro.textContent = centro && centro.activo ? 'Desactivar' : 'Activar';
+    $('estado-dot').classList.toggle('online', Boolean(centro && centro.activo));
+    $('estado-texto').textContent = centro
+      ? (centro.activo ? `${centro.id} · vistas cargadas` : `${centro.id} · inactivo (sin acceso)`)
+      : 'Sin centro seleccionado';
+    pintarCentro(centro);
+    await refrescarCatalogo();
+  }
+
+  selectCentro.addEventListener('change', alCambiarCentro);
+
+  btnToggleCentro.addEventListener('click', async () => {
+    const centro = centroSeleccionado();
+    if (!centro) return;
+    btnToggleCentro.disabled = true;
+    try {
+      if (centro.activo) {
+        await invoke('desactivar_centro', { centroId: centro.id });
+        registrar(`Centro ${centro.id} desactivado: sus vistas se han retirado.`, 'info');
+      } else {
+        const a = await invoke('activar_centro', { centroId: centro.id });
+        registrar(`Centro ${centro.id} activo: ${a.vistas} vistas, ${plural(a.filas, 'fila', 'filas')}.`, 'ok');
+      }
+    } catch (err) {
+      registrar(`No se pudo cambiar el estado del centro: ${mensajeError(err)}`, 'error');
+    }
+    await cargarCentros(centro.id);
+  });
+
+  function confirmar(titulo, texto) {
+    const dialogo = $('dialogo-confirmar');
+    $('confirmar-titulo').textContent = titulo;
+    $('confirmar-texto').textContent = texto;
+    dialogo.returnValue = 'no';
+    dialogo.showModal();
+    return new Promise((ok) => dialogo.addEventListener('close', () => ok(dialogo.returnValue === 'si'), { once: true }));
+  }
+
+  btnEliminarCentro.addEventListener('click', async () => {
+    const centro = centroSeleccionado();
+    if (!centro) return;
+    const si = await confirmar(`Quitar «${centro.nombre}» del registro`,
+      `El centro deja de aparecer en la app. Su carpeta (${centro.rutaDisco}) NO se borra y se puede volver a dar de alta con la misma ruta.`);
+    if (!si) return;
+    try {
+      if (centro.activo) await invoke('desactivar_centro', { centroId: centro.id });
+      await invoke('eliminar_centro', { centroId: centro.id });
+      registrar(`Centro ${centro.id} quitado del registro (el disco no se ha tocado).`, 'ok');
+    } catch (err) {
+      registrar(`No se pudo quitar el centro: ${mensajeError(err)}`, 'error');
+    }
+    await cargarCentros();
+  });
+
+  $('btn-nuevo-centro').addEventListener('click', () => {
+    $('centro-error').textContent = '';
+    $('form-centro').reset();
+    $('dialogo-centro').showModal();
+  });
+  $('btn-cancelar-centro').addEventListener('click', () => $('dialogo-centro').close());
+  $('btn-elegir-carpeta').addEventListener('click', async () => {
+    try {
+      const carpeta = await invoke('seleccionar_directorio');
+      if (carpeta) $('centro-ruta').value = carpeta;
+    } catch (err) { $('centro-error').textContent = mensajeError(err); }
+  });
+  $('form-centro').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const centroId = $('centro-id').value.trim();
+    const nombre = $('centro-nombre').value.trim();
+    const ruta = $('centro-ruta').value.trim();
+    try {
+      await invoke('crear_centro', { centroId, ruta, nombre: nombre || null });
+      await invoke('activar_centro', { centroId });
+      $('dialogo-centro').close();
+      registrar(`Centro ${centroId} creado en ${ruta} y activado.`, 'ok');
+      await cargarCentros(centroId);
+    } catch (err) { $('centro-error').textContent = mensajeError(err); }
+  });
+
+  function pintarCentro(centro) {
+    const destino = $('tab-centro');
+    vaciar(destino);
+    if (!centro) { destino.appendChild(el('p', 'vacio', 'Selecciona o crea un centro.')); return; }
+    const tarjeta = el('div', 'tarjeta');
+    const titulo = el('h4', null, centro.nombre);
+    titulo.appendChild(el('span', 'chip chip-info chip-mono', centro.id));
+    titulo.appendChild(el('span', `chip ${centro.activo ? 'chip-ok' : 'chip-aviso'}`, centro.activo ? 'Activo' : 'Inactivo'));
+    tarjeta.appendChild(titulo);
+    tarjeta.appendChild(el('p', 'ruta-centro', centro.rutaDisco));
+    destino.appendChild(tarjeta);
+
+    const integridad = el('div', 'tarjeta');
+    integridad.appendChild(el('h4', null, 'Integridad de las 6 tablas'));
+    const resultado = el('div', 'texto-sutil', 'Comprueba filas huérfanas, ingestas STAGED y versiones vigentes duplicadas.');
+    const boton = el('button', 'btn', 'Verificar integridad');
+    boton.addEventListener('click', async () => {
+      boton.disabled = true;
+      resultado.textContent = 'Verificando…';
+      try {
+        const i = await invoke('integridad_centro', { centroId: centro.id });
+        vaciar(resultado);
+        resultado.appendChild(el('span', `chip ${i.integro ? 'chip-ok' : 'chip-aviso'}`, i.integro ? 'Íntegro' : 'Con incidencias'));
+        resultado.appendChild(ficha([
+          ['Tablas ausentes', String(i.tablasAusentes.length)],
+          ['Ingestas STAGED', String(i.ingestasStaged.length)],
+          ['Filas huérfanas', String(i.huerfanos)],
+          ['Vigentes múltiples', String(i.versionesVigentesMultiples)],
+        ]));
+      } catch (err) {
+        resultado.textContent = `No se pudo verificar: ${mensajeError(err)}`;
+      } finally { boton.disabled = false; }
+    });
+    integridad.appendChild(resultado);
+    integridad.appendChild(boton);
+    destino.appendChild(integridad);
+  }
+
+  // 11. Catálogo real del centro (todas las revisiones)
+  async function refrescarCatalogo() {
+    vaciar(sourcesList);
+    const centro = centroSeleccionado();
+    if (!centro || !centro.activo) {
+      sourcesCount.textContent = '0 documentos';
+      sourcesList.appendChild(el('li', 'vacio', centro ? 'Activa el centro para ver su catálogo.' : 'Sin centro.'));
       return;
     }
     try {
-      const modelos = await tauriInvoke('listar_modelos_claude');
-      renderModelOptions(modelos);
+      const documentos = await invoke('catalogo_centro', { centroId: centro.id });
+      const vigentes = documentos.filter((d) => d.vigente).length;
+      sourcesCount.textContent = plural(vigentes, 'vigente', 'vigentes');
+      sourcesCount.title = `${plural(documentos.length, 'revisión', 'revisiones')} en total`;
+      if (documentos.length === 0) sourcesList.appendChild(el('li', 'vacio', 'Centro vacío: ingiere un documento.'));
+      documentos.forEach((doc) => sourcesList.appendChild(itemCatalogo(doc)));
     } catch (err) {
-      console.error('Error al listar modelos de Claude Code:', err);
-      selectModelo.innerHTML = '<option value="">Claude Code no disponible</option>';
-      selectModelo.disabled = true;
-      appendSystemNotice(`No se pudo obtener el catálogo de modelos de Claude Code: ${err.message || err}`, true);
+      sourcesList.appendChild(el('li', 'vacio', `No se pudo leer el catálogo: ${mensajeError(err)}`));
     }
   }
 
-  function selectedModelLabel() {
-    const option = selectModelo.options[selectModelo.selectedIndex];
-    return option ? (option.dataset.label || option.textContent) : '';
+  function itemCatalogo(doc) {
+    const li = el('li', `source-item${doc.vigente ? '' : ' derogado'}`);
+    const cabecera = el('div', 'source-item-cabecera');
+    cabecera.appendChild(el('span', 'source-name', `${doc.docId} · ${doc.revision}`));
+    cabecera.appendChild(el('span', `chip ${doc.vigente ? 'chip-ok' : 'chip-error'}`, doc.vigente ? 'Vigente' : 'Derogada'));
+    li.appendChild(cabecera);
+    li.appendChild(el('div', 'source-title', doc.titulo));
+    const vigencia = doc.vigente ? `en vigor desde ${doc.fechaVigor || '—'}` : `${doc.fechaVigor || '—'} → ${doc.fechaDerogacion || '—'}`;
+    const prelacion = doc.nivelPrelacion === null || doc.nivelPrelacion === undefined ? '' : ` · prelación ${doc.nivelPrelacion}`;
+    li.appendChild(el('div', 'source-item-meta', `${doc.tipoDocumento.replace(/_/g, ' ').toLowerCase()}${prelacion} · ${vigencia}`));
+    return li;
   }
 
-  // 5. Controles de Ventana Frameless (Tauri IPC con Fallback)
-  function getTauriWindow() {
-    if (!window.__TAURI__) return null;
-    if (window.__TAURI__.webviewWindow && window.__TAURI__.webviewWindow.getCurrentWebviewWindow) {
-      return window.__TAURI__.webviewWindow.getCurrentWebviewWindow();
-    }
-    if (window.__TAURI__.window && window.__TAURI__.window.getCurrentWindow) {
-      return window.__TAURI__.window.getCurrentWindow();
-    }
-    return null;
-  }
+  $('btn-refresh-sources').addEventListener('click', refrescarCatalogo);
 
-  if (btnMinimize) {
-    btnMinimize.addEventListener('click', async () => {
-      const appWin = getTauriWindow();
-      if (appWin) {
-        try {
-          await appWin.minimize();
-        } catch (e) {
-          console.warn('Tauri window minimize:', e);
-        }
-      } else {
-        console.log('[Web Fallback] Minimizar ventana');
-      }
-    });
-  }
-
-  if (btnMaximize) {
-    btnMaximize.addEventListener('click', async () => {
-      const appWin = getTauriWindow();
-      if (appWin) {
-        try {
-          await appWin.toggleMaximize();
-        } catch (e) {
-          console.warn('Tauri window maximize:', e);
-        }
-      } else {
-        console.log('[Web Fallback] Maximizar/Restaurar ventana');
-      }
-    });
-  }
-
-  if (btnClose) {
-    btnClose.addEventListener('click', async () => {
-      const appWin = getTauriWindow();
-      if (appWin) {
-        try {
-          await appWin.close();
-        } catch (e) {
-          console.warn('Tauri window close:', e);
-        }
-      } else {
-        console.log('[Web Fallback] Cerrar aplicación');
-      }
-    });
-  }
-
-  // 6. Navegación de Tabs del Lakehouse Studio
-
-  tabButtons.forEach(btn => {
-    btn.addEventListener('click', () => {
-      const targetId = btn.getAttribute('data-tab');
-      tabButtons.forEach(b => b.classList.remove('active'));
-      tabContents.forEach(c => c.classList.remove('active'));
-
-      btn.classList.add('active');
-      const targetContent = document.getElementById(targetId);
-      if (targetContent) {
-        targetContent.classList.add('active');
-      }
-    });
-  });
-
-  // 7. Renderizado del Catálogo de Fuentes (Arrow 01)
-  function renderSources() {
-    sourcesList.innerHTML = '';
-    sourcesCount.textContent = `${documentsCatalog.length} docs`;
-
-    documentsCatalog.forEach(doc => {
-      const li = document.createElement('li');
-      li.className = 'source-item';
-      const isDerogada = doc.status === 'derogada';
-
-      li.innerHTML = `
-        <div class="source-item-info">
-          <div class="source-item-title-row">
-            <span class="source-name">${escapeHtml(doc.name)}</span>
-            <span class="status-badge ${isDerogada ? 'badge-derogada' : 'badge-vigente'}">
-              ${isDerogada ? 'Derogada' : 'Vigente'}
-            </span>
-          </div>
-          <div class="source-item-meta">
-            <span>ID: ${escapeHtml(doc.id)}</span> • <span>${escapeHtml(doc.size)}</span> • <span>${escapeHtml(doc.date)}</span>
-          </div>
-        </div>
-      `;
-      sourcesList.appendChild(li);
-    });
-  }
-
-  renderSources();
-
-  btnRefreshSources.addEventListener('click', () => {
-    renderSources();
-  });
-
-  // 8. Zona Drag & Drop e Ingesta Atómica
-  dropZone.addEventListener('click', () => fileInput.click());
-
-  dropZone.addEventListener('dragover', (e) => {
-    e.preventDefault();
-    dropZone.classList.add('drag-active');
-  });
-
-  dropZone.addEventListener('dragleave', (e) => {
-    e.preventDefault();
-    dropZone.classList.remove('drag-active');
-  });
-
-  dropZone.addEventListener('drop', (e) => {
-    e.preventDefault();
-    dropZone.classList.remove('drag-active');
-    if (e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files.length > 0) {
-      handleFiles(e.dataTransfer.files);
-    }
-  });
-
-  fileInput.addEventListener('change', (e) => {
-    if (e.target.files && e.target.files.length > 0) {
-      handleFiles(e.target.files);
-    }
-  });
-
-  async function handleFiles(files) {
-    for (let i = 0; i < files.length; i++) {
-      const file = files[i];
-      await ingestFile(file);
+  // 12. Ingesta por ruta (diálogo nativo o drop de la ventana)
+  async function elegirDocumentos() {
+    if (!centroSeleccionado()) { registrar('Crea o selecciona un centro antes de ingerir.', 'error'); return; }
+    try { encolarIngestas(await invoke('seleccionar_documentos')); } catch (err) {
+      registrar(`No se pudo abrir el selector de archivos: ${mensajeError(err)}`, 'error');
     }
   }
+  dropZone.addEventListener('click', elegirDocumentos);
+  dropZone.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); elegirDocumentos(); } });
+  ['dragover', 'drop'].forEach((tipo) => document.addEventListener(tipo, (e) => e.preventDefault()));
 
-  async function ingestFile(file) {
-    dropProgress.style.width = '20%';
-    appendSystemNotice(`Iniciando extracción y hash Arrow de ${file.name}...`);
+  function encolarIngestas(rutas) {
+    const centro = centroSeleccionado();
+    if (!centro) { registrar('Crea o selecciona un centro antes de ingerir.', 'error'); return; }
+    (rutas || []).forEach((ruta) => { colaIngesta = colaIngesta.then(() => ingerir(ruta, centro.id)); });
+  }
 
+  async function ingerir(ruta, centroId) {
+    ingestasEnCurso += 1;
+    dropZone.classList.add('ingestando');
+    const nombre = ruta.split(/[\\/]/).pop();
+    mostrarProgreso(3, `${nombre}: en cola…`);
     try {
-      if (tauriInvoke) {
-        // En Tauri se envía el path o el contenido al backend
-        await tauriInvoke('ingestar_documento', { 
-          nombre: file.name, 
-          centroId: selectCentro.value 
-        });
-      } else {
-        // Fallback simulado
-        await simulateProgress();
-      }
-
-      dropProgress.style.width = '100%';
-      setTimeout(() => { dropProgress.style.width = '0%'; }, 500);
-
-      const newDoc = {
-        id: `DOC-INGEST-${Math.floor(1000 + Math.random() * 9000)}`,
-        name: file.name,
-        type: file.name.endsWith('.pdf') ? 'PDF' : 'Markdown',
-        size: `${(file.size / 1024).toFixed(1)} KB`,
-        status: 'vigente',
-        hash: `sha256:${Math.random().toString(16).substring(2, 10)}...`,
-        date: new Date().toLocaleDateString('es-ES')
-      };
-
-      documentsCatalog.unshift(newDoc);
-      renderSources();
-      appendSystemNotice(`Documento ${file.name} ingestado con éxito en los 6 esquemas Arrow.`);
+      const r = await invoke('ingestar_documento', { ruta, centroId });
+      mostrarProgreso(100, `${r.archivo}: ${r.yaIngerido ? 'ya estaba ingerido' : 'ingerido'}`);
+      registrar(r.yaIngerido
+        ? `${r.archivo}: ya estaba ingerido (${r.docId} v${r.version}); no se ha vuelto a destilar.`
+        : `${r.archivo} → ${r.docId} v${r.version}: ${plural(r.totalChunks, 'chunk', 'chunks')}, ${plural(r.totalHitos, 'hito', 'hitos')}, ${plural(r.totalTablas, 'tabla', 'tablas')}, ${plural(r.totalCeldas, 'celda', 'celdas')}, ${plural(r.totalAristas, 'arista', 'aristas')}${r.versionesDerogadas.length ? `; deroga v${r.versionesDerogadas.join(', v')}` : ''}.`, 'ok');
+      if (r.aviso) registrar(r.aviso, 'error');
+      if (centroId === selectCentro.value) await refrescarCatalogo();
     } catch (err) {
-      console.error('Error al ingestar:', err);
-      dropProgress.style.width = '0%';
-      appendSystemNotice(`Error al procesar ${file.name}: ${err.message || err}`, true);
+      mostrarProgreso(0, `${nombre}: error`);
+      registrar(`No se pudo ingerir ${nombre}: ${mensajeError(err)}`, 'error');
+    } finally {
+      ingestasEnCurso -= 1;
+      if (ingestasEnCurso === 0) {
+        dropZone.classList.remove('ingestando');
+        setTimeout(() => { if (ingestasEnCurso === 0) ingestaProgreso.hidden = true; }, 4000);
+      }
     }
   }
 
-  function simulateProgress() {
-    return new Promise((resolve) => {
-      let p = 20;
-      const interval = setInterval(() => {
-        p += 25;
-        dropProgress.style.width = `${p}%`;
-        if (p >= 100) {
-          clearInterval(interval);
-          resolve();
-        }
-      }, 150);
-    });
+  function mostrarProgreso(porcentaje, texto) {
+    ingestaProgreso.hidden = false;
+    dropProgress.style.width = `${Math.max(0, Math.min(100, porcentaje))}%`;
+    ingestaEstado.textContent = texto;
   }
 
-  // 9. Lógica de Chat, Observabilidad de Tools y Grounding
+  function alProgresoIngesta(evento) {
+    const p = evento.payload || {};
+    mostrarProgreso(p.porcentaje, `${p.archivo}: ${p.descripcion}…${p.etapa === 'destilacion' ? ' (30–60 s)' : ''}`);
+    if (p.etapa === 'embeddings' && !avisoEmbeddingsMostrado) {
+      avisoEmbeddingsMostrado = true;
+      registrar(AVISO_MODELO_EMBEDDINGS, 'info');
+    }
+  }
+
+  // 13. Chat
+  function ajustarAlturaEntrada() {
+    chatInput.style.height = 'auto';
+    chatInput.style.height = `${Math.min(chatInput.scrollHeight, 160)}px`;
+  }
+  chatInput.addEventListener('input', ajustarAlturaEntrada);
+  chatInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); chatForm.requestSubmit(); }
+  });
+  document.querySelectorAll('.ejemplo').forEach((b) => b.addEventListener('click', () => {
+    chatInput.value = b.textContent; ajustarAlturaEntrada(); chatInput.focus();
+  }));
+
+  function cercaDelFinal() { return chatMessages.scrollHeight - chatMessages.scrollTop - chatMessages.clientHeight < 80; }
+  function irAlFinal() { chatMessages.scrollTop = chatMessages.scrollHeight; }
+  function irA(nodo) { chatMessages.scrollTop = Math.max(0, nodo.offsetTop - chatColumna.offsetTop - 8); }
+  chatMessages.addEventListener('scroll', () => { btnIrFinal.hidden = cercaDelFinal(); });
+  btnIrFinal.addEventListener('click', irAlFinal);
+
   chatForm.addEventListener('submit', async (e) => {
     e.preventDefault();
-    const query = chatInput.value.trim();
-    if (!query) return;
-
+    const consulta = chatInput.value.trim();
+    if (!consulta || consultaEnCurso) return;
+    const centro = centroSeleccionado();
+    if (!centro || !centro.activo) { registrar('Activa un centro antes de preguntar.', 'error'); return; }
+    if (!selectModelo.value) { registrar('Selecciona un modelo disponible antes de preguntar.', 'error'); return; }
     chatInput.value = '';
-    appendUserMessage(query);
-
-    // Scroll inmediato hacia abajo
-    chatMessages.scrollTop = chatMessages.scrollHeight;
-
-    // Procesar respuesta
-    await processAgentQuery(query);
+    ajustarAlturaEntrada();
+    chatVacio.hidden = true;
+    chatColumna.appendChild(el('div', 'mensaje-usuario', consulta));
+    await consultarAgente(consulta, centro.id, selectModelo.value, etiquetaModelo());
   });
 
-  function appendUserMessage(text) {
-    const msgDiv = document.createElement('div');
-    msgDiv.className = 'message message-user';
-    msgDiv.innerHTML = `
-      <div class="message-bubble">
-        <div class="message-meta">
-          <span class="sender-name">Operador</span>
-          <span class="timestamp">${formatTime()}</span>
-        </div>
-        <div class="message-text">${escapeHtml(text)}</div>
-      </div>
-    `;
-    chatMessages.appendChild(msgDiv);
-    chatMessages.scrollTop = chatMessages.scrollHeight;
+  function cabecera(modelo) {
+    const meta = el('div', 'mensaje-meta');
+    meta.appendChild(el('span', 'remitente', 'Asistente'));
+    meta.appendChild(el('span', 'chip', modelo));
+    meta.appendChild(el('span', 'espaciador'));
+    meta.appendChild(el('time', null, hora()));
+    return meta;
   }
 
-  function appendSystemNotice(text, isError = false) {
-    const notice = document.createElement('div');
-    notice.className = `system-notice ${isError ? 'notice-error' : 'notice-info'}`;
-    notice.textContent = text;
-    chatMessages.appendChild(notice);
-    chatMessages.scrollTop = chatMessages.scrollHeight;
+  async function consultarAgente(consulta, centroId, modelo, etiqueta) {
+    consultaEnCurso = true;
+    btnSend.disabled = true;
+    pestanaElegidaPorUsuario = false;
+    const mensaje = el('div', 'mensaje-asistente');
+    mensaje.appendChild(cabecera(etiqueta));
+    const cargando = el('div', 'cargando');
+    cargando.appendChild(el('span', 'pulso'));
+    const texto = el('span', null, `Consultando el Lakehouse con ${etiqueta}…`);
+    cargando.appendChild(texto);
+    mensaje.appendChild(cargando);
+    chatColumna.appendChild(mensaje);
+    irAlFinal();
+    const inicio = Date.now();
+    const cronometro = setInterval(() => {
+      texto.textContent = `Consultando el Lakehouse con ${etiqueta}… ${Math.round((Date.now() - inicio) / 1000)} s`;
+    }, 1000);
+    try {
+      const respuesta = await invoke('enviar_mensaje_chat', { mensaje: consulta, centroId, modelo });
+      cargando.remove();
+      pintarRespuesta(mensaje, respuesta, Math.round((Date.now() - inicio) / 1000));
+      irA(mensaje);
+    } catch (err) {
+      cargando.remove();
+      mensaje.appendChild(el('div', 'error-consulta', `No se pudo responder: ${mensajeError(err)}`));
+      irAlFinal();
+    } finally {
+      clearInterval(cronometro);
+      consultaEnCurso = false;
+      btnSend.disabled = false;
+      btnIrFinal.hidden = cercaDelFinal();
+    }
   }
 
-  async function processAgentQuery(query) {
-    const centroId = selectCentro.value;
-    const modelo = selectModelo.value;
-    if (!modelo) {
-      appendSystemNotice('Selecciona un modelo disponible antes de enviar la consulta.', true);
+  function pintarRespuesta(mensaje, data, segundos) {
+    const tools = data.toolsUsed || [];
+    if (tools.length) {
+      const bloque = el('div', 'tools-usadas');
+      tools.forEach((tool) => bloque.appendChild(lineaTool(tool)));
+      mensaje.appendChild(bloque);
+    }
+
+    const respuesta = el('div', 'respuesta');
+    respuesta.innerHTML = data.replyHtml; // saneado en Rust (markdown_seguro.rs)
+    mensaje.appendChild(respuesta);
+
+    const notas = notasYCondiciones(data.citations || []);
+    if (notas.length) {
+      const bloque = el('div', 'notas');
+      bloque.appendChild(el('h4', null, 'Notas al pie y condiciones'));
+      const lista = el('ul');
+      notas.forEach(([fuente, textoNota]) => {
+        const li = el('li');
+        li.appendChild(el('span', 'chip chip-mono', fuente));
+        li.appendChild(document.createTextNode(textoNota));
+        lista.appendChild(li);
+      });
+      bloque.appendChild(lista);
+      mensaje.appendChild(bloque);
+    }
+
+    const fuentes = data.fuentes || [];
+    if (fuentes.length) {
+      const fila = el('div', 'fuentes-respuesta');
+      fila.appendChild(el('span', 'etiqueta', 'Fuentes'));
+      fuentes.forEach((fuente, indice) => fila.appendChild(chipFuente(fuente, indice, fuentes)));
+      mensaje.appendChild(fila);
+    }
+
+    const acciones = el('div', 'acciones-respuesta');
+    const copiar = el('button', 'btn btn-icono', 'Copiar');
+    copiar.addEventListener('click', async () => {
+      try { await navigator.clipboard.writeText(respuesta.innerText); copiar.textContent = 'Copiado'; } catch (_) { copiar.textContent = 'No se pudo copiar'; }
+      setTimeout(() => { copiar.textContent = 'Copiar'; }, 1500);
+    });
+    acciones.appendChild(copiar);
+    acciones.appendChild(el('span', 'texto-sutil', `${segundos} s`));
+    mensaje.appendChild(acciones);
+
+    actualizarStudio(data);
+  }
+
+  function lineaTool(tool) {
+    const ok = tool.status === 'ok';
+    const boton = el('button', `tool-linea${ok ? '' : ' fallo'}`);
+    boton.type = 'button';
+    boton.title = 'Ver parámetros y resultado en el Studio';
+    boton.appendChild(el('span', 'estado', ok ? '✓' : '⚠'));
+    boton.appendChild(el('span', 'nombre', tool.name));
+    boton.appendChild(el('span', 'resumen', tool.resumen || ''));
+    boton.appendChild(el('span', 'duracion', tool.duration));
+    boton.addEventListener('click', () => { pintarDetalleTool(tool); pestanaElegidaPorUsuario = true; activarPestana('tab-tools'); });
+    return boton;
+  }
+
+  function notasYCondiciones(citas) {
+    const vistas = new Map();
+    citas.forEach((c) => {
+      const fuente = `${c.docId}${c.revision ? ` ${c.revision}` : ''}`;
+      if (c.notaPie) vistas.set(`n|${fuente}|${c.notaPie}`, [fuente, `Nota: ${c.notaPie}`]);
+      if (c.condicionAplicacion) vistas.set(`c|${fuente}|${c.condicionAplicacion}`, [fuente, `Condición: ${c.condicionAplicacion}`]);
+    });
+    return Array.from(vistas.values());
+  }
+
+  function chipFuente(fuente, indice, todas) {
+    const chip = el('button', 'chip-fuente');
+    chip.type = 'button';
+    chip.appendChild(el('span', 'doc', fuente.docId));
+    if (fuente.revision) chip.appendChild(el('span', null, fuente.revision));
+    const n = Math.max(fuente.apartados.length, 1);
+    chip.appendChild(el('span', 'contador', String(n)));
+    chip.title = fuente.apartados.length ? fuente.apartados.join('\n') : `${plural(fuente.citas.length, 'cita', 'citas')}`;
+    chip.addEventListener('click', () => {
+      pintarFuentes(todas, indice);
+      pestanaElegidaPorUsuario = true;
+      activarPestana('tab-fuentes');
+    });
+    return chip;
+  }
+
+  // 14. Studio
+  function actualizarStudio(data) {
+    fuentesUltimaRespuesta = data.fuentes || [];
+    pintarFuentes(fuentesUltimaRespuesta, -1);
+    const novedades = [];
+    if (fuentesUltimaRespuesta.length) novedades.push('tab-fuentes');
+    if (data.graphResult) { pintarGrafo(data.graphResult); novedades.unshift('tab-grafo'); }
+    if (data.matrixResult) { pintarTabla(data.matrixResult); novedades.unshift('tab-tabla'); }
+    const tools = data.toolsUsed || [];
+    if (tools.length) pintarDetalleTool(tools[tools.length - 1]);
+    if (!novedades.length) return;
+    if (!pestanaElegidaPorUsuario) activarPestana(novedades[0]);
+    novedades.forEach(marcarNovedad);
+  }
+
+  function pintarFuentes(fuentes, seleccionada) {
+    const destino = $('tab-fuentes');
+    vaciar(destino);
+    if (!fuentes.length) { destino.appendChild(el('p', 'vacio', 'La última respuesta no trae fuentes citadas.')); return; }
+    fuentes.forEach((fuente, indice) => {
+      const tarjeta = el('div', `tarjeta${indice === seleccionada ? ' destacada' : ''}`);
+      const titulo = el('h4');
+      titulo.appendChild(el('span', 'chip chip-info chip-mono', fuente.docId));
+      if (fuente.revision) titulo.appendChild(el('span', 'chip', fuente.revision));
+      titulo.appendChild(el('span', 'texto-sutil', plural(fuente.citas.length, 'cita', 'citas')));
+      tarjeta.appendChild(titulo);
+      const lista = el('ul', 'lista-apartados');
+      agruparPorApartado(fuente.citas).forEach((a) => {
+        const li = el('li');
+        li.appendChild(a.breadcrumb ? miga(a.breadcrumb, fuente.docId) : el('span', 'texto-sutil', 'Sin apartado (tabla o arista)'));
+        li.appendChild(ficha([
+          ['Tools', a.tools.join(', ')],
+          ['Condición', a.condiciones.join(' · ')],
+          ['Nota al pie', a.notas.join(' · ')],
+          ['Fragmentos', a.fragmentos.length > 3 ? `${a.fragmentos.slice(0, 3).join(', ')} y ${a.fragmentos.length - 3} más` : a.fragmentos.join(', ')],
+        ]));
+        lista.appendChild(li);
+      });
+      tarjeta.appendChild(lista);
+      destino.appendChild(tarjeta);
+      if (indice === seleccionada) setTimeout(() => tarjeta.scrollIntoView({ block: 'nearest' }), 0);
+    });
+  }
+
+  /** Un apartado por breadcrumb con sus tools, condiciones, notas y fragmentos sin repetir */
+  function agruparPorApartado(citas) {
+    const apartados = new Map();
+    const anadir = (lista, valor) => { if (valor && !lista.includes(valor)) lista.push(valor); };
+    citas.forEach((c) => {
+      const clave = c.breadcrumb || '';
+      if (!apartados.has(clave)) apartados.set(clave, { breadcrumb: c.breadcrumb, tools: [], condiciones: [], notas: [], fragmentos: [] });
+      const a = apartados.get(clave);
+      anadir(a.tools, c.herramienta);
+      anadir(a.condiciones, c.condicionAplicacion);
+      anadir(a.notas, c.notaPie);
+      anadir(a.fragmentos, c.fragmentoId);
+    });
+    return Array.from(apartados.values());
+  }
+
+  function textoCita(cita) { return cita ? `${cita.doc_id || ''} ${cita.revision || ''}`.trim() : ''; }
+
+  function pintarTabla(r) {
+    const destino = $('tab-tabla');
+    vaciar(destino);
+    if (r.tipo === 'matriz') {
+      const cabeceraMatriz = el('div', 'fila-chips');
+      cabeceraMatriz.appendChild(el('span', 'chip chip-info chip-mono', '03_matriz_operativa'));
+      cabeceraMatriz.appendChild(el('span', 'chip chip-lila', plural(r.total ?? (r.filas || []).length, 'fila', 'filas')));
+      if (r.fechaReferencia) cabeceraMatriz.appendChild(el('span', 'chip chip-aviso', `a ${r.fechaReferencia}`));
+      destino.appendChild(cabeceraMatriz);
+      const rejilla = el('div', 'rejilla-fichas');
+      (r.filas || []).forEach((f) => {
+        const tarjeta = el('div', 'tarjeta');
+        const titulo = el('h4', null, f.fase_operativa);
+        if (f.registro_codigo) titulo.appendChild(el('span', 'chip chip-mono', f.registro_codigo));
+        tarjeta.appendChild(titulo);
+        tarjeta.appendChild(ficha([
+          ['Responsable', f.rol_responsable],
+          ['Ejecutor', f.rol_ejecutor],
+          ['Registro', [f.registro_codigo, f.registro_nombre].filter(Boolean).join(' · ')],
+          ['Objeto', f.objeto_alcance],
+          ['Criterio', f.criterio_aceptacion],
+          ['Condición', f.condicion_aplicacion],
+          ['Cita', textoCita(f.cita)],
+        ]));
+        if (f.cita && f.cita.breadcrumb) tarjeta.appendChild(miga(f.cita.breadcrumb, f.cita.doc_id));
+        rejilla.appendChild(tarjeta);
+      });
+      destino.appendChild(rejilla);
       return;
     }
-
-    // Mostrar loader del asistente
-    const assistantMsg = document.createElement('div');
-    assistantMsg.className = 'message message-assistant';
-    const bubble = document.createElement('div');
-    bubble.className = 'message-bubble';
-    bubble.innerHTML = `
-      <div class="message-meta">
-        <span class="sender-name">Asistente Lakehouse</span>
-        <span class="timestamp">${formatTime()}</span>
-      </div>
-      <div class="message-text message-loading">
-        <span class="pulse-dot"></span> Evaluando consultas deterministas y semánticas...
-      </div>
-    `;
-    assistantMsg.appendChild(bubble);
-    chatMessages.appendChild(assistantMsg);
-    chatMessages.scrollTop = chatMessages.scrollHeight;
-
-    try {
-      let responseData;
-      if (tauriInvoke) {
-        responseData = await tauriInvoke('enviar_mensaje_chat', {
-          mensaje: query,
-          centroId: centroId,
-          modelo: modelo
-        });
-      } else {
-        // Fallback realista que emula el servicio de tools
-        responseData = await simulateToolUsePipeline(query, centroId);
-      }
-
-      // Reemplazar loader con contenido enriquecido
-      renderAssistantResponse(bubble, responseData);
-    } catch (err) {
-      console.error('Error en consulta de chat:', err);
-      bubble.querySelector('.message-text').innerHTML = `
-        <span style="color: var(--color-error);">Error al procesar la consulta: ${escapeHtml(err.message || String(err))}</span>
-      `;
-    } finally {
-      chatMessages.scrollTop = chatMessages.scrollHeight;
+    const cabeceraLookup = el('div', 'fila-chips');
+    cabeceraLookup.appendChild(el('span', `chip ${r.estado === 'resuelto' ? 'chip-ok' : 'chip-aviso'}`, String(r.estado || '').replace(/_/g, ' ')));
+    if (r.fecha_referencia) cabeceraLookup.appendChild(el('span', 'chip chip-aviso', `a ${r.fecha_referencia}`));
+    destino.appendChild(cabeceraLookup);
+    const tarjeta = el('div', 'tarjeta');
+    if (r.tabla) tarjeta.appendChild(el('h4', null, r.tabla.titulo_tabla || r.tabla.tabla_id));
+    const ejes = r.tabla ? [r.tabla.eje_x && r.tabla.eje_x.nombre, r.tabla.eje_y && r.tabla.eje_y.nombre] : [];
+    if (r.entrada) {
+      tarjeta.appendChild(ficha([
+        [ejes[0] || 'Eje x', String(r.entrada.valor_x)],
+        [ejes[1] || 'Eje y', String(r.entrada.valor_y)],
+        ['Eje z', r.entrada.eje_z],
+      ]));
     }
-  }
-
-  function renderAssistantResponse(bubble, data) {
-    let html = `
-      <div class="message-meta">
-        <span class="sender-name">Asistente Lakehouse</span>
-        <span class="model-tag">${escapeHtml(selectedModelLabel())}</span>
-        <span class="timestamp">${formatTime()}</span>
-      </div>
-    `;
-
-    // 1. Tarjetas colapsables de Tool Use (Observabilidad en tiempo real)
-    if (data.toolsUsed && data.toolsUsed.length > 0) {
-      data.toolsUsed.forEach((tool, idx) => {
-        html += `
-          <div class="tool-card ${tool.status === 'ok' ? 'success' : 'failed'}">
-            <div class="tool-card-header" onclick="this.parentElement.classList.toggle('collapsed')">
-              <div class="tool-badge">
-                <span class="tool-icon">⚡</span>
-                <span class="tool-name">${escapeHtml(tool.name)}</span>
-              </div>
-              <span class="tool-execution-time">${escapeHtml(tool.duration || '12ms')}</span>
-            </div>
-            <div class="tool-card-body">
-              <div class="tool-args-label">Parámetros:</div>
-              <pre class="tool-args-json">${escapeHtml(JSON.stringify(tool.args, null, 2))}</pre>
-              <div class="tool-args-label">Resultado LanceDB/Arrow:</div>
-              <pre class="tool-args-json">${escapeHtml(JSON.stringify(tool.result, null, 2))}</pre>
-            </div>
-          </div>
-        `;
+    if (r.estado === 'resuelto') {
+      tarjeta.appendChild(el('div', 'valor-resuelto', `${r.valor_resultado_texto}${r.unidad_medida ? ` ${r.unidad_medida}` : ''}`));
+      tarjeta.appendChild(ficha([['Rango x', r.rango_x], ['Rango y', r.rango_y], ['Cita', textoCita(r.cita)], ['Celda', r.cita && r.cita.celda_id]]));
+      if (r.nota_pie_condicion) {
+        const nota = el('div', 'nota-obligatoria');
+        nota.appendChild(el('strong', null, 'Nota al pie obligatoria: '));
+        nota.appendChild(document.createTextNode(r.nota_pie_condicion));
+        tarjeta.appendChild(nota);
+      }
+    } else if (Array.isArray(r.candidatas)) {
+      tarjeta.appendChild(el('p', 'texto-sutil', r.mensaje));
+      r.candidatas.forEach((c) => {
+        const sub = el('div', `tarjeta${c.prevalece ? ' destacada' : ''}`);
+        sub.appendChild(ficha([['Valor', c.valor_resultado_texto], ['Nota', c.nota_pie_condicion], ['Eje z', c.eje_z], ['Prevalece', c.prevalece ? 'sí' : ''], ['Cita', textoCita(c.cita)]]));
+        tarjeta.appendChild(sub);
       });
-    }
-
-    // 2. Texto con citas interactivas
-    html += `<div class="message-text">${data.replyHtml}</div>`;
-
-    // 3. Badges de fuentes citadas
-    if (data.citations && data.citations.length > 0) {
-      html += `<div class="citations-container"><span class="citations-label">Fuentes verificadas:</span>`;
-      data.citations.forEach(c => {
-        html += `
-          <span class="citation-badge" title="${escapeHtml(c.title)} (Hash: ${escapeHtml(c.hash)})" onclick="window.highlightCitation('${escapeHtml(c.docId)}')">
-            <span class="citation-badge-id">${escapeHtml(c.docId)}</span>
-            <span class="citation-badge-page">pág. ${escapeHtml(c.page)}</span>
-          </span>
-        `;
-      });
-      html += `</div>`;
-    }
-
-    bubble.innerHTML = html;
-
-    // Actualizar inspectores en Lakehouse Studio si corresponde
-    if (data.matrixResult) {
-      updateMatrixInspector(data.matrixResult);
-    }
-    if (data.graphResult) {
-      updateGraphInspector(data.graphResult);
-    }
-  }
-
-  function updateMatrixInspector(matrix) {
-    matrixInspector.innerHTML = `
-      <div class="inspector-badge-row">
-        <span class="chip-badge purple">${escapeHtml(matrix.tableId)}</span>
-        <span class="chip-badge cyan">Fila: ${escapeHtml(matrix.rowKey)} | Col: ${escapeHtml(matrix.colKey)}</span>
-      </div>
-      <table class="inspector-table">
-        <thead>
-          <tr>
-            <th>Espesor (mm)</th>
-            <th>Acero Carbono</th>
-            <th>Acero Inox</th>
-            <th>Aleación Ni</th>
-          </tr>
-        </thead>
-        <tbody>
-          <tr class="${matrix.colKey === '15' ? 'highlight-row' : ''}">
-            <td>10.0 - 20.0</td>
-            <td>E-7018</td>
-            <td class="resolved-cell">E-316L-16 ★</td>
-            <td>Inconel 625</td>
-          </tr>
-        </tbody>
-      </table>
-      <div class="inspector-note">
-        <strong>Nota al pie resuelta:</strong> ${escapeHtml(matrix.footnote || 'Precalentamiento obligatorio a 150°C según código ASME Sección IX.')}
-      </div>
-    `;
-
-    // Auto-activar tab de matrices
-    activateTab('tab-matrices');
-  }
-
-  function updateGraphInspector(graph) {
-    graphInspector.innerHTML = `
-      <div class="graph-node-chain">
-        <div class="graph-node deprecated">${escapeHtml(graph.deprecatedId)} <span class="node-tag">Derogada</span></div>
-        <div class="graph-arrow">↓ ${escapeHtml(graph.relation)}</div>
-        <div class="graph-node active">${escapeHtml(graph.activeId)} <span class="node-tag">PREVALENTE</span></div>
-      </div>
-      <p class="inspector-note" style="margin-top: 12px;">
-        <strong>Dictamen de Precedencia:</strong> La norma <code>${escapeHtml(graph.activeId)}</code> deroga expresamente las tolerancias de la norma <code>${escapeHtml(graph.deprecatedId)}</code>.
-      </p>
-    `;
-    activateTab('tab-graph');
-  }
-
-  function activateTab(tabId) {
-    tabButtons.forEach(b => {
-      if (b.getAttribute('data-tab') === tabId) {
-        b.classList.add('active');
-      } else {
-        b.classList.remove('active');
-      }
-    });
-    tabContents.forEach(c => {
-      if (c.id === tabId) {
-        c.classList.add('active');
-      } else {
-        c.classList.remove('active');
-      }
-    });
-  }
-
-  window.highlightCitation = function (docId) {
-    console.log('Inspeccionando cita:', docId);
-    activateTab('tab-schemas');
-  };
-
-  // Simulación determinista de pipeline de herramientas para el entorno web / preview
-  async function simulateToolUsePipeline(query, centroId) {
-    await new Promise(r => setTimeout(r, 600));
-
-    const qLower = query.toLowerCase();
-
-    if (qLower.includes('temperatura') || qLower.includes('recepción') || qLower.includes('presión')) {
-      return {
-        replyHtml: `Según la <strong>Matriz Operativa de Planta Alfa</strong> (Fase de Recepción), la temperatura máxima permitida es de <strong>85.0 °C</strong> con una tolerancia estricta de ±2.5 °C. Cualquier valor por encima de 87.5 °C activa automáticamente el protocolo de alivio térmico.`,
-        toolsUsed: [
-          {
-            name: 'consultar_matriz_operativa',
-            args: { centro_id: centroId, fase_id: 'RECEPCION' },
-            result: { registros: [{ parametro: 'TEMPERATURA', min: 20.0, max: 85.0, unidad: 'C', tolerancia: 2.5 }] },
-            status: 'ok',
-            duration: '9ms'
-          }
-        ],
-        citations: [
-          { docId: 'DOC-ESPEC-042', title: 'Matriz Operativa de Presión y Temperatura Alfa', page: 4, hash: 'sha256:c912e58a' }
-        ]
-      };
-    } else if (qLower.includes('electrodo') || qLower.includes('soldar') || qLower.includes('espesor')) {
-      return {
-        replyHtml: `Para una pieza de <strong>15 mm de espesor</strong> en <strong>acero inoxidable</strong>, la resolución determinista de la tabla de doble entrada especifica el electrodo <strong>E-316L-16</strong>.<br><br>Adicionalmente, se aplica la nota técnica que exige precalentamiento a 150 °C previo al cordón de raíz.`,
-        toolsUsed: [
-          {
-            name: 'evaluar_rango_tabla_doble_entrada',
-            args: { tabla_id: 'TABLA-SOLDADURA-01', valor_x: 'acero_inoxidable', valor_y: 15.0 },
-            result: { celda_resuelta: 'E-316L-16', rango_y: [10.0, 20.0], nota_pie: 'Precalentamiento obligatorio a 150°C según ASME IX.' },
-            status: 'ok',
-            duration: '14ms'
-          }
-        ],
-        citations: [
-          { docId: 'DOC-NORM-2026', title: 'Norma Técnica de Soldadura 2026', page: 12, hash: 'sha256:7f83b165' }
-        ],
-        matrixResult: {
-          tableId: 'TABLA-SOLDADURA-01',
-          rowKey: 'acero_inoxidable',
-          colKey: '15',
-          footnote: 'Precalentamiento obligatorio a 150°C según código ASME Sección IX.'
-        }
-      };
-    } else if (qLower.includes('vigente') || qLower.includes('derogada') || qLower.includes('norm-001') || qLower.includes('grafo') || qLower.includes('norma')) {
-      return {
-        replyHtml: `La norma <strong>DOC-NORM-2020</strong> fue expresamente <strong>derogada</strong> por la norma prevalente <strong>DOC-NORM-2026</strong>. Toda la operación en Planta Alfa debe regirse exclusivamente por los criterios de la revisión 2026.`,
-        toolsUsed: [
-          {
-            name: 'consultar_grafo_referencias',
-            args: { doc_id: 'DOC-NORM-2020' },
-            result: { prevalente: 'DOC-NORM-2026', estado: 'DEROGADA', ciclo_detectado: false },
-            status: 'ok',
-            duration: '11ms'
-          }
-        ],
-        citations: [
-          { docId: 'DOC-NORM-2026', title: 'Norma Técnica de Soldadura 2026', page: 1, hash: 'sha256:7f83b165' }
-        ],
-        graphResult: {
-          deprecatedId: 'DOC-NORM-2020',
-          activeId: 'DOC-NORM-2026',
-          relation: 'deroga'
-        }
-      };
     } else {
-      return {
-        replyHtml: `He consultado el índice vectorial y los esquemas Arrow de <strong>${escapeHtml(centroId)}</strong>. Para tu consulta: <em>"${escapeHtml(query)}"</em>, no se registran infracciones normativas ni desviaciones en las matrices operativas activas.`,
-        toolsUsed: [
-          {
-            name: 'buscar_chunks_similares',
-            args: { centro_id: centroId, query: query, limit: 3 },
-            result: { chunks: 3, top_score: 0.89 },
-            status: 'ok',
-            duration: '18ms'
-          }
-        ],
-        citations: [
-          { docId: 'DOC-NORM-2026', title: 'Norma Técnica de Soldadura 2026', page: 3, hash: 'sha256:7f83b165' }
-        ]
-      };
+      tarjeta.appendChild(el('p', 'texto-sutil', r.mensaje || 'Sin resultado.'));
+      (r.tablas || []).forEach((t) => tarjeta.appendChild(ficha([['Tabla', t.titulo_tabla || t.tabla_id], ['Id', t.tabla_id], ['Documento', t.doc_id]])));
     }
+    destino.appendChild(tarjeta);
   }
 
-  function escapeHtml(text) {
-    if (!text) return '';
-    return String(text)
-      .replace(/&/g, '&amp;')
-      .replace(/</g, '&lt;')
-      .replace(/>/g, '&gt;')
-      .replace(/"/g, '&quot;')
-      .replace(/'/g, '&#039;');
+  function pintarGrafo(g) {
+    const destino = $('tab-grafo');
+    vaciar(destino);
+    const cabeceraGrafo = el('div', 'fila-chips');
+    cabeceraGrafo.appendChild(el('span', 'chip chip-info chip-mono', g.nodoOrigen));
+    cabeceraGrafo.appendChild(el('span', 'chip chip-lila', `${plural((g.nodos || []).length, 'nodo', 'nodos')} · ${plural((g.aristas || []).length, 'arista', 'aristas')}`));
+    if (g.truncado) cabeceraGrafo.appendChild(el('span', 'chip chip-aviso', 'truncado'));
+    destino.appendChild(cabeceraGrafo);
+
+    const porRelacion = new Map();
+    (g.aristas || []).forEach((a) => {
+      if (!porRelacion.has(a.tipo_relacion)) porRelacion.set(a.tipo_relacion, []);
+      porRelacion.get(a.tipo_relacion).push(a);
+    });
+    porRelacion.forEach((aristas, relacion) => {
+      const grupo = el('div', 'tarjeta grupo-relacion');
+      grupo.appendChild(el('h5', null, `${relacion.replace(/_/g, ' ').toLowerCase()} (${aristas.length})`));
+      const lista = el('ul', 'lista-apartados');
+      aristas.forEach((a) => {
+        const li = el('li');
+        const linea = el('div', 'fila-chips');
+        linea.appendChild(el('span', 'chip chip-mono', a.origen));
+        linea.appendChild(el('span', 'texto-sutil', '→'));
+        linea.appendChild(el('span', 'chip chip-info chip-mono', a.destino));
+        li.appendChild(linea);
+        if (a.contexto) li.appendChild(el('p', 'texto-sutil', a.contexto));
+        lista.appendChild(li);
+      });
+      grupo.appendChild(lista);
+      destino.appendChild(grupo);
+    });
+
+    const hubs = (g.nodos || []).filter((n) => n.hub_resumido);
+    hubs.forEach((n) => {
+      const tarjeta = el('div', 'tarjeta nodo-hub');
+      tarjeta.appendChild(el('h4', null, `${n.id} · hub resumido`));
+      const top = n.resumen_hub && n.resumen_hub.top_relaciones ? n.resumen_hub.top_relaciones.map((t) => `${t.tipo_relacion} ×${t.aristas}`).join(', ') : '';
+      tarjeta.appendChild(ficha([['Grado', String(n.grado)], ['Relaciones', top]]));
+      destino.appendChild(tarjeta);
+    });
   }
 
-  loadModelCatalog();
-
-  function formatTime() {
-    const d = new Date();
-    return d.toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit' });
+  function pintarDetalleTool(tool) {
+    const destino = $('tab-tools');
+    vaciar(destino);
+    const tarjeta = el('div', 'tarjeta');
+    const titulo = el('h4');
+    titulo.appendChild(el('span', 'chip chip-info chip-mono', tool.name));
+    titulo.appendChild(el('span', `chip ${tool.status === 'ok' ? 'chip-ok' : 'chip-error'}`, tool.status));
+    titulo.appendChild(el('span', 'texto-sutil', tool.duration));
+    tarjeta.appendChild(titulo);
+    if (tool.resumen) tarjeta.appendChild(el('p', 'texto-sutil', tool.resumen));
+    tarjeta.appendChild(el('h5', 'texto-sutil', 'Parámetros'));
+    tarjeta.appendChild(el('pre', 'json', JSON.stringify(tool.args, null, 2)));
+    tarjeta.appendChild(el('h5', 'texto-sutil', 'Resultado'));
+    tarjeta.appendChild(el('pre', 'json', JSON.stringify(tool.result, null, 2)));
+    destino.appendChild(tarjeta);
   }
 
+  // 15. Arranque
+  async function iniciar() {
+    if (!invoke || !listen) {
+      registrar('Esta interfaz necesita la aplicación de escritorio (Tauri): no hay datos simulados.', 'error');
+      return;
+    }
+    await listen('ingesta-progreso', alProgresoIngesta);
+    await listen('documentos-soltados', (evento) => { dropZone.classList.remove('drag-active'); encolarIngestas(evento.payload); });
+    await listen('documentos-arrastre', (evento) => dropZone.classList.toggle('drag-active', evento.payload === 'entrar'));
+    await Promise.all([cargarCentros(), cargarModelos()]);
+  }
+
+  iniciar();
 })();

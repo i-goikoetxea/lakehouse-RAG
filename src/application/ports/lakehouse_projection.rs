@@ -1,5 +1,5 @@
-//! Puerto de proyección (plan v2 §0): LanceDB es la única fuente de verdad y DataFusion,
-//! Petgraph y TableLookup son vistas derivadas que se reconstruyen desde ella.
+//! Puerto de proyección (plan v2 §0): LanceDB es la única fuente de verdad y las vistas de
+//! DataFusion (y el índice semántico) son derivadas que se reconstruyen desde ella.
 
 use async_trait::async_trait;
 
@@ -24,10 +24,6 @@ pub struct VistaProyectada {
 pub struct ResumenProyeccion {
     pub centro_id: String,
     pub vistas: Vec<VistaProyectada>,
-    /// Aristas vigentes cargadas en Petgraph (de todos los centros activos)
-    pub aristas_grafo: usize,
-    /// Celdas vigentes cargadas en TableLookup (de todos los centros activos)
-    pub celdas_lookup: usize,
 }
 
 /// Nombre de la vista de DataFusion de una tabla de un centro (prefijo de centro)
@@ -39,8 +35,8 @@ pub fn nombre_vista(centro_id: &CenterId, tabla: &str) -> String {
 #[async_trait]
 pub trait LakehouseProjectionPort: Send + Sync {
     /// Lee de LanceDB las filas `COMMITTED` de las 6 tablas y las registra en DataFusion con
-    /// prefijo de centro; recarga Petgraph y TableLookup con lo vigente de los centros
-    /// proyectados y exporta el inventario a `glue_catalog/`.
+    /// prefijo de centro, reemplaza sus fragmentos en el índice semántico y exporta el
+    /// inventario a `glue_catalog/`.
     async fn reconstruir_vistas(
         &self,
         centro: &CentroAbierto,

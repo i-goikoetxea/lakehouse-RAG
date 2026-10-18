@@ -22,7 +22,7 @@
 | **11** | Ingesta v2: breadcrumb, herencia de condición, destilador con json-schema y enums | Sesión 11 | `[COMPLETADO]` | 246 / 246 |
 | **12** | Centros en disco y proyección LanceDB → DataFusion/Petgraph | Sesión 12 | `[COMPLETADO]` | 291 / 291 |
 | **13** | Tools v2: matriz exacta, lookup, SQL de solo lectura, grafo antisupernodos, `search_normative_context` | Sesión 13 | `[COMPLETADO]` | 322 / 322 |
-| **14** | Cableado de la app: `ingestar_documento`, gestión de centros, system prompt de prelación | - | `[NO INICIADO]` | - |
+| **14** | Cableado de la app: `ingestar_documento`, gestión de centros, system prompt de prelación | Sesión 14 | `[COMPLETADO]` | 341 / 341 |
 | **15** | Aceptación: `tests/acceptance_8_problemas.rs` y prueba manual de la GUI | - | `[NO INICIADO]` | - |
 
 
@@ -153,6 +153,17 @@
 - [x] System prompt v2 del `AgentOrchestrator` (elección de tool, citas doc_id + revisión, notas, condiciones, prelación, no inventar) y MCP con las 6 tools (`MCP_GUIDE.md` actualizado).
 - [x] Suites `tests/integration_tools_v2.rs` (6) y `tests/adversarial_tools_v2_tests.rs` (10); fixtures `tests/comun_tools_v2/`.
 - [x] Puerta E2E `tests/e2e_binario_fase13.rs` (`#[ignore]`, binario real) con dos fixtures nuevos (`pliego_cliente_pcc01.md`, `norma_soldeo_nt_sol_01.md`).
+
+### Fase 14: Cableado de la ventana, MCP y CLI (plan v2 §2.4, §3.1)
+- [x] Comandos Tauri finos sobre `LakehouseApp` (`presentation/gui/comandos.rs`): listar, crear, activar, desactivar y eliminar centros; `ingestar_documento` por **ruta**; `catalogo_centro`; `integridad_centro`; modelos y chat.
+- [x] Ingesta desde el diálogo nativo (`tauri-plugin-dialog`, llamado desde Rust: no hace falta permiso de capability) o desde el drop de la ventana (`WindowEvent::DragDrop` reemitido como `documentos-soltados`); progreso por etapas (`EtapaIngesta`, evento `ingesta-progreso`) y aviso de la primera carga del modelo de embeddings.
+- [x] Frontend sin simulaciones: selector de centros real con alta y activación, catálogo real (doc_id, tipo, prelación, revisión y vigencia), tool cards, citas (doc_id + revisión + breadcrumb), notas al pie y condiciones visibles, y Studio con `matrixResult` y `graphResult`.
+- [x] `GuiChatService` rellena `citations`, `matrixResult` y `graphResult` (`presentation/gui/resultados_tools.rs`); la respuesta se escapa en Rust antes de pintar el Markdown (encabezados, viñetas, tablas, negrita y código).
+- [x] Arreglo de la Fase 13: `fila_tabla` conserva «Tabla 4-A» en `titulo_tabla` y el lookup por «4-A» resuelve a la primera.
+- [x] Limpieza: retirados `TableLookupService`, `PetgraphEngine`, `HybridSearchService` y sus puertos (18 tests retirados; ver bitácora).
+- [x] Release: `cargo build --release`; `--centros` y `--ask` escriben en la consola padre; la GUI release no abre consolas al lanzar `claude`.
+- [x] Verificación real de la ventana con capturas en `docs/validacion/fase14/`.
+- [x] Suites `tests/integration_gui_v2.rs` (3) y `tests/adversarial_gui_v2_tests.rs` (8).
 
 ---
 
@@ -666,3 +677,136 @@
   * La salida de cada tool es ahora un objeto: matriz → `filas[]` con `cita { doc_id, revision, version_num, chunk_origen_id, breadcrumb }`; lookup → `estado`, `valor_resultado_texto`, `nota_pie_condicion`, `cita`; grafo → `nodos[]` (`hub_resumido`, `resumen_hub`) y `aristas[]` con `cita` (graphResult); búsqueda → `grupos[].resultados[]` con `prevalece`/`supletorio` y `cita`; SQL → `resultado[]`, `truncado`. `app.js` (citas, matrixResult, graphResult) debe leer estas formas.
   * El MCP expone las mismas 6 tools (`MCP_GUIDE.md` §5 actualizado).
   * Notas de traspaso en la carpeta compartida de sesiones: `fase13_tools_v2_handover.md`.
+
+### Sesión 14 (2026-10-17) — Fase 14: Cableado de la ventana, MCP y CLI
+* **Objetivo:** plan v2 §3.1: la ventana Tauri, el MCP y la CLI usan `LakehouseApp` con datos reales y sin simulaciones.
+* **Contratos nuevos:**
+  * `application/dtos/ingestion.rs`: `EtapaIngesta` (`copia`, `parseo`, `destilacion`, `embeddings`, `escritura`, `proyeccion`, con `descripcion` y `porcentaje`) y `ObservadorIngesta`.
+  * `DocumentIngestionService::con_observador` y `LakehouseApp::ingestar_con_progreso(ruta, centro, observador)`; `ingestar` delega en ella.
+  * `application/dtos/centros.rs`: `validar_ruta_documento` (sin `..` ni `\0`, extensión `.md`/`.markdown`/`.txt`) y `EXTENSIONES_INGERIBLES`. Se aplica en `LakehouseApp`, así que también afecta a la CLI.
+  * `LakehouseApp` serializa las ingestas con un cerrojo propio: dos drops simultáneos se encolan y la copia repetida devuelve «ya ingerido».
+  * `presentation/gui/comandos.rs`: DTOs `CentroDto`, `ActivacionDto`, `IngestaDto`, `DocumentoCatalogoDto`, `IntegridadDto` y `ProgresoIngestaDto` (camelCase), más funciones probadas sin ventana. `catalogo_centro` usa `execute_athena_sql` sobre `01_documentos_catalogo`, así que exige el centro activo.
+  * `presentation/gui/resultados_tools.rs`: `CitationDto` (doc_id, revisión, versión, breadcrumb, fragmento, tool, condición y nota) y `extraer_citas` (como mucho 30, sin duplicados), `extraer_matrix_result` (`tipo: matriz | lookup`) y `extraer_graph_result`.
+  * Comandos Tauri: `listar_centros`, `crear_centro`, `activar_centro`, `desactivar_centro`, `eliminar_centro`, `seleccionar_documentos`, `seleccionar_directorio`, `ingestar_documento`, `catalogo_centro`, `integridad_centro`, `listar_modelos_claude` y `enviar_mensaje_chat`.
+  * Eventos: `ingesta-progreso`, `documentos-soltados` y `documentos-arrastre`.
+* **Decisiones:**
+  * **Drag & drop:** en WebView2, el `drop` HTML no trae rutas. Lo fiable es `WindowEvent::DragDrop`, que se reemite desde Rust con las rutas, y la ingesta siempre va por ruta.
+  * **Diálogos:** el diálogo nativo se invoca desde Rust (`DialogExt`), sin la API JS del plugin. Las capabilities no cambian: los eventos entran en `core:default` y los comandos propios no requieren permisos ACL.
+  * **Centro inactivo:** la ingesta se permite, como en la CLI. Se devuelve `proyectado: false` con un aviso y los datos no son consultables hasta activar el centro.
+  * **XSS:** `app.js` solo usa `innerHTML` para `replyHtml`; el resto se pinta con `textContent`. `texto_a_html_seguro` escapa cada línea o celda y solo después pinta el Markdown: encabezados → `<strong>`, `- ` → `•`, tablas → `<table class="md-tabla">`, `\*` → `*`, `**` y `` ` ``.
+  * **Modelos:** el cambio de modelo en caliente usa el alias elegido en cada turno, con el mismo historial por centro.
+  * **Dependencias:** se añade `tauri-plugin-dialog` 2.8.3, lo que regenera `gen/schemas/*`. `petgraph` queda declarado en `Cargo.toml` sin uso; retirarlo es un cambio de dependencias aparte.
+* **Limpieza (Fase 13):**
+  * Retirados `TableLookupService`, `PetgraphEngine`, `HybridSearchService`, los puertos `table_lookup`, `graph_engine` y `hybrid_search`, y los campos `aristas_grafo` y `celdas_lookup` de `ResumenProyeccion` (salida CLI incluida).
+  * `LanceProjection::new(datafusion)` recibe ahora un solo argumento.
+  * **Tests retirados (18), porque solo cubrían el código retirado:**
+    * `tests/integration_hybrid_search.rs` completo (5: RRF, aislamiento, vigencia, pesos y STAGED). Las tools v2 lo cubren con las vistas del centro y el índice semántico.
+    * `adversarial_embeddings_tests` (4: centro vacío, consulta vacía, inyecciones y `top_k` en `HybridSearchService`).
+    * `adversarial_query_tests` (3: NaN/inf de `TableLookupService` y bucles o grafo vacío de `PetgraphEngine`).
+    * `integration_query_engine` (2: hidratación de TableLookup y Petgraph).
+    * Unitarios de los módulos borrados (4).
+  * **Tests adaptados:** la autoderogación y la activación doble comprueban ahora las filas vigentes de las vistas 05 y 06 en lugar de los contadores retirados.
+* **Tests añadidos (+12 nuevos; 326 pasando + 8 ignorados):**
+  * Unitarios:
+    * Etapas del observador.
+    * Título de tabla con etiqueta.
+    * Ruta de documento.
+    * DTOs de progreso y catálogo.
+    * Citas, matriz y grafo (4).
+    * Render seguro (2).
+  * `tests/integration_gui_v2.rs` (3):
+    * Ciclo completo de comandos con etapas, catálogo vigente/derogado, integridad y eliminación.
+    * Lookup «4-A» a la primera con el título destilado sin código.
+    * Chat de la ventana con citas, `matrixResult` y `graphResult` desde tools reales.
+  * `tests/adversarial_gui_v2_tests.rs` (8):
+    * Rutas con `..`.
+    * Archivo inexistente, directorio y binario.
+    * Extensiones no soportadas.
+    * Centro inactivo.
+    * HTML/JS en el documento y en la respuesta.
+    * Análisis estático de `app.js` (un solo `innerHTML`, sin `onclick=` ni simulaciones).
+    * Ingestas concurrentes.
+    * Ids y rutas de centro hostiles.
+  * TDD: en rojo antes de implementar se vieron el título «4-A», el render de negrita y código, y el de encabezados y tablas, además de la cita del breadcrumb (mayúsculas del fixture). El resto se escribió con su test (rojo por compilación). Las suites adversariales pasaron a la primera.
+* **Verificación:** `cargo test` 326 OK + 8 ignorados; `cargo clippy --all-targets -- -D warnings` sin avisos; `cargo fmt --check` OK; `node --check app.js` OK.
+* **Verificación REAL de la ventana** (binario debug con `--gui`; registro en `D:\lh_fase14\config`; Claude Code y FastEmbed reales):
+  * **Cómo se condujo:** WebView2 con `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=9222`. El guion `docs/validacion/fase14/cdp_ventana.mjs` (CDP) hace clics y rellena el DOM de la ventana real, y las capturas `Page.captureScreenshot` son del contenido de esa ventana. Esta sesión no tenía herramienta de *computer use*.
+
+  | Paso | Captura | Qué se vio |
+  | --- | --- | --- |
+  | Arranque | `01_arranque.png` | Ventana frameless 1280×720, «Sin centros: crea uno», catálogo real de 13 modelos de Claude Code |
+  | Alta de centro (formulario + «Crear y activar») | `02`, `03` | Centro `obra-planta-solar-01` creado y activo, con estructura en `D:\lh_fase14\obra-planta-solar-01` |
+  | Ingesta Rev. 03 + Rev. 04 (evento `documentos-soltados`) | `04`, `05` | Barra por etapas («Destilando con Claude… (≈ 30–60 s)», «Calculando embeddings…»); aviso de los ~2,2 GB; v3: 9 chunks, 3 hitos, 1 tabla, 9 celdas, 10 aristas; v4: 11 aristas, «deroga v3». Catálogo: Rev. 04 vigente desde 2026-09-15 y Rev. 03 derogada (2026-03-01 → 2026-09-15) |
+  | Custodia con **sonnet** | `06` | 21 s, `query_operational_matrix` → **Jefe de Producción**, **FOR-ALM-05**, condición «acopio > 7 días» en notas y cita PO-ALM-03 Rev. 04 «2.2 Fase 2 — CUSTODIA»; Studio con la fila de la matriz |
+  | Cambio en caliente a **haiku**: Tabla 4-A, e = 30 / CE = 0,42 | `07` | 36 s, `inspect_lakehouse_catalog` + **un solo** `lookup` → **125 °C (*)** con la nota obligatoria (QA/QC + HV10); Studio: «resuelto», rango 20 < x ≤ 40, celda `@v4-CEL-0004` |
+  | Vuelta a **sonnet**: grafo desde PO-ALM-03 | `08` | `traverse_normative_graph` → 11 nodos y 11 aristas en Studio (registros, PCC-01, normas, DEROGA_A) |
+  | Cierre con el botón ✕ y relanzado | `09` | Rehidratación «Centro proyectado (6 vistas)»; catálogo intacto; tabla Markdown del modelo pintada como tabla real |
+  | GUI **release** + pregunta con haiku | `10` | Respuesta correcta; durante la llamada a `claude` no apareció ninguna ventana de consola nueva (`ventanas_visibles.ps1`: solo la app, Claude Desktop y la terminal previa) |
+
+  * **No verificado visualmente:**
+    * El diálogo nativo de archivos y carpetas (CDP no puede manejar diálogos del sistema).
+    * El arrastre real desde el Explorador. El frontend se ejercitó emitiendo el mismo evento que reemite Rust; `WindowEvent::DragDrop` → emisión solo se ha comprobado por compilación y lectura de código.
+    * Minimizar y maximizar (sí se usó cerrar).
+    * El tema claro.
+* **CLI release:**
+  * `cargo build --release` OK (1 min 51 s). Por tubería, `--centros` escribe la salida y devuelve código 0.
+  * En una consola PowerShell interactiva (`consola_release.ps1`), `--centros` y `--ask` **sí escriben en la consola padre** (`AttachConsole`), pero PowerShell **no espera** a un ejecutable de subsistema Windows: el texto aparece después del prompt y `$LASTEXITCODE` no es fiable.
+  * Para scripts, usar tubería (`… | Out-Host`) o `Start-Process -Wait`.
+  * Propuesta: un binario de consola aparte (`[[bin]]` `lakehouse_rag_cli`).
+* **Notas para la Fase 15:**
+  * Hay que probar con el usuario el diálogo nativo, el arrastre real desde el Explorador, minimizar y maximizar, y el tema claro. Son los puntos no vistos.
+  * Fixtures: `tests/fixtures/*.md`. El centro de esta prueba quedó en `D:\lh_fase14` (registro aislado con `LAKEHOUSE_RAG_CONFIG_DIR`); se puede borrar.
+  * El agente a veces llama primero a `inspect_lakehouse_catalog` antes del lookup. Es correcto, pero cuesta unos 10 s más.
+  * Pendientes menores:
+    * Retirar `petgraph` de `Cargo.toml`.
+    * Binario CLI de consola.
+    * Botón «Eliminar centro» en la UI (hoy solo existe el comando IPC).
+
+### Sesión 14b (2026-10-17) — Fase 14: iteración UI/UX tras la prueba del usuario
+* **Origen:** el usuario probó la ventana y encontró problemas de diseño y de flujo de la información: «Fuentes» partidas letra a letra, Markdown mal pintado, paneles fijos y barras de scroll del sistema. El análisis completo, con causa raíz y corrección de cada punto, está en `docs/validacion/fase14/analisis_ui_ux.md`. El usuario aprobó (SÍ) la dependencia `pulldown-cmark` y el plan.
+* **Cambios en el backend:**
+  * `presentation/gui/markdown_seguro.rs`: CommonMark + tablas GFM con `pulldown-cmark` 0.12.
+    * El HTML crudo pasa a texto escapado.
+    * Los enlaces se pintan como `<span class="md-enlace" title=url>` (solo `http`/`https`): nunca navegan la ventana.
+    * Las imágenes se reducen a su texto alternativo.
+    * El salto simple es visible y las tablas van envueltas con scroll horizontal.
+    * `texto_a_html_seguro` delega aquí; el renderizador propio línea a línea queda retirado.
+  * `resultados_tools.rs`:
+    * `FuenteCitadaDto` y `agrupar_fuentes`: un chip por documento + revisión, con sus apartados y citas. Arregla las 10 «Fuentes» repetidas.
+    * `resumen_tool`: una línea legible por tool, por ejemplo «resuelto · 125 (*) °C».
+    * `ChatResponsePayload.fuentes` y `ToolCardDto.resumen` son campos nuevos.
+* **Frontend reescrito** (`index.html`, `styles.css` sin las reglas heredadas de la Fase 7, `app.js`):
+  * **Paneles:** separadores arrastrables (220–520 px y 280–760 px, con teclado ←/→ y doble clic para restablecer), plegado a un riel de 40 px y anchos recordados.
+  * **Scroll:** barras finas sin flechas mediante `::-webkit-scrollbar`. No se usa `scrollbar-width`, que en Chromium ≥ 121 anula esos estilos.
+  * **Chat:** sin scroll vertical dentro de los mensajes; columna de lectura de 780 px; al llegar una respuesta se desplaza hasta su inicio, con botón «↓ Ir al final»; estado vacío con ejemplos clicables; entrada multilínea (Intro envía, Mayús+Intro salta de línea); cronómetro y botón Copiar.
+  * **Tools y fuentes:** cada tool ocupa una línea con resumen y su detalle JSON se abre en el Studio. Las fuentes son chips agrupados, y las notas y condiciones van en un bloque compacto.
+  * **Avisos:** salen como *toasts* y quedan en el registro «Actividad» del panel 1, fuera de la conversación.
+  * **Studio:** pestañas Fuentes, Matriz · Tabla, Grafo, Tools y Centro. Una pestaña con novedad se marca con un punto y solo se activa sola si el usuario no ha elegido otra. Las fichas sustituyen a las tablas comprimidas; el grafo se agrupa por relación; las fuentes se agrupan por apartado, sin repetir el título del documento.
+  * **Centros:** botón para quitar un centro del registro, con diálogo de confirmación; el disco no se toca.
+* **Tests (+18, −3; 341 pasando + 9 ignorados, el nuevo es el generador del banco):**
+  * `tests/render_markdown_gui_tests.rs` (13 casos).
+    * En rojo antes de introducir `pulldown-cmark` fallaban 8: cursiva, anidado, cita en bloque, listas ordenadas y anidadas, viñetas con `*`, código con vallas, párrafos y regla, y encabezados h1–h4.
+    * También cubre enlaces y HTML crudo, incluidos `javascript:` y `<details ontoggle>`.
+    * Incluye además un generador `#[ignore]` del banco visual `docs/validacion/fase14/banco_render.html` (renderizador y CSS reales).
+  * Unitarios: `markdown_seguro` (2), agrupación de fuentes (1) y resumen por tool (1, con 8 casos).
+  * Adaptadas a `<p>…`: la integración y la adversarial de la GUI. La comprobación de HTML vivo pasa a hacerse por etiquetas y atributos permitidos.
+  * Retirados los 3 tests del renderizador antiguo, que cubrían código eliminado.
+* **Verificación real** (ventana debug, Claude real, capturas `11`–`18` en `docs/validacion/fase14/`):
+  * Arranque en tema claro con estado vacío (`11`).
+  * Recepción con Sonnet (`12`, `13`): matriz y búsqueda, salto al inicio de la respuesta, ficha en el Studio, un único chip `PO-ALM-03 Rev. 04 · 6` y notas compactas.
+  * Grafo en tema oscuro (`14`): aristas agrupadas por relación.
+  * Tabla 4-A con Haiku (`15`): «resuelto · 125 (*) °C» y nota obligatoria.
+  * Redimensionado de paneles (`16`; 565 px y 240 px recordados).
+  * Plegado y fuentes agrupadas (`17`).
+  * Ventana maximizada a 1920×1032 con el panel plegado y la columna centrada (`18`).
+  * La comprobación automática no encontró ningún elemento con scroll vertical dentro de los mensajes.
+  * **Fallos encontrados y corregidos durante la verificación:**
+    * Flechas en las barras de scroll (`scrollbar-width`).
+    * Panel plegado que conservaba su ancho (el estilo en línea pisaba la clase).
+    * Placeholder partido en dos líneas.
+    * Un bloque que empieza por HTML se tragaba los saltos de línea. Lo detectó `adversarial_gui_chat_tests`; ahora se convierte en texto línea a línea con su salto.
+* **Incidencia de entorno:** el disco D: llegó al 100 % (fallo `LNK1285`, PDB dañados). Se liberaron 51 GB borrando solo artefactos regenerables del proyecto: `target/debug/incremental` y los binarios y PDB de test del crate. Conviene vigilar el espacio: `target/debug` llegó a 61 GB.
+* **Pendiente para la Fase 15:**
+  * Probar con el usuario el arrastre real desde el Explorador, el diálogo nativo y el redimensionado con ratón real. El redimensionado se verificó con eventos de puntero sintéticos.
+  * Mensaje claro cuando la sesión de Claude Code ha caducado. Hoy se muestra el JSON del CLI; está propuesto, sin hacer.
+

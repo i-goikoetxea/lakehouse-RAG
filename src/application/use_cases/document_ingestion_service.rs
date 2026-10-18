@@ -9,6 +9,7 @@ use std::sync::Arc;
 
 use sha2::{Digest, Sha256};
 
+use crate::application::dtos::ingestion::{EtapaIngesta, ObservadorIngesta};
 use crate::application::dtos::lakehouse_filas::{ClaveDocumental, LoteIngesta};
 use crate::application::ports::document_parser::DocumentParserPort;
 use crate::application::ports::embedding_engine::EmbeddingEnginePort;
@@ -55,6 +56,7 @@ pub struct DocumentIngestionService {
     distiller: Arc<dyn LlmDistillerPort>,
     embedding_engine: Arc<dyn EmbeddingEnginePort>,
     store: Arc<dyn LakehouseStorePort>,
+    observador: Option<ObservadorIngesta>,
 }
 
 impl DocumentIngestionService {
@@ -69,6 +71,19 @@ impl DocumentIngestionService {
             distiller,
             embedding_engine,
             store,
+            observador: None,
+        }
+    }
+
+    /// Notifica cada etapa del pipeline (progreso en la GUI)
+    pub fn con_observador(mut self, observador: Option<ObservadorIngesta>) -> Self {
+        self.observador = observador;
+        self
+    }
+
+    fn notificar(&self, etapa: EtapaIngesta) {
+        if let Some(observador) = &self.observador {
+            observador(etapa);
         }
     }
 
@@ -90,11 +105,15 @@ impl DocumentIngestionService {
             return Ok(reporte_ya_ingerido(centro_id, huella, hash_sha256));
         }
 
+        self.notificar(EtapaIngesta::Parseo);
         let parsed = self.parser.parse(nombre_archivo, contenido).await?;
+        self.notificar(EtapaIngesta::Destilacion);
         let paquete = self.distiller.distill(&parsed).await?;
         let clave = clave_documental(centro_id, &paquete.catalogo)?;
         let revision = mapear_revision(&clave, &parsed, &paquete, &hash_sha256)?;
+        self.notificar(EtapaIngesta::Embeddings);
         let filas = self.vectorizar(revision).await?;
+        self.notificar(EtapaIngesta::Escritura);
 
         let ingest_id = IngestId::new(format!("ING-{}", uuid::Uuid::new_v4().simple()))?;
         let versiones_derogadas = self
@@ -284,6 +303,57 @@ Cumple con lineamientos de NOM-STPS-001.
         assert_eq!(reporte.total_celdas, 2);
         assert_eq!(reporte.total_aristas, 1);
         assert!(!reporte.sha256.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_observador_recibe_las_etapas_en_orden_y_nada_si_ya_estaba_ingerido() {
+        use crate::application::dtos::ingestion::EtapaIngesta;
+        use std::sync::Mutex as StdMutex;
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let store = LanceDbStore::conectar(temp_dir.path()).await.unwrap();
+        store.inicializar_tablas().await.unwrap();
+        let etapas: Arc<StdMutex<Vec<EtapaIngesta>>> = Arc::default();
+        let destino = Arc::clone(&etapas);
+        let service = DocumentIngestionService::new(
+            Arc::new(MarkdownParser::new()),
+            Arc::new(MockDistiller::new()),
+            Arc::new(MockEmbeddingEngine::new(Some(
+                DIMENSION_EMBEDDINGS as usize,
+            ))),
+            Arc::new(store),
+        )
+        .con_observador(Some(Arc::new(move |etapa| {
+            destino.lock().unwrap().push(etapa)
+        })));
+
+        let centro = CenterId::new("planta-central").unwrap();
+        let markdown = "# Manual
+
+## 1. Alcance
+Texto del alcance.
+";
+        service
+            .ingestar_documento(&centro, "manual.md", markdown)
+            .await
+            .unwrap();
+        assert_eq!(
+            *etapas.lock().unwrap(),
+            vec![
+                EtapaIngesta::Parseo,
+                EtapaIngesta::Destilacion,
+                EtapaIngesta::Embeddings,
+                EtapaIngesta::Escritura
+            ]
+        );
+
+        etapas.lock().unwrap().clear();
+        let repetida = service
+            .ingestar_documento(&centro, "manual.md", markdown)
+            .await
+            .unwrap();
+        assert!(repetida.ya_ingerido);
+        assert!(etapas.lock().unwrap().is_empty());
     }
 
     #[tokio::test]

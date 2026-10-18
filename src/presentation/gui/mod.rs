@@ -1,111 +1,193 @@
-//! Módulo de Presentación GUI (Aplicación de Escritorio Moderna)
+//! Módulo de Presentación GUI (Aplicación de Escritorio Tauri 2)
 //!
-//! Define la configuración de la ventana frameless (relación 16:9, sin decoraciones nativas)
-//! y los contratos DTO para los comandos IPC entre el cliente web (Linear + NotebookLM) y
-//! los servicios del núcleo (LakehouseToolService y DocumentIngestionService).
+//! Ventana frameless 16:9 y comandos IPC finos sobre la composición única (`LakehouseApp`):
+//! centros, ingesta por ruta con progreso, catálogo, integridad, modelos y chat. La lógica de
+//! cada comando vive en `comandos` (probada sin ventana); aquí solo se extrae el estado.
 
 pub mod chat_service;
+pub mod comandos;
+pub mod markdown_seguro;
+pub mod resultados_tools;
 
 use serde::{Deserialize, Serialize};
 
 use std::sync::Arc;
 
+use tauri::{DragDropEvent, Emitter, WindowEvent};
+use tauri_plugin_dialog::DialogExt;
+
 use crate::application::dtos::agent::ModelDescriptor;
+use crate::application::dtos::centros::EXTENSIONES_INGERIBLES;
+use crate::application::dtos::ingestion::ObservadorIngesta;
 use crate::application::use_cases::lakehouse_app::LakehouseApp;
-use crate::domain::models::center::CentroConocimiento;
 use chat_service::GuiChatService;
+use comandos::{
+    ActivacionDto, CentroDto, DocumentoCatalogoDto, EVENTO_ARRASTRE, EVENTO_DOCUMENTOS_SOLTADOS,
+    EVENTO_PROGRESO_INGESTA, IngestaDto, IntegridadDto, ProgresoIngestaDto,
+};
+pub use resultados_tools::{CitationDto, FuenteCitadaDto};
 
 /// Inicia la aplicación nativa Tauri 2.0 sobre la composición única (`LakehouseApp`)
 pub fn iniciar_app_tauri(app: Arc<LakehouseApp>) -> Result<(), tauri::Error> {
     let servicio_chat = GuiChatService::desde_asistente(app.clone());
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .manage(servicio_chat)
         .manage(app)
+        .on_window_event(reemitir_arrastre_de_archivos)
         .invoke_handler(tauri::generate_handler![
             listar_modelos_claude,
             enviar_mensaje_chat,
             listar_centros,
+            crear_centro,
             activar_centro,
             desactivar_centro,
-            ingestar_documento
+            eliminar_centro,
+            seleccionar_documentos,
+            seleccionar_directorio,
+            ingestar_documento,
+            catalogo_centro,
+            integridad_centro
         ])
         .run(tauri::generate_context!())
 }
 
-/// Centro tal como lo consume el frontend
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CentroDto {
-    pub id: String,
-    pub nombre: String,
-    pub ruta_disco: String,
-    pub activo: bool,
-}
-
-impl From<&CentroConocimiento> for CentroDto {
-    fn from(centro: &CentroConocimiento) -> Self {
-        Self {
-            id: centro.id().to_string(),
-            nombre: centro.manifiesto().nombre.clone(),
-            ruta_disco: centro.manifiesto().ruta_almacenamiento.clone(),
-            activo: centro.esta_activo(),
+/// En Tauri 2 el drop de archivos llega como evento de ventana con rutas (el `drop` HTML no
+/// trae rutas en WebView2): se reemite al frontend, que pide la ingesta por ruta
+fn reemitir_arrastre_de_archivos(ventana: &tauri::Window, evento: &WindowEvent) {
+    let WindowEvent::DragDrop(arrastre) = evento else {
+        return;
+    };
+    let resultado = match arrastre {
+        DragDropEvent::Drop { paths, .. } => {
+            let rutas: Vec<String> = paths
+                .iter()
+                .map(|p| p.to_string_lossy().to_string())
+                .collect();
+            ventana.emit(EVENTO_DOCUMENTOS_SOLTADOS, rutas)
         }
+        DragDropEvent::Enter { .. } => ventana.emit(EVENTO_ARRASTRE, "entrar"),
+        DragDropEvent::Leave => ventana.emit(EVENTO_ARRASTRE, "salir"),
+        _ => Ok(()),
+    };
+    if let Err(e) = resultado {
+        tracing::warn!("No se pudo reemitir el arrastre de archivos: {e}");
     }
 }
 
-/// Comando IPC: centros registrados
 #[tauri::command]
 async fn listar_centros(
     app: tauri::State<'_, Arc<LakehouseApp>>,
 ) -> Result<Vec<CentroDto>, String> {
-    let centros = app.listar_centros().await.map_err(|e| e.to_string())?;
-    Ok(centros.iter().map(CentroDto::from).collect())
+    comandos::listar_centros(&app).await
 }
 
-/// Comando IPC: activa un centro y reconstruye sus vistas
+#[tauri::command]
+async fn crear_centro(
+    app: tauri::State<'_, Arc<LakehouseApp>>,
+    centro_id: String,
+    ruta: String,
+    nombre: Option<String>,
+) -> Result<CentroDto, String> {
+    comandos::crear_centro(&app, &centro_id, &ruta, nombre.as_deref()).await
+}
+
+/// Activa un centro y reconstruye sus vistas
 #[tauri::command]
 async fn activar_centro(
     app: tauri::State<'_, Arc<LakehouseApp>>,
     centro_id: String,
-) -> Result<usize, String> {
-    let resumen = app
-        .activar_centro(&centro_id)
-        .await
-        .map_err(|e| e.to_string())?;
-    Ok(resumen.vistas.len())
+) -> Result<ActivacionDto, String> {
+    comandos::activar_centro(&app, &centro_id).await
 }
 
-/// Comando IPC: desactiva un centro (cero acceso)
+/// Desactiva un centro (cero acceso)
 #[tauri::command]
 async fn desactivar_centro(
     app: tauri::State<'_, Arc<LakehouseApp>>,
     centro_id: String,
 ) -> Result<(), String> {
-    app.desactivar_centro(&centro_id)
-        .await
-        .map_err(|e| e.to_string())
+    comandos::desactivar_centro(&app, &centro_id).await
 }
 
-/// Comando IPC: ingesta transaccional de un archivo local en un centro
+/// Quita el centro del registro sin borrar su directorio
+#[tauri::command]
+async fn eliminar_centro(
+    app: tauri::State<'_, Arc<LakehouseApp>>,
+    centro_id: String,
+) -> Result<CentroDto, String> {
+    comandos::eliminar_centro(&app, &centro_id).await
+}
+
+/// Diálogo nativo de archivos: devuelve las rutas elegidas (el contenido no viaja por IPC)
+#[tauri::command]
+async fn seleccionar_documentos(app_handle: tauri::AppHandle) -> Result<Vec<String>, String> {
+    let elegidos = app_handle
+        .dialog()
+        .file()
+        .set_title("Documentos a ingerir")
+        .add_filter("Markdown o texto", &EXTENSIONES_INGERIBLES)
+        .blocking_pick_files()
+        .unwrap_or_default();
+    elegidos
+        .into_iter()
+        .map(|ruta| {
+            ruta.into_path()
+                .map(|p| p.to_string_lossy().to_string())
+                .map_err(|e| e.to_string())
+        })
+        .collect()
+}
+
+/// Diálogo nativo de carpetas para la ruta de un centro nuevo
+#[tauri::command]
+async fn seleccionar_directorio(app_handle: tauri::AppHandle) -> Result<Option<String>, String> {
+    app_handle
+        .dialog()
+        .file()
+        .set_title("Carpeta del centro (vacía o inexistente)")
+        .blocking_pick_folder()
+        .map(|ruta| {
+            ruta.into_path()
+                .map(|p| p.to_string_lossy().to_string())
+                .map_err(|e| e.to_string())
+        })
+        .transpose()
+}
+
+/// Ingesta por ruta; emite `ingesta-progreso` en cada etapa
 #[tauri::command]
 async fn ingestar_documento(
+    app_handle: tauri::AppHandle,
     app: tauri::State<'_, Arc<LakehouseApp>>,
     ruta: String,
     centro_id: String,
-) -> Result<String, String> {
-    let resultado = app
-        .ingestar(std::path::Path::new(&ruta), &centro_id)
-        .await
-        .map_err(|e| e.to_string())?;
-    Ok(format!(
-        "{} v{} ({})",
-        resultado.informe.doc_id,
-        resultado.informe.version,
-        if resultado.informe.ya_ingerido {
-            "ya ingerido"
-        } else {
-            "ingerido"
+) -> Result<IngestaDto, String> {
+    let (centro, archivo) = (centro_id.clone(), ruta.clone());
+    let observador: ObservadorIngesta = Arc::new(move |etapa| {
+        let progreso = ProgresoIngestaDto::new(&centro, &archivo, etapa);
+        if let Err(e) = app_handle.emit(EVENTO_PROGRESO_INGESTA, progreso) {
+            tracing::warn!("No se pudo emitir el progreso de la ingesta: {e}");
         }
-    ))
+    });
+    comandos::ingestar_documento(&app, &ruta, &centro_id, Some(observador)).await
+}
+
+/// Revisiones del catálogo del centro activo (vigentes y derogadas)
+#[tauri::command]
+async fn catalogo_centro(
+    app: tauri::State<'_, Arc<LakehouseApp>>,
+    centro_id: String,
+) -> Result<Vec<DocumentoCatalogoDto>, String> {
+    comandos::catalogo_centro(&app, &centro_id).await
+}
+
+#[tauri::command]
+async fn integridad_centro(
+    app: tauri::State<'_, Arc<LakehouseApp>>,
+    centro_id: String,
+) -> Result<IntegridadDto, String> {
+    comandos::integridad(&app, &centro_id).await
 }
 
 /// Comando IPC: catálogo dinámico de modelos de la instalación local de Claude Code
@@ -160,29 +242,12 @@ impl Default for WindowConfig {
     }
 }
 
-/// Solicitud de ingesta enviada desde la zona Drag & Drop del frontend
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct IngestarDocPayload {
-    pub nombre: String,
-    pub centro_id: String,
-}
-
 /// Solicitud de consulta de chat con selección de modelo
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatQueryPayload {
     pub mensaje: String,
     pub centro_id: String,
     pub modelo: String,
-}
-
-/// Cita bibliográfica verificada en los esquemas Arrow
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CitationDto {
-    pub doc_id: String,
-    pub title: String,
-    pub page: u32,
-    pub hash: String,
 }
 
 /// Registro de ejecución de herramienta para observabilidad en tiempo real (Tool Card)
@@ -193,6 +258,8 @@ pub struct ToolCardDto {
     pub result: serde_json::Value,
     pub status: String,
     pub duration: String,
+    /// Línea legible del resultado (p. ej. «resuelto · 125 (*) °C»)
+    pub resumen: String,
 }
 
 /// Respuesta completa para el asistente del frontend
@@ -202,6 +269,8 @@ pub struct ChatResponsePayload {
     pub reply_html: String,
     pub tools_used: Vec<ToolCardDto>,
     pub citations: Vec<CitationDto>,
+    /// Las mismas citas agrupadas por documento + revisión (un chip por fuente)
+    pub fuentes: Vec<FuenteCitadaDto>,
     pub matrix_result: Option<serde_json::Value>,
     pub graph_result: Option<serde_json::Value>,
 }

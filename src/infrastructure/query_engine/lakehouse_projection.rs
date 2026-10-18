@@ -1,4 +1,4 @@
-//! Proyección LanceDB → DataFusion / Petgraph / TableLookup (plan v2 §0, Fase 12).
+//! Proyección LanceDB → DataFusion e índice semántico (plan v2 §0, Fases 12-13).
 //!
 //! Decisiones:
 //! * DataFusion recibe **todas las filas `COMMITTED`** (vigentes e históricas, con `vigente`,
@@ -6,13 +6,14 @@
 //!   *time travel* con SQL. Las filas `STAGED` nunca se proyectan. Las tools filtran
 //!   `vigente = true` por defecto.
 //! * Las columnas vectoriales (`vector`, `vector_hito`, `vector_tabla`) no se proyectan:
-//!   la búsqueda semántica lee LanceDB directamente y un `SELECT *` no debe volcar 1024 floats.
-//! * Petgraph y TableLookup son globales: se recargan con lo **vigente** de todos los centros
-//!   proyectados cada vez que uno entra o sale.
+//!   los vectores de chunks e hitos alimentan el índice semántico en memoria y un `SELECT *`
+//!   no debe volcar 1024 floats.
+//! * Las tools v2 resuelven grafo y tablas de doble entrada con SQL sobre las vistas del
+//!   centro, así que no hay motores globales que recargar.
 //! * La lectura de las 6 tablas se completa antes de tocar DataFusion: si una falla (p. ej. un
 //!   `.lance` borrado a mano), las vistas previas no se alteran y el error nombra la tabla.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -32,28 +33,19 @@ use crate::application::ports::lakehouse_projection::{
     LakehouseProjectionPort, ResumenProyeccion, VistaProyectada, nombre_vista,
 };
 use crate::application::ports::lakehouse_store::{
-    ConsultaTabla, LIMITE_MAXIMO_LECTURA, TABLA_CELDAS_DOBLE_ENTRADA, TABLA_CHUNKS_NORMATIVA,
-    TABLA_GRAFO_REFERENCIAS, TABLA_MATRIZ_OPERATIVA, TODAS_LAS_TABLAS,
+    ConsultaTabla, LIMITE_MAXIMO_LECTURA, TABLA_CHUNKS_NORMATIVA, TABLA_MATRIZ_OPERATIVA,
+    TODAS_LAS_TABLAS,
 };
 use crate::application::ports::semantic_index::{
     FragmentoIndexado, IndiceSemanticoPort, OrigenFragmento,
 };
-use crate::application::use_cases::table_lookup_service::TableLookupService;
 use crate::domain::errors::DomainError;
 use crate::domain::models::center::CenterId;
 use crate::infrastructure::query_engine::datafusion_engine::DataFusionEngine;
-use crate::infrastructure::query_engine::petgraph_engine::PetgraphEngine;
 use crate::infrastructure::storage::schemas::obtener_esquema_por_nombre;
 
 /// Archivo del inventario exportado para el LLM
 pub const ARCHIVO_INVENTARIO_GLUE: &str = "inventario_tablas.json";
-
-/// Lotes vigentes que alimentan los motores globales
-#[derive(Default)]
-struct LotesGlobales {
-    aristas: Vec<RecordBatch>,
-    celdas: Vec<RecordBatch>,
-}
 
 /// Una tabla leída de LanceDB y lista para registrar
 struct TablaLeida {
@@ -67,24 +59,17 @@ struct TablaLeida {
 /// Adaptador de proyección sobre los motores en memoria
 pub struct LanceProjection {
     datafusion: Arc<DataFusionEngine>,
-    lookup: Arc<TableLookupService>,
-    grafo: Arc<PetgraphEngine>,
     indice: Option<Arc<dyn IndiceSemanticoPort>>,
-    proyectados: Mutex<HashMap<CenterId, LotesGlobales>>,
+    /// Centros con vistas registradas; el cerrojo serializa reconstrucciones y retiradas
+    proyectados: Mutex<HashSet<CenterId>>,
 }
 
 impl LanceProjection {
-    pub fn new(
-        datafusion: Arc<DataFusionEngine>,
-        lookup: Arc<TableLookupService>,
-        grafo: Arc<PetgraphEngine>,
-    ) -> Self {
+    pub fn new(datafusion: Arc<DataFusionEngine>) -> Self {
         Self {
             datafusion,
-            lookup,
-            grafo,
             indice: None,
-            proyectados: Mutex::new(HashMap::new()),
+            proyectados: Mutex::new(HashSet::new()),
         }
     }
 
@@ -130,26 +115,6 @@ impl LanceProjection {
             filas,
             filas_vigentes,
         })
-    }
-
-    /// Recarga Petgraph y TableLookup con lo vigente de todos los centros proyectados
-    async fn recargar_motores_globales(
-        &self,
-        proyectados: &HashMap<CenterId, LotesGlobales>,
-    ) -> Result<(usize, usize), DomainError> {
-        self.grafo.vaciar().await;
-        self.lookup.vaciar()?;
-        let mut aristas = 0;
-        let mut celdas = 0;
-        for lotes in proyectados.values() {
-            for lote in &lotes.aristas {
-                aristas += self.grafo.cargar_desde_record_batch(lote).await?;
-            }
-            for lote in &lotes.celdas {
-                celdas += self.lookup.cargar_desde_record_batch(lote)?;
-            }
-        }
-        Ok((aristas, celdas))
     }
 }
 
@@ -409,7 +374,6 @@ impl LakehouseProjectionPort for LanceProjection {
         if let Some(indice) = &self.indice {
             indice.reemplazar_centro(&centro.id, fragmentos).await;
         }
-        let mut globales = LotesGlobales::default();
         let mut inventario = Vec::with_capacity(leidas.len());
         for leida in leidas {
             let esquema = leida.lotes[0].schema();
@@ -422,22 +386,14 @@ impl LakehouseProjectionPort for LanceProjection {
             self.datafusion
                 .registrar_centro(&centro.id, leida.tabla, leida.lotes)
                 .await?;
-            match leida.tabla {
-                TABLA_GRAFO_REFERENCIAS => globales.aristas = leida.lotes_completos,
-                TABLA_CELDAS_DOBLE_ENTRADA => globales.celdas = leida.lotes_completos,
-                _ => {}
-            }
             inventario.push((vista, esquema));
         }
-        proyectados.insert(centro.id.clone(), globales);
-        let (aristas_grafo, celdas_lookup) = self.recargar_motores_globales(&proyectados).await?;
+        proyectados.insert(centro.id.clone());
 
         exportar_glue_catalog(&centro.ruta, &inventario_glue(&centro.id, &inventario))?;
         Ok(ResumenProyeccion {
             centro_id: centro.id.to_string(),
             vistas: inventario.into_iter().map(|(v, _)| v).collect(),
-            aristas_grafo,
-            celdas_lookup,
         })
     }
 
@@ -447,14 +403,12 @@ impl LakehouseProjectionPort for LanceProjection {
         if let Some(indice) = &self.indice {
             indice.retirar_centro(centro_id).await;
         }
-        if proyectados.remove(centro_id).is_some() {
-            self.recargar_motores_globales(&proyectados).await?;
-        }
+        proyectados.remove(centro_id);
         Ok(())
     }
 
     async fn centros_proyectados(&self) -> Vec<CenterId> {
-        let mut centros: Vec<CenterId> = self.proyectados.lock().await.keys().cloned().collect();
+        let mut centros: Vec<CenterId> = self.proyectados.lock().await.iter().cloned().collect();
         centros.sort_by(|a, b| a.as_str().cmp(b.as_str()));
         centros
     }

@@ -61,7 +61,7 @@ Modelo **multilingüe** de 1024 dims (`MultilingualE5Large` de fastembed; BGE-M3
 | **11** | Ingesta v2: parser con breadcrumb y herencia de condición; destilador con json-schema y enums; normalización; vectores hito/tabla; embeddings multilingües | 1, 2, 7 | Completado (Sesión 11, 2026-10-17; 246 tests; E2E real 52/52 OK) |
 | **12** | Centros en disco + proyección LanceDB → DataFusion/Petgraph (activar/desactivar, reconstrucción tras ingesta) + `raw_docs/` y `center_manifest.json` (`schema_version = 2`) | 6, 8 | Completado (Sesión 12, 2026-10-17; 291 tests; puerta E2E con el binario real) |
 | **13** | Tools v2: matriz exacta, lookup con fronteras, SQL de solo lectura, grafo antisupernodos, `search_normative_context` con prelación y *time travel* | 2, 3, 4, 5, 6, 7 | Completado (Sesión 13, 2026-10-17; 322 tests; puerta E2E real 1/1 OK, 6 preguntas) |
-| **14** | Cableado de la app: `ingestar_documento` (GUI, MCP y CLI), gestión de centros en la GUI, system prompt de prelación y citas | todos | Pendiente |
+| **14** | Cableado de la app: `ingestar_documento` (GUI, MCP y CLI), gestión de centros en la GUI, system prompt de prelación y citas | todos | Completado (Sesión 14, 2026-10-17; 326 tests; ventana verificada con capturas en `docs/validacion/fase14/`) |
 | **15** | Aceptación: suite `tests/acceptance_8_problemas.rs` (Claude y FastEmbed reales) + criterios §9 + prueba manual de la GUI | todos | Pendiente |
 
 ## 3.1 Criterio de terminado: la app funciona de punta a punta (exigido por el usuario)

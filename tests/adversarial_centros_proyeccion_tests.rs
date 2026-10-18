@@ -127,10 +127,18 @@ async fn test_activacion_doble_es_idempotente_y_no_duplica_vistas_ni_grafo() {
     let primera = app.activar_centro(CENTRO).await.unwrap();
     let segunda = app.activar_centro(CENTRO).await.unwrap();
     assert_eq!(primera, segunda);
+    let vigentes = |tabla: &str| {
+        primera
+            .vistas
+            .iter()
+            .find(|v| v.tabla == tabla)
+            .map_or(0, |v| v.filas_vigentes)
+    };
     assert!(
-        primera.aristas_grafo > 0 && primera.celdas_lookup > 0,
+        vigentes("06_grafo_referencias") > 0 && vigentes("05_celdas_doble_entrada") > 0,
         "{primera:?}"
     );
+    assert_eq!(primera.vistas.len(), 6, "{primera:?}");
     assert_eq!(
         escalar(
             &sql(

@@ -10,7 +10,7 @@
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
 </head>
 <body>
-  <!-- Custom Frameless Titlebar (Linear Style) -->
+  <!-- Barra de título frameless -->
   <header class="titlebar" data-tauri-drag-region>
     <div class="titlebar-brand" data-tauri-drag-region>
       <div class="brand-logo">
@@ -21,247 +21,198 @@
         </svg>
       </div>
       <span class="brand-title" data-tauri-drag-region>Lakehouse RAG Industrial</span>
-      <span class="brand-badge">SOTA 2026</span>
     </div>
 
-    <!-- Center active selector pill -->
-    <div class="titlebar-center-pill">
-      <span class="pill-label">Centro Activo:</span>
-      <select id="select-centro" class="center-dropdown">
-        <option value="planta_alfa" selected>🏭 Planta Alfa (Tuberías & Presión)</option>
-        <option value="planta_beta">⚡ Planta Beta (Estructuras Soldadas)</option>
-        <option value="laboratorio_central">🔬 Laboratorio Central de Ensayos</option>
+    <div class="titlebar-centro">
+      <label class="pill-label" for="select-centro">Centro</label>
+      <select id="select-centro" class="select-compacto" disabled>
+        <option value="" selected>Cargando centros…</option>
       </select>
+      <span id="centro-estado" class="chip chip-aviso">—</span>
+      <button id="btn-toggle-centro" class="btn btn-sutil" disabled>Activar</button>
+      <button id="btn-nuevo-centro" class="btn btn-sutil" title="Crear un centro nuevo">+ Nuevo</button>
+      <button id="btn-eliminar-centro" class="btn btn-icono" title="Quitar el centro del registro (no borra el disco)" disabled>
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6l-1 14H6L5 6"></path><path d="M10 11v6M14 11v6"></path></svg>
+      </button>
     </div>
 
-    <!-- Window controls & Theme switcher -->
     <div class="titlebar-actions">
-      <button id="btn-theme-toggle" class="titlebar-btn theme-btn" title="Alternar Modo Oscuro / Claro">
+      <button id="btn-theme-toggle" class="btn btn-icono" title="Alternar tema claro / oscuro">
         <span class="theme-icon-dark">🌙</span>
         <span class="theme-icon-light">☀️</span>
       </button>
-
       <div class="window-controls">
-        <button id="btn-minimize" class="titlebar-btn ctrl-btn" title="Minimizar">
+        <button id="btn-minimize" class="ctrl-btn" title="Minimizar">
           <svg width="10" height="1" viewBox="0 0 10 1"><rect width="10" height="1" fill="currentColor"/></svg>
         </button>
-        <button id="btn-maximize" class="titlebar-btn ctrl-btn" title="Maximizar / Restaurar">
+        <button id="btn-maximize" class="ctrl-btn" title="Maximizar / Restaurar">
           <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor"><rect x="1" y="1" width="8" height="8" rx="1"/></svg>
         </button>
-        <button id="btn-close" class="titlebar-btn ctrl-btn close-btn" title="Cerrar">
-          <svg width="10" height="10" viewBox="0 0 10 10" stroke="currentColor" stroke-width="1.2">
-            <line x1="1" y1="1" x2="9" y2="9"/>
-            <line x1="9" y1="1" x2="1" y2="9"/>
-          </svg>
+        <button id="btn-close" class="ctrl-btn close-btn" title="Cerrar">
+          <svg width="10" height="10" viewBox="0 0 10 10" stroke="currentColor" stroke-width="1.2"><line x1="1" y1="1" x2="9" y2="9"/><line x1="9" y1="1" x2="1" y2="9"/></svg>
         </button>
       </div>
     </div>
   </header>
 
-  <!-- Main 3-Panel Workspace (NotebookLM Architecture) -->
-  <main class="app-workspace">
-    <!-- PANEL 1: FUENTES Y DRAG & DROP (NotebookLM Left Panel) -->
-    <section class="panel panel-sources">
-      <div class="panel-header">
-        <div class="panel-title-wrapper">
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
-            <polyline points="14 2 14 8 20 8"></polyline>
+  <main id="workspace" class="app-workspace">
+    <!-- PANEL 1: Fuentes -->
+    <section id="panel-fuentes" class="panel panel-sources" aria-label="Fuentes de conocimiento">
+      <button class="riel" data-desplegar="fuentes" title="Mostrar fuentes">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline></svg>
+        <span>Fuentes</span>
+      </button>
+      <div class="panel-contenido">
+        <div class="panel-header">
+          <h2 class="panel-title">Fuentes</h2>
+          <span id="sources-count" class="chip" title="">0 documentos</span>
+          <button class="btn btn-icono" data-plegar="fuentes" title="Ocultar panel">⟨</button>
+        </div>
+
+        <div id="drop-zone" class="dropzone" role="button" tabindex="0" aria-label="Ingerir documentos">
+          <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="17 8 12 3 7 8"></polyline><line x1="12" y1="3" x2="12" y2="15"></line>
           </svg>
-          <h2 class="panel-title">Fuentes de Conocimiento</h2>
-        </div>
-        <span id="sources-count" class="badge-count">3 docs</span>
-      </div>
-
-      <!-- Drag & Drop Interactive Dropzone -->
-      <div id="drop-zone" class="dropzone">
-        <input type="file" id="file-input" multiple accept=".pdf,.md,.txt,.json" class="file-input-hidden">
-        <div class="dropzone-content">
-          <div class="dropzone-icon">
-            <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
-              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
-              <polyline points="17 8 12 3 7 8"></polyline>
-              <line x1="12" y1="3" x2="12" y2="15"></line>
-            </svg>
+          <p class="dropzone-text"><strong>Arrastra procedimientos aquí</strong></p>
+          <p class="dropzone-subtext">.md o .txt · o haz clic para elegir</p>
+          <div id="ingesta-progreso" class="ingesta-progreso" hidden>
+            <div class="ingesta-barra"><div id="dropzone-progress"></div></div>
+            <p id="ingesta-estado" class="ingesta-estado" aria-live="polite"></p>
           </div>
-          <p class="dropzone-text"><strong>Arrastra manuales o planos</strong></p>
-          <p class="dropzone-subtext">PDF, Markdown o haz clic para explorar</p>
         </div>
-        <div id="dropzone-progress" class="dropzone-progress-bar"></div>
-      </div>
 
-      <!-- Documents Catalog List -->
-      <div class="sources-list-container">
-        <div class="sources-list-header">
-          <span>Documentos Ingestados (Arrow 01)</span>
-          <button id="btn-refresh-sources" class="btn-icon" title="Recargar catálogo">↻</button>
+        <div class="seccion-titulo">
+          <span>Catálogo del centro</span>
+          <button id="btn-refresh-sources" class="btn btn-icono" title="Recargar catálogo">↻</button>
         </div>
-        <ul id="sources-list" class="sources-list">
-          <!-- Injected dynamically via app.js -->
-        </ul>
-      </div>
+        <ul id="sources-list" class="sources-list scroll-fino"></ul>
 
-      <!-- Bottom Panel Status -->
-      <div class="panel-footer-status">
-        <div class="status-indicator">
-          <span class="status-dot online"></span>
-          <span>LanceDB & FastEmbed Online</span>
+        <details id="actividad" class="actividad">
+          <summary>Actividad <span id="actividad-contador" class="chip">0</span></summary>
+          <ol id="actividad-lista" class="actividad-lista scroll-fino"></ol>
+        </details>
+
+        <div class="panel-footer-status">
+          <span id="estado-dot" class="status-dot"></span>
+          <span id="estado-texto">Sin centro activo</span>
         </div>
       </div>
     </section>
 
-    <!-- PANEL 2: CHAT CON GROUNDING Y OBSERVABILIDAD DE TOOLS (Center Panel) -->
-    <section class="panel panel-chat">
+    <div class="separador" data-separador="fuentes" role="separator" aria-orientation="vertical" aria-label="Redimensionar fuentes" tabindex="0"></div>
+
+    <!-- PANEL 2: Chat -->
+    <section class="panel panel-chat" aria-label="Chat">
       <div class="panel-header chat-header">
         <div class="chat-agent-info">
-          <div class="agent-avatar">
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <circle cx="12" cy="12" r="10"></circle>
-              <path d="M12 16v-4"></path>
-              <path d="M12 8h.01"></path>
-            </svg>
-          </div>
-          <div>
-            <h2 class="panel-title">Asistente Técnico Lakehouse</h2>
-            <p class="chat-subtitle">Respuestas fundamentadas con citas rigurosas y llamadas a tools</p>
-          </div>
+          <h2 class="panel-title">Asistente técnico</h2>
+          <p class="chat-subtitle">Respuestas con citas verificables y tools del Lakehouse</p>
         </div>
-
-        <!-- Model selector pill -->
-        <div class="model-selector-pill">
-          <span class="model-label">Modelo:</span>
-          <!-- Opciones cargadas dinámicamente desde Claude Code headless (listar_modelos_claude) -->
-          <select id="select-modelo" class="model-dropdown" disabled>
+        <div class="model-selector">
+          <label class="pill-label" for="select-modelo">Modelo</label>
+          <select id="select-modelo" class="select-compacto" disabled>
             <option value="" selected>Cargando modelos…</option>
           </select>
         </div>
       </div>
 
-      <!-- Messages Thread Scroll Area -->
-      <div id="chat-messages" class="chat-messages">
-        <!-- Welcome Message -->
-        <div class="message message-assistant">
-          <div class="message-bubble">
-            <div class="message-meta">
-              <span class="sender-name">Asistente Lakehouse</span>
-              <span class="timestamp">Ahora</span>
-            </div>
-            <div class="message-text">
-              Bienvenido al sistema <strong>Lakehouse RAG Industrial</strong>. Las especificaciones y tablas de <strong>Planta Alfa</strong> están cargadas y listas para consulta determinista.<br><br>
-              Puedes hacerme preguntas operativas como:<br>
-              • <em>"¿Cuál es la temperatura máxima en fase de Recepción?"</em><br>
-              • <em>"¿Qué electrodo se especifica para soldar 15 mm en acero inoxidable?"</em><br>
-              • <em>"¿La norma DOC-NORM-001 sigue vigente o fue derogada?"</em>
+      <div id="chat-messages" class="chat-messages scroll-fino">
+        <div id="chat-columna" class="chat-columna">
+          <div id="chat-vacio" class="chat-vacio">
+            <h3>Pregunta sobre los procedimientos del centro activo</h3>
+            <p>Cada respuesta muestra las tools usadas, las fuentes (documento, revisión y apartado) y las notas al pie o condiciones que aplican.</p>
+            <div class="ejemplos">
+              <button class="ejemplo" type="button">¿Quién es el responsable de la custodia y qué registro llena?</button>
+              <button class="ejemplo" type="button">En la Tabla 4-A, ¿qué temperatura corresponde a e = 30 mm y CE = 0,42?</button>
+              <button class="ejemplo" type="button">¿Qué controles debemos hacer en la recepción del material?</button>
             </div>
           </div>
         </div>
       </div>
+      <button id="btn-ir-final" class="btn-ir-final" hidden title="Ir al final">↓</button>
 
-      <!-- Prompt Input Bar (Linear Pill Style) -->
       <div class="chat-input-wrapper">
         <form id="chat-form" class="chat-form">
-          <div class="chat-input-container">
-            <input 
-              type="text" 
-              id="chat-input" 
-              class="chat-input" 
-              placeholder="Haz una consulta técnica o normativa sobre el centro activo..." 
-              autocomplete="off"
-            />
-            <button type="submit" id="btn-send" class="btn-send" title="Enviar consulta">
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                <line x1="22" y1="2" x2="11" y2="13"></line>
-                <polygon points="22 2 15 22 11 13 2 9 22 2"></polygon>
-              </svg>
-            </button>
-          </div>
+          <textarea id="chat-input" class="chat-input" rows="1" placeholder="Pregunta sobre el centro activo…" autocomplete="off"></textarea>
+          <button type="submit" id="btn-send" class="btn-send" title="Enviar (Intro)">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="22" y1="2" x2="11" y2="13"></line><polygon points="22 2 15 22 11 13 2 9 22 2"></polygon></svg>
+          </button>
         </form>
+        <p class="chat-ayuda">Intro para enviar · Mayús+Intro para nueva línea</p>
       </div>
     </section>
 
-    <!-- PANEL 3: STUDIO & LAKEHOUSE EXPLORER (Right Panel) -->
-    <section class="panel panel-studio">
-      <div class="panel-header">
-        <div class="panel-title-wrapper">
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect>
-            <line x1="3" y1="9" x2="21" y2="9"></line>
-            <line x1="9" y1="21" x2="9" y2="9"></line>
-          </svg>
-          <h2 class="panel-title">Lakehouse Studio</h2>
+    <div class="separador" data-separador="studio" role="separator" aria-orientation="vertical" aria-label="Redimensionar Studio" tabindex="0"></div>
+
+    <!-- PANEL 3: Studio -->
+    <section id="panel-studio" class="panel panel-studio" aria-label="Lakehouse Studio">
+      <button class="riel" data-desplegar="studio" title="Mostrar Studio">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"></rect><line x1="3" y1="9" x2="21" y2="9"></line><line x1="9" y1="21" x2="9" y2="9"></line></svg>
+        <span>Studio</span>
+      </button>
+      <div class="panel-contenido">
+        <div class="panel-header">
+          <button class="btn btn-icono" data-plegar="studio" title="Ocultar panel">⟩</button>
+          <h2 class="panel-title">Studio</h2>
         </div>
-        <span class="badge-tag">Apache Arrow</span>
-      </div>
-
-      <!-- Tabs for Lakehouse Explorer -->
-      <div class="studio-tabs">
-        <button class="tab-btn active" data-tab="tab-schemas">Tablas (01-06)</button>
-        <button class="tab-btn" data-tab="tab-matrices">Matriz & Celdas</button>
-        <button class="tab-btn" data-tab="tab-graph">Grafo Normativo</button>
-      </div>
-
-      <!-- Tab 1: 6 Arrow Schemas Overview -->
-      <div id="tab-schemas" class="tab-content active">
-        <div class="explorer-card">
-          <div class="explorer-card-title">
-            <span>01_doc_catalog</span>
-            <span class="chip-badge success">Arrow RecordBatch</span>
+        <div class="studio-tabs" role="tablist">
+          <button class="tab-btn active" data-tab="tab-fuentes" role="tab">Fuentes</button>
+          <button class="tab-btn" data-tab="tab-tabla" role="tab">Matriz · Tabla</button>
+          <button class="tab-btn" data-tab="tab-grafo" role="tab">Grafo</button>
+          <button class="tab-btn" data-tab="tab-tools" role="tab">Tools</button>
+          <button class="tab-btn" data-tab="tab-centro" role="tab">Centro</button>
+        </div>
+        <div class="studio-cuerpo scroll-fino">
+          <div id="tab-fuentes" class="tab-content active">
+            <p class="vacio">Las fuentes de la última respuesta aparecen aquí. Pulsa una fuente del chat para ver sus apartados.</p>
           </div>
-          <p class="explorer-desc">Metadatos, versiones SHA-256 y control transaccional de vigencia.</p>
-        </div>
-
-        <div class="explorer-card">
-          <div class="explorer-card-title">
-            <span>03_operational_matrix</span>
-            <span class="chip-badge cyan">DataFusion SQL</span>
+          <div id="tab-tabla" class="tab-content">
+            <p class="vacio">Filas de la matriz operativa o celda resuelta de una tabla de doble entrada.</p>
           </div>
-          <p class="explorer-desc">Parámetros técnicos, tolerancias numéricas y condiciones por fase.</p>
-        </div>
-
-        <div class="explorer-card">
-          <div class="explorer-card-title">
-            <span>04_double_entry_tables & 05_cells</span>
-            <span class="chip-badge purple">Rango Continuo</span>
+          <div id="tab-grafo" class="tab-content">
+            <p class="vacio">Recorrido del grafo normativo cuando el agente lo consulta.</p>
           </div>
-          <p class="explorer-desc">Cruce bidireccional determinista con interpolación y notas al pie.</p>
-        </div>
-
-        <div class="explorer-card">
-          <div class="explorer-card-title">
-            <span>06_reference_graph</span>
-            <span class="chip-badge warning">Petgraph DiGraph</span>
+          <div id="tab-tools" class="tab-content">
+            <p class="vacio">Pulsa una tool del chat para ver sus parámetros y su resultado completo.</p>
           </div>
-          <p class="explorer-desc">Precedencia jurídica, derogaciones sucesivas y detección de ciclos.</p>
-        </div>
-      </div>
-
-      <!-- Tab 2: Live Table Lookup Inspector -->
-      <div id="tab-matrices" class="tab-content">
-        <div class="inspector-section">
-          <h3 class="inspector-title">Resolución de Tabla de Doble Entrada</h3>
-          <div id="matrix-inspector-result" class="inspector-card">
-            <p class="empty-state-text">Ejecuta una consulta en el chat para inspeccionar la celda resuelta en tiempo real.</p>
-          </div>
-        </div>
-      </div>
-
-      <!-- Tab 3: Normative Graph Viewer -->
-      <div id="tab-graph" class="tab-content">
-        <div class="inspector-section">
-          <h3 class="inspector-title">Linaje y Prevalencia Jurídica</h3>
-          <div id="graph-inspector-result" class="inspector-card">
-            <div class="graph-node-chain">
-              <div class="graph-node deprecated">DOC-NORM-2015 <span class="node-tag">Derogada</span></div>
-              <div class="graph-arrow">↓ deroga</div>
-              <div class="graph-node deprecated">DOC-NORM-2020 <span class="node-tag">Derogada</span></div>
-              <div class="graph-arrow">↓ deroga</div>
-              <div class="graph-node active">DOC-NORM-2026 <span class="node-tag">PREVALENTE</span></div>
-            </div>
+          <div id="tab-centro" class="tab-content">
+            <p class="vacio">Selecciona o crea un centro.</p>
           </div>
         </div>
       </div>
     </section>
   </main>
+
+  <div id="toasts" class="toasts" aria-live="polite"></div>
+
+  <!-- Alta de centro -->
+  <dialog id="dialogo-centro" class="dialogo">
+    <form id="form-centro" method="dialog">
+      <h3>Nuevo centro de conocimiento</h3>
+      <label>Identificador <input id="centro-id" required pattern="[A-Za-z0-9_-]+" placeholder="obra-planta-solar-01" autocomplete="off"></label>
+      <label>Nombre <input id="centro-nombre" placeholder="Planta Solar" autocomplete="off"></label>
+      <label>Carpeta (vacía o inexistente)
+        <span class="fila-ruta"><input id="centro-ruta" required placeholder="Elige una carpeta" autocomplete="off"><button type="button" id="btn-elegir-carpeta" class="btn btn-sutil">Elegir…</button></span>
+      </label>
+      <p id="centro-error" class="form-error"></p>
+      <div class="form-acciones">
+        <button type="button" id="btn-cancelar-centro" class="btn btn-sutil">Cancelar</button>
+        <button type="submit" class="btn btn-primario">Crear y activar</button>
+      </div>
+    </form>
+  </dialog>
+
+  <!-- Confirmación -->
+  <dialog id="dialogo-confirmar" class="dialogo">
+    <form method="dialog">
+      <h3 id="confirmar-titulo">¿Confirmar?</h3>
+      <p id="confirmar-texto"></p>
+      <div class="form-acciones">
+        <button value="no" class="btn btn-sutil">Cancelar</button>
+        <button value="si" class="btn btn-peligro">Confirmar</button>
+      </div>
+    </form>
+  </dialog>
 
   <script src="app.js"></script>
 </body>

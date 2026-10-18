@@ -101,18 +101,43 @@ pub struct DocumentoOriginal {
     pub ruta_copia: PathBuf,
 }
 
+/// Extensiones que la ingesta acepta (el parser es de Markdown; PDF/DOCX quedan fuera, plan §4)
+pub const EXTENSIONES_INGERIBLES: [&str; 3] = ["md", "markdown", "txt"];
+
 /// Valida léxicamente la ruta de un centro: no vacía, sin componentes `..` y sin `\0`
 pub fn validar_ruta_centro(ruta: &str) -> Result<PathBuf, DomainError> {
+    validar_ruta_lexica(ruta, "del centro")
+}
+
+/// Valida la ruta de un documento a ingerir: las reglas de `validar_ruta_centro` más una
+/// extensión de texto admitida (`EXTENSIONES_INGERIBLES`)
+pub fn validar_ruta_documento(ruta: &str) -> Result<PathBuf, DomainError> {
+    let camino = validar_ruta_lexica(ruta, "del documento")?;
+    let extension = camino
+        .extension()
+        .map(|e| e.to_string_lossy().to_lowercase())
+        .unwrap_or_default();
+    if !EXTENSIONES_INGERIBLES.contains(&extension.as_str()) {
+        return Err(DomainError::ValidationError(format!(
+            "Extensión no soportada en '{}': solo se ingieren {} (convierte antes los PDF a Markdown)",
+            camino.display(),
+            EXTENSIONES_INGERIBLES.map(|e| format!(".{e}")).join(", ")
+        )));
+    }
+    Ok(camino)
+}
+
+fn validar_ruta_lexica(ruta: &str, sujeto: &str) -> Result<PathBuf, DomainError> {
     let limpia = ruta.trim();
     if limpia.is_empty() {
-        return Err(DomainError::ValidationError(
-            "La ruta del centro no puede estar vacía".to_string(),
-        ));
+        return Err(DomainError::ValidationError(format!(
+            "La ruta {sujeto} no puede estar vacía"
+        )));
     }
     if limpia.contains('\0') {
-        return Err(DomainError::ValidationError(
-            "La ruta del centro contiene un carácter nulo".to_string(),
-        ));
+        return Err(DomainError::ValidationError(format!(
+            "La ruta {sujeto} contiene un carácter nulo"
+        )));
     }
     let camino = Path::new(limpia);
     if camino
@@ -120,7 +145,7 @@ pub fn validar_ruta_centro(ruta: &str) -> Result<PathBuf, DomainError> {
         .any(|c| matches!(c, Component::ParentDir))
     {
         return Err(DomainError::ValidationError(format!(
-            "La ruta del centro '{limpia}' contiene '..': indica una ruta directa, sin saltos al directorio padre"
+            "La ruta {sujeto} '{limpia}' contiene '..': indica una ruta directa, sin saltos al directorio padre"
         )));
     }
     Ok(camino.to_path_buf())
@@ -168,5 +193,28 @@ mod tests {
         }
         assert!(validar_ruta_centro("D:/datos/obra_a").is_ok());
         assert!(validar_ruta_centro("relativa/obra..a").is_ok());
+    }
+
+    #[test]
+    fn test_ruta_de_documento_exige_extension_de_texto_y_sin_saltos() {
+        for ruta in [
+            "../fuera.md",
+            "docs/../../secreto.md",
+            "",
+            "plano.pdf",
+            "imagen.png",
+            "sin_extension",
+            "doc.md\0.exe",
+        ] {
+            assert!(validar_ruta_documento(ruta).is_err(), "{ruta:?}");
+        }
+        for ruta in [
+            "D:/obra/rev03.md",
+            "notas.TXT",
+            "manual.markdown",
+            "..rev 03.md",
+        ] {
+            assert!(validar_ruta_documento(ruta).is_ok(), "{ruta:?}");
+        }
     }
 }

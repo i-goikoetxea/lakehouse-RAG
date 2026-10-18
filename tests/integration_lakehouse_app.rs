@@ -1,5 +1,5 @@
-//! Integración de la Fase 12: centros en disco, proyección LanceDB → DataFusion/Petgraph/
-//! TableLookup y fachada `LakehouseApp` (destilador y agente simulados; disco real).
+//! Integración de la Fase 12: centros en disco, proyección LanceDB → DataFusion y fachada
+//! `LakehouseApp` (destilador y agente simulados; disco real).
 
 mod comun_centros;
 mod comun_store_v2;
@@ -465,7 +465,12 @@ async fn test_autoderogacion_de_la_rev04_no_impide_reconstruir_las_vistas() {
     let r4 = app.ingestar(&ruta_v4, CENTRO).await.unwrap();
     assert!(r4.aviso_proyeccion.is_none(), "{:?}", r4.aviso_proyeccion);
     let proyeccion = r4.proyeccion.expect("vistas reconstruidas");
-    assert!(proyeccion.aristas_grafo >= 2, "{proyeccion:?}");
+    let vista_grafo = proyeccion
+        .vistas
+        .iter()
+        .find(|v| v.tabla == "06_grafo_referencias")
+        .expect("vista del grafo proyectada");
+    assert!(vista_grafo.filas_vigentes >= 2, "{proyeccion:?}");
     let deroga = sql(
         &herramientas,
         CENTRO,
@@ -475,6 +480,6 @@ async fn test_autoderogacion_de_la_rev04_no_impide_reconstruir_las_vistas() {
     assert_eq!(
         escalar(&deroga),
         1,
-        "la arista sigue en DataFusion aunque el grafo la omita"
+        "la arista de autoderogación sigue en DataFusion"
     );
 }

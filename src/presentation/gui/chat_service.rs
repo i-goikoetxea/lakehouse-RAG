@@ -14,6 +14,10 @@ use crate::application::ports::model_catalog::ModelCatalogPort;
 use crate::application::use_cases::agent_orchestrator::{AgentOrchestrator, EventCallback};
 use crate::application::use_cases::lakehouse_app::{AsistenteDirecto, AsistenteLakehousePort};
 use crate::domain::models::center::CenterId;
+use crate::presentation::gui::markdown_seguro::markdown_a_html_seguro;
+use crate::presentation::gui::resultados_tools::{
+    agrupar_fuentes, extraer_citas, extraer_graph_result, extraer_matrix_result, resumen_tool,
+};
 use crate::presentation::gui::{ChatResponsePayload, ToolCardDto};
 
 type EventosRegistrados = Arc<StdMutex<Vec<(AgentExecutionEvent, Instant)>>>;
@@ -92,12 +96,15 @@ impl GuiChatService {
             Ok(respuesta) => {
                 Self::acotar_historial(historial);
                 let eventos = eventos.lock().map(|e| e.clone()).unwrap_or_default();
+                let tarjetas = Self::tarjetas_de_herramientas(&eventos);
+                let citations = extraer_citas(&tarjetas);
                 Ok(ChatResponsePayload {
                     reply_html: texto_a_html_seguro(&respuesta),
-                    tools_used: Self::tarjetas_de_herramientas(&eventos),
-                    citations: Vec::new(),
-                    matrix_result: None,
-                    graph_result: None,
+                    fuentes: agrupar_fuentes(&citations),
+                    citations,
+                    matrix_result: extraer_matrix_result(&tarjetas),
+                    graph_result: extraer_graph_result(&tarjetas),
+                    tools_used: tarjetas,
                 })
             }
             Err(e) => {
@@ -163,11 +170,13 @@ impl GuiChatService {
                         }
                         None => (serde_json::Value::Null, *instante),
                     };
+                    let status = if *is_error { "error" } else { "ok" };
                     tarjetas.push(ToolCardDto {
                         name: name.clone(),
                         args,
+                        resumen: resumen_tool(name, result, status),
                         result: result.clone(),
-                        status: if *is_error { "error" } else { "ok" }.to_string(),
+                        status: status.to_string(),
                         duration: format!("{}ms", instante.duration_since(inicio).as_millis()),
                     });
                 }
@@ -178,22 +187,10 @@ impl GuiChatService {
     }
 }
 
-/// Escapa HTML y convierte saltos de línea en `<br>` para inyectar en `innerHTML`
+/// HTML seguro de la respuesta del modelo: Markdown real con todo el HTML crudo escapado
+/// (ver `markdown_seguro`)
 pub fn texto_a_html_seguro(texto: &str) -> String {
-    let mut html = String::with_capacity(texto.len());
-    for c in texto.chars() {
-        match c {
-            '&' => html.push_str("&amp;"),
-            '<' => html.push_str("&lt;"),
-            '>' => html.push_str("&gt;"),
-            '"' => html.push_str("&quot;"),
-            '\'' => html.push_str("&#39;"),
-            '\n' => html.push_str("<br>"),
-            '\r' => {}
-            otro => html.push(otro),
-        }
-    }
-    html
+    markdown_a_html_seguro(texto)
 }
 
 #[cfg(test)]
@@ -201,10 +198,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_texto_a_html_seguro_escapa_metacaracteres() {
+    fn test_html_del_modelo_se_escapa_y_el_markdown_se_pinta() {
+        let html = texto_a_html_seguro("**Jefe** firma `FOR-ALM-05` <img src=x onerror=alert(1)>");
         assert_eq!(
-            texto_a_html_seguro("<b onclick='x'>\"a\" & b</b>\r\nfin"),
-            "&lt;b onclick=&#39;x&#39;&gt;&quot;a&quot; &amp; b&lt;/b&gt;<br>fin"
+            html,
+            "<p><strong>Jefe</strong> firma <code>FOR-ALM-05</code> &lt;img src=x onerror=alert(1)&gt;</p>\n"
         );
     }
 }

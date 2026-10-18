@@ -76,7 +76,7 @@ async fn test_respuesta_con_html_malicioso_se_escapa() {
 
     assert!(!respuesta.reply_html.contains("<img"));
     assert!(respuesta.reply_html.contains("&lt;img"));
-    assert!(respuesta.reply_html.contains("<br>"));
+    assert!(respuesta.reply_html.contains("<br />"));
     assert!(respuesta.reply_html.contains("&amp; fin"));
 }
 

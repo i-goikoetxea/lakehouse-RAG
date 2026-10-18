@@ -3,7 +3,7 @@
 //!
 //! Invariantes:
 //! * Un centro solo se abre si su `center_manifest.json` coincide con el modelo de embeddings.
-//! * Las vistas (DataFusion, Petgraph, TableLookup) se reconstruyen al activar y tras cada
+//! * Las vistas DataFusion (y el índice semántico) se reconstruyen al activar y tras cada
 //!   ingesta confirmada; al desactivar se retiran (cero acceso).
 //! * Solo se pregunta sobre centros registrados y activos.
 
@@ -18,8 +18,9 @@ use crate::application::dtos::agent::{
     AgentExecutionEvent, AgentMessage, ClaudeModel, ModelDescriptor,
 };
 use crate::application::dtos::centros::{
-    ManifiestoCentroDisco, ModeloEmbeddingsActivo, validar_ruta_centro,
+    ManifiestoCentroDisco, ModeloEmbeddingsActivo, validar_ruta_centro, validar_ruta_documento,
 };
+use crate::application::dtos::ingestion::{EtapaIngesta, ObservadorIngesta};
 use crate::application::ports::agent_runner::AgentRunnerPort;
 use crate::application::ports::center_registry::CenterRegistryPort;
 use crate::application::ports::center_workspace::{CenterWorkspacePort, CentroAbierto};
@@ -133,6 +134,8 @@ pub struct LakehouseApp {
     abiertos: Mutex<HashMap<CenterId, CentroAbierto>>,
     /// Serializa las operaciones que cambian el registro o las vistas
     cambios: Mutex<()>,
+    /// Una ingesta cada vez: dos ingestas simultáneas (dos drops en la ventana) se encolan
+    ingestas: Mutex<()>,
 }
 
 impl LakehouseApp {
@@ -152,6 +155,7 @@ impl LakehouseApp {
             orquestador,
             abiertos: Mutex::new(HashMap::new()),
             cambios: Mutex::new(()),
+            ingestas: Mutex::new(()),
         }
     }
 
@@ -318,11 +322,25 @@ impl LakehouseApp {
         ruta_archivo: &Path,
         centro_id: &str,
     ) -> Result<ResultadoIngesta, DomainError> {
+        self.ingestar_con_progreso(ruta_archivo, centro_id, None)
+            .await
+    }
+
+    /// `ingestar` notificando cada etapa (`EtapaIngesta`) al observador
+    pub async fn ingestar_con_progreso(
+        &self,
+        ruta_archivo: &Path,
+        centro_id: &str,
+        observador: Option<ObservadorIngesta>,
+    ) -> Result<ResultadoIngesta, DomainError> {
+        let ruta_archivo = validar_ruta_documento(&ruta_archivo.to_string_lossy())?;
+        let _turno = self.ingestas.lock().await;
         let centro = self.centro_registrado(centro_id).await?;
         let abierto = self.abrir(&centro).await?;
+        notificar(&observador, EtapaIngesta::Copia);
         let original = self
             .espacio
-            .guardar_original(&abierto.ruta, ruta_archivo)
+            .guardar_original(&abierto.ruta, &ruta_archivo)
             .await?;
 
         let servicio = DocumentIngestionService::new(
@@ -330,13 +348,15 @@ impl LakehouseApp {
             Arc::clone(&self.destilador),
             Arc::clone(&self.embeddings),
             Arc::clone(&abierto.store),
-        );
+        )
+        .con_observador(observador.clone());
         let informe = servicio
             .ingestar_documento(centro.id(), &original.nombre_archivo, &original.contenido)
             .await?;
 
         let (proyeccion, aviso_proyeccion) = if centro.esta_activo() && !informe.ya_ingerido {
             let _guardia = self.cambios.lock().await;
+            notificar(&observador, EtapaIngesta::Proyeccion);
             match self.proyeccion.reconstruir_vistas(&abierto).await {
                 Ok(resumen) => (Some(resumen), None),
                 Err(e) => (
@@ -440,6 +460,12 @@ impl LakehouseApp {
             informe,
             tablas_ausentes,
         })
+    }
+}
+
+fn notificar(observador: &Option<ObservadorIngesta>, etapa: EtapaIngesta) {
+    if let Some(observador) = observador {
+        observador(etapa);
     }
 }
 

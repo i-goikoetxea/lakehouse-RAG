@@ -608,7 +608,7 @@ fn fila_tabla(clave: &ClaveDocumental, tabla_id: &str, tabla: &TablaDestilada) -
     let eje_y = eje_tabla(&tabla.eje_y, &tabla.celdas, |c| &c.eje_y);
     let valor_salida_nombre = texto_opcional(&tabla.valor_salida_nombre)
         .unwrap_or_else(|| VALOR_SALIDA_POR_DEFECTO.to_string());
-    let titulo = texto_opcional(&tabla.titulo).unwrap_or_else(|| tabla.tabla_id.trim().to_string());
+    let titulo = titulo_con_etiqueta(&tabla.tabla_id, texto_opcional(&tabla.titulo));
     FilaTabla {
         tabla_id: tabla_id.to_string(),
         clave: clave.clone(),
@@ -692,6 +692,28 @@ fn resolver_origen(
         Some(hito) => (hito.hito_id.clone(), TipoNodoGrafo::HitoOperativo),
         None => (clave.doc_id.to_string(), TipoNodoGrafo::Documento),
     }
+}
+
+/// Título que conserva la etiqueta humana del documento («Tabla 4-A»): el `tabla_id` real es
+/// versionado y sin ella el agente no podría pedir la tabla por su código a la primera
+fn titulo_con_etiqueta(etiqueta_original: &str, titulo: Option<String>) -> String {
+    let etiqueta = etiqueta_canonica(etiqueta_original);
+    let rotulo = format!("Tabla {etiqueta}");
+    match titulo {
+        _ if etiqueta.is_empty() => titulo.unwrap_or_default(),
+        Some(titulo) if contiene_etiqueta(&codigo_canonico(&titulo), &etiqueta) => titulo,
+        Some(titulo) => format!("{rotulo} — {titulo}"),
+        None => rotulo,
+    }
+}
+
+/// `etiqueta` aparece como segmento completo del código (`4-A` en `TABLA-4-A-X`, no en `14-A`)
+fn contiene_etiqueta(codigo: &str, etiqueta: &str) -> bool {
+    codigo.match_indices(etiqueta).any(|(inicio, _)| {
+        let fin = inicio + etiqueta.len();
+        (inicio == 0 || codigo[..inicio].ends_with('-'))
+            && (fin == codigo.len() || codigo[fin..].starts_with('-'))
+    })
 }
 
 /// Etiqueta canónica de una tabla sin el prefijo «Tabla» (`Tabla 4-A` → `4-A`)
@@ -1119,6 +1141,28 @@ mod tests {
             vec![tabla.tabla_id.clone()]
         );
         assert!(revision.chunks[0].tablas_vinculadas.is_empty());
+    }
+
+    #[test]
+    fn test_titulo_de_tabla_conserva_la_etiqueta_original_del_documento() {
+        let revision = mapear_revision(&clave(), &documento(), &paquete(), "hash").unwrap();
+        assert_eq!(
+            revision.tablas[0].titulo_tabla, "Tabla 4-A — Temperatura mínima de precalentamiento",
+            "el código humano «4-A» debe sobrevivir al id versionado"
+        );
+
+        let mut con_etiqueta = paquete();
+        con_etiqueta.tablas[0].titulo = "Tabla 4-A Temperatura".to_string();
+        let revision = mapear_revision(&clave(), &documento(), &con_etiqueta, "hash").unwrap();
+        assert_eq!(
+            revision.tablas[0].titulo_tabla, "Tabla 4-A Temperatura",
+            "si el título ya lleva la etiqueta no se duplica"
+        );
+
+        let mut sin_titulo = paquete();
+        sin_titulo.tablas[0].titulo = "  ".to_string();
+        let revision = mapear_revision(&clave(), &documento(), &sin_titulo, "hash").unwrap();
+        assert_eq!(revision.tablas[0].titulo_tabla, "Tabla 4-A");
     }
 
     #[test]

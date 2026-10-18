@@ -65,8 +65,6 @@ pub fn proyeccion_json(resumen: &ResumenProyeccion) -> Value {
             "filas": v.filas,
             "filas_vigentes": v.filas_vigentes,
         })).collect::<Vec<_>>(),
-        "aristas_grafo": resumen.aristas_grafo,
-        "celdas_lookup": resumen.celdas_lookup,
     })
 }
 
@@ -81,10 +79,6 @@ pub fn proyeccion_legible(resumen: &ResumenProyeccion) -> String {
             vista.vista, vista.filas, vista.filas_vigentes
         ));
     }
-    lineas.push(format!(
-        "  Petgraph: {} aristas vigentes · TableLookup: {} celdas vigentes",
-        resumen.aristas_grafo, resumen.celdas_lookup
-    ));
     lineas.join("\n")
 }
 
