@@ -481,27 +481,76 @@
     }
   }
 
-  // 13. Chat
+  // 13. Chat: streaming por evento `chat-stream`, Markdown renderizado en Rust a intervalos,
+  // pregunta anclada arriba y scroll pegado al final solo si el usuario no se ha alejado.
+  const UMBRAL_PEGADO_PX = 24;
+  const INTERVALO_RENDER_MS = 120;
+  let pegadoAlFinal = true;
+  let turnoActivo = null;
+  let contadorTurnos = 0;
+  let espaciador = null;
+
   function ajustarAlturaEntrada() {
     chatInput.style.height = 'auto';
-    chatInput.style.height = `${Math.min(chatInput.scrollHeight, 160)}px`;
+    chatInput.style.height = `${chatInput.scrollHeight}px`; // el tope (25vh) y el scroll interno van en CSS
   }
   chatInput.addEventListener('input', ajustarAlturaEntrada);
   chatInput.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); chatForm.requestSubmit(); }
+    if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); if (!turnoActivo) chatForm.requestSubmit(); }
   });
   document.querySelectorAll('.ejemplo').forEach((b) => b.addEventListener('click', () => {
     chatInput.value = b.textContent; ajustarAlturaEntrada(); chatInput.focus();
   }));
 
-  function cercaDelFinal() { return chatMessages.scrollHeight - chatMessages.scrollTop - chatMessages.clientHeight < 80; }
-  function irAlFinal() { chatMessages.scrollTop = chatMessages.scrollHeight; }
-  function irA(nodo) { chatMessages.scrollTop = Math.max(0, nodo.offsetTop - chatColumna.offsetTop - 8); }
-  chatMessages.addEventListener('scroll', () => { btnIrFinal.hidden = cercaDelFinal(); });
+  function distanciaAlFinal() { return chatMessages.scrollHeight - chatMessages.scrollTop - chatMessages.clientHeight; }
+  function irAlFinal() {
+    chatMessages.scrollTop = chatMessages.scrollHeight;
+    pegadoAlFinal = true;
+    btnIrFinal.hidden = true;
+  }
+  chatMessages.addEventListener('scroll', () => {
+    pegadoAlFinal = distanciaAlFinal() <= UMBRAL_PEGADO_PX;
+    btnIrFinal.hidden = pegadoAlFinal;
+  });
   btnIrFinal.addEventListener('click', irAlFinal);
+
+  // El espaciador final deja la última pregunta arriba mientras la respuesta crece debajo
+  function anclarPregunta(pregunta) {
+    if (espaciador) espaciador.remove();
+    espaciador = el('div', 'espaciador-ancla');
+    chatColumna.appendChild(espaciador);
+    ajustarEspaciador(pregunta);
+    irAlFinal();
+  }
+  function ajustarEspaciador(pregunta) {
+    if (!espaciador || !pregunta) return;
+    // La parte superior del espaciador no depende de su altura: se mide sin colapsarlo
+    const disponible = chatMessages.clientHeight - 40;
+    const ocupado = espaciador.getBoundingClientRect().top - pregunta.getBoundingClientRect().top;
+    espaciador.style.height = `${Math.max(0, disponible - ocupado)}px`;
+  }
+  function seguirAlFinal(turno) {
+    ajustarEspaciador(turno.pregunta);
+    if (pegadoAlFinal) irAlFinal();
+  }
+
+  function modoDetener(activo) {
+    btnSend.classList.toggle('detener', activo);
+    btnSend.title = activo ? 'Detener la respuesta' : 'Enviar (Intro)';
+    btnSend.setAttribute('aria-label', activo ? 'Detener' : 'Enviar');
+  }
+
+  async function detenerTurno() {
+    if (!turnoActivo) return;
+    turnoActivo.detenido = true;
+    try { await invoke('detener_respuesta', { turnoId: turnoActivo.id }); } catch (err) {
+      registrar(`No se pudo detener la respuesta: ${mensajeError(err)}`, 'error');
+    }
+  }
 
   chatForm.addEventListener('submit', async (e) => {
     e.preventDefault();
+    if (turnoActivo) { await detenerTurno(); return; }
     const consulta = chatInput.value.trim();
     if (!consulta || consultaEnCurso) return;
     const centro = centroSeleccionado();
@@ -510,54 +559,129 @@
     chatInput.value = '';
     ajustarAlturaEntrada();
     chatVacio.hidden = true;
-    chatColumna.appendChild(el('div', 'mensaje-usuario', consulta));
-    await consultarAgente(consulta, centro.id, selectModelo.value, etiquetaModelo());
+    const pregunta = el('div', 'mensaje-usuario', consulta);
+    chatColumna.appendChild(pregunta);
+    await consultarAgente(consulta, centro.id, selectModelo.value, etiquetaModelo(), pregunta);
   });
 
-  function cabecera(modelo) {
-    const meta = el('div', 'mensaje-meta');
-    meta.appendChild(el('span', 'remitente', 'Asistente'));
-    meta.appendChild(el('span', 'chip', modelo));
-    meta.appendChild(el('span', 'espaciador'));
-    meta.appendChild(el('time', null, hora()));
-    return meta;
-  }
+  function segundosDesde(inicio) { return Math.round((Date.now() - inicio) / 1000); }
 
-  async function consultarAgente(consulta, centroId, modelo, etiqueta) {
-    consultaEnCurso = true;
-    btnSend.disabled = true;
-    pestanaElegidaPorUsuario = false;
-    const mensaje = el('div', 'mensaje-asistente');
-    mensaje.appendChild(cabecera(etiqueta));
-    const cargando = el('div', 'cargando');
-    cargando.appendChild(el('span', 'pulso'));
-    const texto = el('span', null, `Consultando el Lakehouse con ${etiqueta}…`);
-    cargando.appendChild(texto);
-    mensaje.appendChild(cargando);
-    chatColumna.appendChild(mensaje);
-    irAlFinal();
-    const inicio = Date.now();
-    const cronometro = setInterval(() => {
-      texto.textContent = `Consultando el Lakehouse con ${etiqueta}… ${Math.round((Date.now() - inicio) / 1000)} s`;
-    }, 1000);
-    try {
-      const respuesta = await invoke('enviar_mensaje_chat', { mensaje: consulta, centroId, modelo });
-      cargando.remove();
-      pintarRespuesta(mensaje, respuesta, Math.round((Date.now() - inicio) / 1000));
-      irA(mensaje);
-    } catch (err) {
-      cargando.remove();
-      mensaje.appendChild(el('div', 'error-consulta', `No se pudo responder: ${mensajeError(err)}`));
-      irAlFinal();
-    } finally {
-      clearInterval(cronometro);
-      consultaEnCurso = false;
-      btnSend.disabled = false;
-      btnIrFinal.hidden = cercaDelFinal();
+  function actualizarTrabajando(turno) {
+    const pendiente = turno.lineas.find((l) => l.pendiente);
+    if (pendiente) {
+      turno.trabajando.hidden = false;
+      turno.trabajando.textContent = `Consultando ${pendiente.nombre}… ${segundosDesde(turno.inicio)} s`;
+    } else if (!turno.texto) {
+      turno.trabajando.hidden = false;
+      turno.trabajando.textContent = `Pensando con ${turno.etiqueta}… ${segundosDesde(turno.inicio)} s`;
+    } else {
+      turno.trabajando.hidden = true;
     }
   }
 
-  function pintarRespuesta(mensaje, data, segundos) {
+  function pintarHtmlSeguro(nodo, data) {
+    nodo.innerHTML = data.replyHtml; // único punto de HTML: saneado en Rust (markdown_seguro.rs)
+  }
+
+  function programarRender(turno) {
+    if (turno.temporizador) return;
+    const espera = Math.max(0, INTERVALO_RENDER_MS - (Date.now() - turno.ultimoRender));
+    turno.temporizador = setTimeout(async () => {
+      turno.temporizador = null;
+      turno.ultimoRender = Date.now();
+      try {
+        const html = await invoke('renderizar_markdown', { texto: turno.texto });
+        if (turnoActivo !== turno) return;
+        pintarHtmlSeguro(turno.respuesta, { replyHtml: html });
+        seguirAlFinal(turno);
+      } catch (_) { /* el render final llega con la respuesta completa */ }
+    }, espera);
+  }
+
+  function alEventoChat(evento) {
+    const datos = evento.payload || {};
+    const turno = turnoActivo;
+    if (!turno || datos.turnoId !== turno.id) return;
+    if (datos.tipo === 'texto') {
+      turno.texto += datos.texto;
+      programarRender(turno);
+    } else if (datos.tipo === 'herramientaInicio') {
+      const boton = el('div', 'tool-linea en-curso');
+      boton.appendChild(el('span', 'estado', '●'));
+      boton.appendChild(el('span', 'nombre', datos.nombre));
+      turno.tools.appendChild(boton);
+      turno.lineas.push({ nombre: datos.nombre, nodo: boton, pendiente: true });
+    } else if (datos.tipo === 'herramientaFin') {
+      const linea = turno.lineas.find((l) => l.pendiente && l.nombre === datos.nombre);
+      if (linea) {
+        linea.pendiente = false;
+        linea.nodo.classList.remove('en-curso');
+        if (datos.esError) linea.nodo.classList.add('fallo');
+        linea.nodo.querySelector('.estado').textContent = datos.esError ? '⚠' : '✓';
+      }
+    }
+    actualizarTrabajando(turno);
+    seguirAlFinal(turno);
+  }
+
+  async function consultarAgente(consulta, centroId, modelo, etiqueta, pregunta) {
+    consultaEnCurso = true;
+    pestanaElegidaPorUsuario = false;
+    chatColumna.querySelectorAll('.mensaje-asistente.ultimo').forEach((m) => m.classList.remove('ultimo'));
+    const mensaje = el('div', 'mensaje-asistente ultimo');
+    const turno = {
+      id: `turno-${Date.now()}-${++contadorTurnos}`,
+      mensaje, pregunta, etiqueta,
+      tools: el('div', 'tools-usadas'),
+      trabajando: el('div', 'trabajando'),
+      respuesta: el('div', 'respuesta en-vivo'),
+      texto: '', lineas: [], inicio: Date.now(), ultimoRender: 0, temporizador: null, detenido: false,
+    };
+    mensaje.append(turno.tools, turno.trabajando, turno.respuesta);
+    chatColumna.appendChild(mensaje); // tras su pregunta; anclarPregunta recoloca el espaciador al final
+    anclarPregunta(pregunta);
+    turnoActivo = turno;
+    modoDetener(true);
+    actualizarTrabajando(turno);
+    const cronometro = setInterval(() => actualizarTrabajando(turno), 1000);
+    try {
+      const data = await invoke('enviar_mensaje_chat', { mensaje: consulta, centroId, modelo, turnoId: turno.id });
+      turnoActivo = null;
+      mensaje.replaceChildren();
+      pintarRespuesta(mensaje, data, segundosDesde(turno.inicio), etiqueta);
+    } catch (err) {
+      turnoActivo = null;
+      turno.trabajando.remove();
+      turno.respuesta.classList.remove('en-vivo');
+      if (!turno.texto) turno.respuesta.remove();
+      const texto = turno.detenido ? 'Respuesta detenida.' : `No se pudo responder: ${mensajeError(err)}`;
+      mensaje.appendChild(el('div', turno.detenido ? 'texto-sutil' : 'error-consulta', texto));
+    } finally {
+      clearInterval(cronometro);
+      clearTimeout(turno.temporizador);
+      consultaEnCurso = false;
+      modoDetener(false);
+      seguirAlFinal(turno);
+    }
+  }
+
+  function botonCopiar(obtenerTexto) {
+    const boton = el('button', 'btn-accion');
+    boton.type = 'button';
+    boton.title = 'Copiar';
+    boton.appendChild(el('span', 'copiar', '⧉ Copiar'));
+    boton.appendChild(el('span', 'ok', '✓ Copiado'));
+    boton.addEventListener('click', async () => {
+      try {
+        await navigator.clipboard.writeText(obtenerTexto());
+        boton.classList.add('copiado');
+        setTimeout(() => boton.classList.remove('copiado'), 1500);
+      } catch (_) { registrar('No se pudo copiar al portapapeles.', 'error'); }
+    });
+    return boton;
+  }
+
+  function pintarRespuesta(mensaje, data, segundos, etiqueta) {
     const tools = data.toolsUsed || [];
     if (tools.length) {
       const bloque = el('div', 'tools-usadas');
@@ -566,7 +690,7 @@
     }
 
     const respuesta = el('div', 'respuesta');
-    respuesta.innerHTML = data.replyHtml; // saneado en Rust (markdown_seguro.rs)
+    pintarHtmlSeguro(respuesta, data);
     mensaje.appendChild(respuesta);
 
     const notas = notasYCondiciones(data.citations || []);
@@ -593,13 +717,9 @@
     }
 
     const acciones = el('div', 'acciones-respuesta');
-    const copiar = el('button', 'btn btn-icono', 'Copiar');
-    copiar.addEventListener('click', async () => {
-      try { await navigator.clipboard.writeText(respuesta.innerText); copiar.textContent = 'Copiado'; } catch (_) { copiar.textContent = 'No se pudo copiar'; }
-      setTimeout(() => { copiar.textContent = 'Copiar'; }, 1500);
-    });
-    acciones.appendChild(copiar);
-    acciones.appendChild(el('span', 'texto-sutil', `${segundos} s`));
+    acciones.appendChild(botonCopiar(() => respuesta.innerText));
+    acciones.appendChild(el('span', 'chip', etiqueta));
+    acciones.appendChild(el('span', 'texto-sutil', `${segundos} s · ${hora()}`));
     mensaje.appendChild(acciones);
 
     actualizarStudio(data);
@@ -839,6 +959,7 @@
       return;
     }
     await listen('ingesta-progreso', alProgresoIngesta);
+    await listen('chat-stream', alEventoChat);
     await listen('documentos-soltados', (evento) => { dropZone.classList.remove('drag-active'); encolarIngestas(evento.payload); });
     await listen('documentos-arrastre', (evento) => dropZone.classList.toggle('drag-active', evento.payload === 'entrar'));
     await Promise.all([cargarCentros(), cargarModelos()]);

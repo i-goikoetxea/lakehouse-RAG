@@ -4356,7 +4356,6 @@ dependencies = [
  "fastembed",
  "futures",
  "lancedb",
- "petgraph 0.7.1",
  "pulldown-cmark 0.12.2",
  "ratatui",
  "schemars 0.8.22",
@@ -6114,8 +6113,6 @@ checksum = "3672b37090dbd86368a4145bc067582552b29c27377cad4e0a306c97f9bd7772"
 dependencies = [
  "fixedbitset 0.5.7",
  "indexmap 2.14.2",
- "serde",
- "serde_derive",
 ]
 
 [[package]]

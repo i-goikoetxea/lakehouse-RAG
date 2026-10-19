@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::application::ports::embedding_engine::EmbeddingEnginePort;
+use crate::application::ports::semantic_index::IndiceSemanticoPort;
 use crate::application::use_cases::lakehouse_app::{DependenciasLakehouse, LakehouseApp};
 use crate::application::use_cases::lakehouse_tool_service::LakehouseToolService;
 use crate::infrastructure::embeddings::fastembed_engine::MODELO_POR_DEFECTO;
@@ -45,6 +46,8 @@ impl ConfiguracionComposicion {
 pub struct MotoresConsulta {
     pub proyeccion: Arc<LanceProjection>,
     pub herramientas: Arc<LakehouseToolService>,
+    /// Índice semántico que rellena la proyección (lectura para verificar la vista)
+    pub indice: Arc<dyn IndiceSemanticoPort>,
 }
 
 /// DataFusion y el índice semántico vacíos, enlazados con la
@@ -58,30 +61,47 @@ pub fn motores_consulta(embeddings: Arc<dyn EmbeddingEnginePort>) -> MotoresCons
         embeddings,
     ));
     MotoresConsulta {
-        proyeccion: Arc::new(LanceProjection::new(datafusion).con_indice_semantico(indice)),
+        proyeccion: Arc::new(LanceProjection::new(datafusion).con_indice_semantico(indice.clone())),
         herramientas,
+        indice,
     }
 }
 
-/// Composición real: registro JSON, centros en disco, LanceDB, FastEmbed diferido y Claude Code
-pub fn componer_lakehouse(config: &ConfiguracionComposicion) -> Arc<LakehouseApp> {
+/// Adaptadores reales de la composición, antes de construir la fachada. Las suites de
+/// aceptación sustituyen una sola pieza (p. ej. un almacén con fallo inyectado) y mantienen
+/// el resto idéntico a la GUI.
+pub struct ComposicionReal {
+    pub dependencias: DependenciasLakehouse,
+    pub indice: Arc<dyn IndiceSemanticoPort>,
+}
+
+/// Registro JSON, centros en disco, LanceDB, FastEmbed diferido y Claude Code
+pub fn composicion_real(config: &ConfiguracionComposicion) -> ComposicionReal {
     let embeddings = Arc::new(LazyFastEmbedEngine::new(
         MODELO_POR_DEFECTO,
         config.directorio_cache_embeddings.clone(),
     ));
     let motores = motores_consulta(embeddings.clone());
-    Arc::new(LakehouseApp::new(DependenciasLakehouse {
-        registro: Arc::new(JsonCenterRegistry::new(&config.directorio_config)),
-        espacio: Arc::new(DiskCenterWorkspace::new()),
-        proyeccion: motores.proyeccion,
-        parser: Arc::new(MarkdownParser::new()),
-        destilador: Arc::new(ClaudeHeadlessDistiller::new(ClaudeHeadlessConfig::default())),
-        modelo_embeddings: embeddings.modelo_activo(),
-        embeddings,
-        agente: Arc::new(ClaudeAgentRunner::new(ClaudeAgentConfig::default())),
-        herramientas: motores.herramientas,
-        catalogo_modelos: Arc::new(ClaudeHeadlessModelCatalog::new(
-            ClaudeModelCatalogConfig::default(),
-        )),
-    }))
+    ComposicionReal {
+        dependencias: DependenciasLakehouse {
+            registro: Arc::new(JsonCenterRegistry::new(&config.directorio_config)),
+            espacio: Arc::new(DiskCenterWorkspace::new()),
+            proyeccion: motores.proyeccion,
+            parser: Arc::new(MarkdownParser::new()),
+            destilador: Arc::new(ClaudeHeadlessDistiller::new(ClaudeHeadlessConfig::default())),
+            modelo_embeddings: embeddings.modelo_activo(),
+            embeddings,
+            agente: Arc::new(ClaudeAgentRunner::new(ClaudeAgentConfig::default())),
+            herramientas: motores.herramientas,
+            catalogo_modelos: Arc::new(ClaudeHeadlessModelCatalog::new(
+                ClaudeModelCatalogConfig::default(),
+            )),
+        },
+        indice: motores.indice,
+    }
+}
+
+/// Composición real que usan la GUI, el MCP y la CLI
+pub fn componer_lakehouse(config: &ConfiguracionComposicion) -> Arc<LakehouseApp> {
+    Arc::new(LakehouseApp::new(composicion_real(config).dependencias))
 }

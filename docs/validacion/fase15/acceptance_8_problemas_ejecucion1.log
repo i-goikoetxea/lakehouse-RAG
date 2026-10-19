@@ -1,0 +1,373 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.88s
+     Running tests\acceptance_8_problemas.rs (target\debug\deps\acceptance_8_problemas-4bc2c70a3457f0ba.exe)
+
+running 10 tests
+test p1_anti_fusion_la_custodia_solo_devuelve_su_responsable_y_registro ... 
+=== Preparación: centros A (real), HUB (sintético) y B (inactivo) ===
+  ingesta procedimiento_recepcion_rev03.md → PO-ALM-03 v3 [47.0 s] chunks 9 · hitos 3 · tablas 1 · celdas 9 · aristas 10 · deroga []
+  ingesta procedimiento_recepcion_rev04.md → PO-ALM-03 v4 [43.5 s] chunks 9 · hitos 3 · tablas 1 · celdas 9 · aristas 11 · deroga [3]
+  ingesta pliego_cliente_pcc01.md → PCC-01 v1 [11.8 s] chunks 3 · hitos 0 · tablas 0 · celdas 0 · aristas 0 · deroga []
+  ingesta norma_soldeo_nt_sol_01.md → NT-SOL-01 v2 [20.8 s] chunks 5 · hitos 3 · tablas 0 · celdas 0 · aristas 0 · deroga []
+  ingesta sintetico_norma_hub.md → NORMA-HUB v1 [3.7 s] chunks 2 · hitos 0 · tablas 0 · celdas 0 · aristas 1000 · deroga []
+  ingesta sintetico_po_sint_01.md → PO-SINT-01 v1 [0.6 s] chunks 2 · hitos 0 · tablas 0 · celdas 0 · aristas 3 · deroga []
+  ingesta sintetico_obra_b.md → PO-OBRA-B-01 v1 [0.7 s] chunks 1 · hitos 1 · tablas 0 · celdas 0 · aristas 1 · deroga []
+=== Preparación completa en 128.3 s ===
+  03 vigente PO-ALM-03: [{"fase_operativa":"CUSTODIA","registro_codigo":"FOR-ALM-05","rol_ejecutor":"Auxiliar de Almacén","rol_responsable":"Jefe de Producción"},{"fase_operativa":"INSPECCION","registro_codigo":"PPI-MAT-09","rol_ejecutor":"Técnico de Calidad","rol_responsable":"Inspector QA/QC"},{"fase_operativa":"RECEPCION","registro_codigo":"FOR-ALM-01","rol_ejecutor":"Almacenero","rol_responsable":"Jefe de Almacén"}]
+
+  [sonnet, 21.0 s] P: ¿Quién es el responsable de la custodia y qué registro llena?
+  R: ## Fase CUSTODIA: responsable y registro
+
+Según el hito `PO-ALM-03@v4-HIT-0001` (fila única devuelta para la fase CUSTODIA):
+
+| Campo | Valor |
+|---|---|
+| **Responsable** | Jefe de Producción |
+| **Ejecutor** | Auxiliar de Almacén |
+| **Registro asociado** | **FOR-ALM-05**, Registro de Custodia, Preservación y Trazabilidad |
+
+**Condición de aplicación:** solo cuando el acopio supera 7 días naturales.
+
+**Criterio de aceptación:** tubería almacenada sobre durmientes a más de 15 cm del suelo, extremos protegidos con tapones y revisión semanal de corrosión.
+
+**Objeto/alcance:** tubería de acero al carbono almacenada.
+
+**Nota sobre la lectura:** la matriz asocia el registro FOR-ALM-05 al hito de custodia, con el Jefe de Producción como responsable y el Auxiliar de Almacén como ejecutor. No distingue qué rol llena materialmente el formato y cuál lo firma. Por eso no puedo atribuir el llenado a uno de los dos roles con la información devuelta.
+
+**Cita:**
+- Documento: **PO-ALM-03**, **Rev. 04** (versión 4), nivel de prelación 2 (procedimiento de obra).
+- Apartado: *PO-ALM-03 Procedimiento de Recepción, Custodia e Inspección de Tubería de Acero al Carbono > 2. Secuencia Operativa > 2.2 Fas…
+    tool query_operational_matrix [ok] args={"centro_id":"obra-aceptacion-a","fase":"CUSTODIA"} → {"centro_id":"obra-aceptacion-a","fecha_referencia":null,"filas":[{"calidad_extraccion":"OK","cita":{"breadcrumb":"PO-ALM-03 Procedimiento de Recepción, Custodia e Inspección de Tubería de Acero al Carbono > 2. Secuencia Operativa > 2.2 Fase 2 — CUSTODIA","chu…
+
+RESULTADO P1 anti-fusión: OK en 21.0 s
+ok
+test p2_tabla_cruce_exacto_con_nota_y_fronteras ...   e = 20 → "50" · e = 20,0001 → "125 (*)"
+
+  [sonnet, 22.1 s] P: Según la Tabla 4-A, ¿cuál es la temperatura mínima de precalentamiento para un espesor de 30 mm y un carbono equivalente de 0,42 %?
+  R: ## Temperatura mínima de precalentamiento
+
+**Resultado: 125 °C (\*)**: Requiere aprobación previa del Inspector QA/QC y ensayo de dureza HV10 sobre probeta.
+
+### Datos de entrada y celda resuelta
+| Parámetro | Valor consultado | Rango de la celda |
+|---|---|---|
+| Espesor nominal (mm) | 30 | 20 < x ≤ 40 |
+| Carbono equivalente (%) | 0,42 | 0,40 ≤ y ≤ 0,45 |
+
+La consulta se resolvió con un cruce exacto, sin interpolación, y devolvió una única celda.
+
+### Condiciones de aplicación
+- La nota al pie (\*) es **obligatoria** para este valor. Antes de aplicar los 125 °C debe contarse con la aprobación previa del Inspector QA/QC y con el ensayo de dureza HV10 sobre probeta.
+- La herramienta no devolvió una `condicion_aplicacion` adicional para esta celda, así que no puedo confirmar otras restricciones de alcance del apartado. Si lo necesita, puedo consultar el contexto normativo de la Tabla 4-A en el PO-ALM-03.
+
+### Fuente
+- **Documento:** PO-ALM-03, Rev. 04 (versión 4)
+- **Tabla:** Tabla 4-A — Temperatura mínima de precalentamiento (°C) (`PO-ALM-03@v4-TAB-0000`)
+- **Celda:** `PO-ALM-03@v4-CEL-0004`
+- **Prelación:** nivel 2 (procedimiento de obra)
+    tool lookup_double_entry_table [ok] args={"centro_id":"obra-aceptacion-a","tabla_id":"4-A","valor_x":30,"valor_y":0.42} → {"aviso_nota":null,"centro_id":"obra-aceptacion-a","cita":{"celda_id":"PO-ALM-03@v4-CEL-0004","doc_id":"PO-ALM-03","revision":"Rev. 04","tabla_id":"PO-ALM-03@v4-TAB-0000","version_num":4},"eje_z":null,"entrada":{"eje_z":null,"valor_x":30.0,"valor_y":0.42},"est…
+
+  [sonnet, 30.4 s] P: En la Tabla 4-A, ¿qué temperatura mínima de precalentamiento corresponde a un espesor de exactamente 20 mm con CE = 0,42 %?
+  R: **Temperatura mínima de precalentamiento: 50 °C**
+
+| Parámetro | Valor |
+|---|---|
+| Tabla | Tabla 4-A: Temperatura mínima de precalentamiento (°C) |
+| Espesor nominal (eje X) | 20 mm, celda con rango `x <= 20` (el límite de 20 mm queda incluido) |
+| Carbono equivalente (eje Y) | 0,42 %, celda con rango `0,4 <= y <= 0,45` |
+| Resultado | **50 °C** (`temperatura_precalentamiento_min_c`) |
+
+**Cita:** PO-ALM-03, Rev. 04 (vigente desde 2026-09-15), `tabla_id` PO-ALM-03@v4-TAB-0000, celda PO-ALM-03@v4-CEL-0003.
+
+**Prelación:** nivel 2 (procedimiento de obra). La consulta devolvió una única celda candidata, por lo que no hay conflicto entre documentos.
+
+**Nota al pie y condición de aplicación:** la celda no trae `nota_pie_condicion` (`nota_obligatoria: false`), así que no hay ninguna advertencia que acompañe al valor. La consulta tampoco devolvió una `condicion_aplicacion` asociada. Si necesita confirmar si el apartado de la Tabla 4-A impone alguna condición de uso, puedo consultar el texto normativo del documento.
+    tool inspect_lakehouse_catalog [ok] args={"centro_id":"obra-aceptacion-a"} → {"centro_id":"obra-aceptacion-a","documentos":[{"doc_id":"PCC-01","fecha_vigor":"2026-01-10","nivel_prelacion":1,"revision":"Rev. 01","tipo_documento":"ESPECIFICACION_CLIENTE","titulo":"Pliego de Condiciones del Cliente — Planta Solar 01","version_num":1,"vige…
+    tool lookup_double_entry_table [ok] args={"centro_id":"obra-aceptacion-a","tabla_id":"PO-ALM-03@v4-TAB-0000","valor_x":20,"valor_y":0.42} → {"aviso_nota":null,"centro_id":"obra-aceptacion-a","cita":{"celda_id":"PO-ALM-03@v4-CEL-0003","doc_id":"PO-ALM-03","revision":"Rev. 04","tabla_id":"PO-ALM-03@v4-TAB-0000","version_num":4},"eje_z":null,"entrada":{"eje_z":null,"valor_x":20.0,"valor_y":0.42},"est…
+
+RESULTADO P2 tabla: OK en 52.6 s
+ok
+test p3_versiones_vigente_125_a_fecha_100_y_cero_aristas_v3 ...   01 PO-ALM-03: [{"derogacion":"2026-09-15","version_num":3,"vigente":false,"vigor":"2026-03-01"},{"version_num":4,"vigente":true,"vigor":"2026-09-15"}]
+
+  [sonnet, 35.5 s] P: ¿Cuál es hoy la temperatura mínima de precalentamiento de la Tabla 4-A para 30 mm y CE 0,42 %, y cuál era el 1 de junio de 2026, antes de que entrara en vigor la Rev. 04?
+  R: ## Temperatura mínima de precalentamiento, Tabla 4-A (30 mm, CE 0,42 %)
+
+| Fecha de consulta | Revisión aplicable | Vigencia de la revisión | Temperatura mínima |
+|---|---|---|---|
+| **Hoy (19/10/2026)** | PO-ALM-03, **Rev. 04** (celda `PO-ALM-03@v4-CEL-0004`) | En vigor desde el 15/09/2026 | **125 °C (\*)** |
+| **1 de junio de 2026** | PO-ALM-03, **Rev. 03** (celda `PO-ALM-03@v3-CEL-0004`) | Del 01/03/2026 al 15/09/2026 (fecha de derogación) | **100 °C (\*)** |
+
+La Rev. 04 eleva el mínimo en **25 °C** para esta combinación de espesor y carbono equivalente.
+
+### Celda aplicada
+- **Tabla:** «Tabla 4-A — Temperatura mínima de precalentamiento (°C)», salida `temperatura_precalentamiento_min_c`.
+- **Rango de espesor (eje X):** 20 < x ≤ 40 mm, con 30 mm dentro del rango.
+- **Rango de CE (eje Y):** 0,40 ≤ y ≤ 0,45 %, con 0,42 % dentro del rango.
+- **Prelación:** nivel 2 (procedimiento de obra), en ambas revisiones.
+
+### Nota al pie y condición de aplicación
+En ambas revisiones, el valor lleva esta nota literal:
+
+> (\*) «Requiere aprobación previa del Inspector QA/QC y ensayo de dureza HV10 sobre probeta.»
+
+Es una condición obligatoria. Ni 125 °C ni 100 °C son aplicables sin esa aprobació…
+    tool inspect_lakehouse_catalog [ok] args={"centro_id":"obra-aceptacion-a"} → {"centro_id":"obra-aceptacion-a","documentos":[{"doc_id":"PCC-01","fecha_vigor":"2026-01-10","nivel_prelacion":1,"revision":"Rev. 01","tipo_documento":"ESPECIFICACION_CLIENTE","titulo":"Pliego de Condiciones del Cliente — Planta Solar 01","version_num":1,"vige…
+    tool inspect_lakehouse_catalog [ok] args={"centro_id":"obra-aceptacion-a","fecha_referencia":"2026-06-01"} → {"centro_id":"obra-aceptacion-a","documentos":[{"doc_id":"PCC-01","fecha_vigor":"2026-01-10","nivel_prelacion":1,"revision":"Rev. 01","tipo_documento":"ESPECIFICACION_CLIENTE","titulo":"Pliego de Condiciones del Cliente — Planta Solar 01","version_num":1,"vige…
+    tool lookup_double_entry_table [ok] args={"centro_id":"obra-aceptacion-a","tabla_id":"PO-ALM-03@v4-TAB-0000","valor_x":30,"valor_y":0.42} → {"aviso_nota":null,"centro_id":"obra-aceptacion-a","cita":{"celda_id":"PO-ALM-03@v4-CEL-0004","doc_id":"PO-ALM-03","revision":"Rev. 04","tabla_id":"PO-ALM-03@v4-TAB-0000","version_num":4},"eje_z":null,"entrada":{"eje_z":null,"valor_x":30.0,"valor_y":0.42},"est…
+    tool lookup_double_entry_table [ok] args={"centro_id":"obra-aceptacion-a","fecha_referencia":"2026-06-01","tabla_id":"PO-ALM-03@v3-TAB-0000","valor_x":30,"valor_y":0.42} → {"aviso_nota":null,"centro_id":"obra-aceptacion-a","cita":{"celda_id":"PO-ALM-03@v3-CEL-0004","doc_id":"PO-ALM-03","revision":"Rev. 03","tabla_id":"PO-ALM-03@v3-TAB-0000","version_num":3},"eje_z":null,"entrada":{"eje_z":null,"valor_x":30.0,"valor_y":0.42},"est…
+
+RESULTADO P3 versiones: OK en 35.6 s
+ok
+test p4_supernodos_dos_saltos_acotados_con_hub_resumido ...   desde PO-SINT-01: 4 nodos, 3 aristas
+  desde NORMA-HUB: 18 nodos, 17 aristas
+
+  [sonnet, 23.7 s] P: Recorre el grafo normativo desde el procedimiento PO-SINT-01 hasta dos saltos: ¿con qué documentos y registros se relaciona?
+  R: ## Recorrido del grafo desde PO-SINT-01 (2 saltos, vigente)
+
+**Nodo origen:** PO-SINT-01, Rev. 01 (versión 1), nivel de prelación 2 (procedimiento de obra), grado 3.
+
+### Salto 1: relaciones directas
+
+| Origen | Relación | Destino | Arista (cita) |
+|---|---|---|---|
+| PO-SINT-01 | `SUBORDINADO_A_NORMA` | **NORMA-HUB** | PO-SINT-01 Rev. 01, `PO-SINT-01@v1-ARI-0000` |
+| PO-SINT-01 | `EXIGE_LLENAR_REGISTRO` | **FOR-SINT-01** | PO-SINT-01 Rev. 01, `PO-SINT-01@v1-ARI-0001` |
+| PO-SINT-01 | `SUBORDINADO_A_NORMA` | **PCC-SINT** | PO-SINT-01 Rev. 01, `PO-SINT-01@v1-ARI-0002` |
+
+### Resumen por tipo
+
+- **Registro exigido:** FOR-SINT-01. Es el único registro vinculado al procedimiento en este recorrido.
+- **Normas o documentos a los que está subordinado:**
+  - NORMA-HUB, nivel de prelación 5 (norma o formato).
+  - PCC-SINT. La herramienta no devuelve su nivel de prelación (`null`).
+
+### Segundo salto
+
+- **NORMA-HUB** tiene grado 1001, por lo que se devuelve como *hub resumido* y no se expande. Sus relaciones principales son 1000 aristas `REFERENCIA_A` y 1 arista `SUBORDINADO_A_NORMA`. Esta última corresponde a la relación con PO-SINT-01. Con este recorrido no puedo listar los documentos conc…
+    tool traverse_normative_graph [ok] args={"centro_id":"obra-aceptacion-hub","max_saltos":2,"nodo_origen":"PO-SINT-01"} → {"aristas":[{"cita":{"doc_id":"PO-SINT-01","edge_id":"PO-SINT-01@v1-ARI-0000","revision":"Rev. 01","version_num":1},"contexto":null,"destino":"NORMA-HUB","origen":"PO-SINT-01","tipo_relacion":"SUBORDINADO_A_NORMA"},{"cita":{"doc_id":"PO-SINT-01","edge_id":"PO-…
+
+RESULTADO P4 supernodos: OK en 23.7 s
+ok
+test p5_prelacion_el_pliego_prevalece_sobre_la_norma ... 
+  [sonnet, 22.3 s] P: ¿Qué porcentaje de las uniones soldadas a tope hay que ensayar con radiografía en esta obra?
+  R: ## Porcentaje de radiografía en uniones soldadas a tope
+
+**Se debe ensayar mediante radiografía el 100 % de las uniones soldadas a tope, sin excepción por diámetro ni por espesor.**
+
+### Norma que prevalece (nivel 1, especificación del cliente)
+- **Documento:** PCC-01, Pliego de Condiciones del Cliente — Planta Solar 01, **Rev. 01** (vigente desde 2026-01-10).
+- **Apartado:** PCC-01 > 5. Ensayos no destructivos de uniones soldadas.
+- **Texto:** «Se ensayará mediante radiografía el 100 % de las uniones soldadas a tope, sin excepción por diámetro ni por espesor.»
+- **Condición de aplicación:** la herramienta no devuelve ninguna (`condicion_aplicacion` nula). El requisito se aplica sin condicionantes.
+
+### Norma supletoria (nivel 5)
+- **Documento:** NT-SOL-01, Norma Técnica de Soldeo de Acero al Carbono, **Rev. 02**.
+- **Apartado:** NT-SOL-01 > 4. Ensayos no destructivos de uniones soldadas.
+- **Texto:** «Salvo que el contrato exija otra cosa, se ensayará mediante radiografía el 10 % de las uniones soldadas a tope.»
+- **Condición de aplicación:** «Salvo que el contrato exija otra cosa».
+
+### Conclusión
+Hay un conflicto de prelación entre ambos documentos. Prevalece el nivel menor, es …
+    tool search_normative_context [ok] args={"centro_id":"obra-aceptacion-a","consulta":"porcentaje de uniones soldadas a tope a ensayar con radiografía","top_k":8} → {"aviso":null,"centro_id":"obra-aceptacion-a","consulta":"porcentaje de uniones soldadas a tope a ensayar con radiografía","fecha_referencia":null,"grupos":[{"conflicto_prelacion":true,"resultados":[{"breadcrumb_jerarquia":"NT-SOL-01 Norma Técnica de Soldeo de…
+    tool inspect_lakehouse_catalog [ok] args={"centro_id":"obra-aceptacion-a"} → {"centro_id":"obra-aceptacion-a","documentos":[{"doc_id":"PCC-01","fecha_vigor":"2026-01-10","nivel_prelacion":1,"revision":"Rev. 01","tipo_documento":"ESPECIFICACION_CLIENTE","titulo":"Pliego de Condiciones del Cliente — Planta Solar 01","version_num":1,"vige…
+
+RESULTADO P5 prelación: OK en 22.6 s
+ok
+test p6_agregacion_exhaustiva_coincide_con_el_oraculo ... 
+  [sonnet, 24.6 s] P: Dame el listado exhaustivo de todos los registros que exige el procedimiento PO-ALM-03 vigente, con la fase y el responsable que firma cada uno.
+  R: ## Registros exigidos por PO-ALM-03 (vigente, revisión/versión 4)
+
+El procedimiento exige **3 registros**. La consulta devolvió 3 filas, sin truncamiento. Es un procedimiento de obra (prelación nivel 2).
+
+| Orden | Fase | Registro | Rol ejecutor | Rol responsable | Condición de aplicación | Origen |
+|---|---|---|---|---|---|---|
+| 1 | RECEPCION | **FOR-ALM-01**, Parte de Recepción de Materiales | Almacenero | Jefe de Almacén | No se indica condición | PO-ALM-03@v4-HIT-0000 (chunk PO-ALM-03@v4-CHK-0004) |
+| 2 | CUSTODIA | **FOR-ALM-05**, Registro de Custodia, Preservación y Trazabilidad | Auxiliar de Almacén | Jefe de Producción | **Solo cuando el acopio supera 7 días naturales** | PO-ALM-03@v4-HIT-0001 (chunk PO-ALM-03@v4-CHK-0005) |
+| 3 | INSPECCION | **PPI-MAT-09**, Protocolo de Inspección de Materiales | Técnico de Calidad | Inspector QA/QC | No se indica condición | PO-ALM-03@v4-HIT-0002 (chunk PO-ALM-03@v4-CHK-0006) |
+
+### Alcance por hito
+- **FOR-ALM-01:** lotes de tubería de acero al carbono (S275JR y S355J2) suministrados a obra.
+- **FOR-ALM-05:** tubería de acero al carbono almacenada.
+- **PPI-MAT-09:** tubería de acero al carbono recepcionada.
+
+### Observaciones
+- **Condi…
+    tool execute_athena_sql [ok] args={"centro_id":"obra-aceptacion-a","sql_query":"SELECT hito_id, doc_id, version_num, orden_secuencia, fase_operativa, objeto_alcance, rol_ejecutor, rol_responsable, registro_codigo, registro_nombre, condicion_aplicacion, nivel_prelacion, chunk_origen_id FROM \"03_matriz_operativa\" WHERE doc_id = 'PO-ALM-03' AND vigente = true AND registro_codigo IS NOT NULL ORDER BY orden_secuencia"} → {"centro_id":"obra-aceptacion-a","fecha_referencia":null,"filas":3,"limite_filas":1000,"query_ejecutada":"SELECT hito_id, doc_id, version_num, orden_secuencia, fase_operativa, objeto_alcance, rol_ejecutor, rol_responsable, registro_codigo, registro_nombre, con…
+
+  [sonnet, 27.3 s] P: ¿En qué procedimientos vigentes interviene el Jefe de Producción y qué formatos firma? Quiero la lista completa.
+  R: ## Intervención del Jefe de Producción en procedimientos vigentes
+
+La consulta sobre la matriz operativa (vigente = true) devuelve **un único hito** en el que interviene el Jefe de Producción, como responsable y no como ejecutor.
+
+| Campo | Valor |
+|---|---|
+| **Procedimiento** | PO-ALM-03, Rev. 04: *Procedimiento de Recepción, Custodia e Inspección de Tubería de Acero al Carbono* |
+| **Hito** | PO-ALM-03@v4-HIT-0001 (orden de secuencia 2) |
+| **Fase operativa** | CUSTODIA |
+| **Objeto / alcance** | Tubería de acero al carbono almacenada |
+| **Rol ejecutor** | Auxiliar de Almacén |
+| **Rol responsable** | Jefe de Producción |
+| **Registro** | **FOR-ALM-05**: Registro de Custodia, Preservación y Trazabilidad |
+| **Condición de aplicación** | Solo cuando el acopio supera 7 días naturales |
+| **Prelación** | Nivel 2 (procedimiento de obra) |
+
+### Resumen
+- **Procedimientos en los que interviene:** 1 (PO-ALM-03, Rev. 04).
+- **Formatos de los que es responsable:** 1 (FOR-ALM-05), solo si el acopio supera 7 días naturales.
+
+### Alcance de la respuesta
+- La consulta es exhaustiva sobre la matriz operativa vigente. Buscó el rol por coincidencia de texto (`jefe de producci…`) tanto en la co…
+    tool execute_athena_sql [ok] args={"centro_id":"obra-aceptacion-a","sql_query":"SELECT m.doc_id, d.titulo, d.revision, m.hito_id, m.orden_secuencia, m.fase_operativa, m.objeto_alcance, m.rol_ejecutor, m.rol_responsable, m.registro_codigo, m.registro_nombre, m.condicion_aplicacion, m.nivel_prelacion FROM \"03_matriz_operativa\" m LEFT JOIN \"01_documentos_catalogo\" d ON d.doc_id = m.doc_id AND d.version_num = m.version_num AND d.vigente = true WHERE m.vigente = true AND (LOWER(m.rol_ejecutor) LIKE '%jefe de producci%' OR LOWER(m.rol_responsable) LIKE '%jefe de producci%') ORDER BY m.doc_id, m.orden_secuencia"} → {"centro_id":"obra-aceptacion-a","fecha_referencia":null,"filas":1,"limite_filas":1000,"query_ejecutada":"SELECT m.doc_id, d.titulo, d.revision, m.hito_id, m.orden_secuencia, m.fase_operativa, m.objeto_alcance, m.rol_ejecutor, m.rol_responsable, m.registro_cod…
+  tools: ["execute_athena_sql"]
+
+RESULTADO P6 agregación: OK en 51.9 s
+ok
+test p7_condicion_heredada_80_grados_siempre_con_bajo_cero ... 
+  [sonnet, 23.6 s] P: Según la norma NT-SOL-01, ¿a qué temperatura hay que calentar la zona de soldadura antes de soldar y en qué situación se aplica?
+  R: ## Precalentamiento de la zona de soldadura según NT-SOL-01
+
+**Temperatura:** calentar la zona de soldadura a **80 °C como mínimo**, en una franja de **75 mm a cada lado de la junta**, **antes de cebar el arco**.
+
+**Situación de aplicación (condicion_aplicacion):** soldeo con temperatura ambiente bajo cero (< 0 °C).
+
+**Cita:**
+- Documento: NT-SOL-01, Rev. 02 (versión 2, vigente, nivel de prelación 5, norma).
+- Apartado: *6. Soldeo con temperatura ambiente bajo cero (< 0 °C) > 6.1 Precalentamiento adicional*.
+- Fuentes: fragmento NT-SOL-01@v2-CHK-0003 y el hito NT-SOL-01@v2-HIT-0001 (fase EJECUCION, zona de soldadura).
+
+**Observaciones:**
+- El resultado no trae `nota_pie_condicion`. No hay conflicto de prelación en este tema, por lo que el resultado prevalece sin documento supletorio.
+- En el extracto consultado de NT-SOL-01 este es el único requisito de precalentamiento. Se trata de un precalentamiento **adicional** y solo para temperatura ambiente bajo cero. La norma no establece aquí un valor para otras situaciones.
+- El hito asociado no especifica ejecutor, responsable ni registro.
+- Como requisito complementario, el apartado 6.2 (*Protección de la junta*) exige, con la misma co…
+    tool inspect_lakehouse_catalog [ok] args={"centro_id":"obra-aceptacion-a"} → {"centro_id":"obra-aceptacion-a","documentos":[{"doc_id":"PCC-01","fecha_vigor":"2026-01-10","nivel_prelacion":1,"revision":"Rev. 01","tipo_documento":"ESPECIFICACION_CLIENTE","titulo":"Pliego de Condiciones del Cliente — Planta Solar 01","version_num":1,"vige…
+    tool search_normative_context [ok] args={"centro_id":"obra-aceptacion-a","consulta":"temperatura de precalentamiento de la zona de soldadura antes de soldar","doc_id":"NT-SOL-01"} → {"aviso":null,"centro_id":"obra-aceptacion-a","consulta":"temperatura de precalentamiento de la zona de soldadura antes de soldar","fecha_referencia":null,"grupos":[{"conflicto_prelacion":false,"resultados":[{"breadcrumb_jerarquia":"NT-SOL-01 Norma Técnica de …
+
+  [sonnet, 33.6 s] P: ¿A cuántos grados hay que precalentar la zona de soldadura según la NT-SOL-01?
+  R: ## Temperatura de precalentamiento según NT-SOL-01
+
+**Valor: 80 °C como mínimo.** La norma exige calentar la zona de soldadura en una franja de 75 mm a cada lado de la junta, antes de cebar el arco.
+
+- **Condición de aplicación:** solo cuando se suelda con temperatura ambiente bajo cero (< 0 °C).
+- **Fuente:** NT-SOL-01, Rev. 02 (nivel de prelación 5, norma), apartado «6. Soldeo con temperatura ambiente bajo cero (< 0 °C) > 6.1 Precalentamiento adicional» (chunk `NT-SOL-01@v2-CHK-0003`, hito `NT-SOL-01@v2-HIT-0001`).
+- **Texto normativo:** «Calentar la zona de soldadura a 80 °C como mínimo, en una franja de 75 mm a cada lado de la junta, antes de cebar el arco.»
+- **Nota al pie:** el dato no trae `nota_pie_condicion`.
+- **Roles y registro:** el hito figura sin ejecutor, sin responsable y sin registro especificados.
+
+### Limitaciones
+
+1. **Alcance del valor.** NT-SOL-01 solo fija estos 80 °C como precalentamiento *adicional* para temperatura ambiente bajo cero. No devuelve una temperatura de precalentamiento general para otras condiciones, y no la infiero.
+2. **Otros documentos del centro.** El catálogo incluye PO-ALM-03, Rev. 04 (procedimiento de obra, nivel 2), con la *Tabla 4-A —…
+    tool inspect_lakehouse_catalog [ok] args={"centro_id":"obra-aceptacion-a"} → {"centro_id":"obra-aceptacion-a","documentos":[{"doc_id":"PCC-01","fecha_vigor":"2026-01-10","nivel_prelacion":1,"revision":"Rev. 01","tipo_documento":"ESPECIFICACION_CLIENTE","titulo":"Pliego de Condiciones del Cliente — Planta Solar 01","version_num":1,"vige…
+    tool search_normative_context [ok] args={"centro_id":"obra-aceptacion-a","consulta":"temperatura de precalentamiento zona de soldadura","doc_id":"NT-SOL-01"} → {"aviso":null,"centro_id":"obra-aceptacion-a","consulta":"temperatura de precalentamiento zona de soldadura","fecha_referencia":null,"grupos":[{"conflicto_prelacion":false,"resultados":[{"breadcrumb_jerarquia":"NT-SOL-01 Norma Técnica de Soldeo de Acero al Car…
+
+RESULTADO P7 condición heredada: OK en 57.3 s
+ok
+test p8_tri_store_fallo_inyectado_sin_residuos_y_vistas_coherentes ...   ingesta procedimiento_recepcion_rev03.md → PO-ALM-03 v3 [42.8 s] chunks 9 · hitos 3 · tablas 1 · celdas 9 · aristas 10 · deroga []
+  error esperado: Error de almacenamiento en Lakehouse: 'Fallo inyectado al escribir 05_celdas_doble_entrada'
+  01_documentos_catalogo: 1 → 1 filas físicas
+  02_chunks_normativa: 9 → 9 filas físicas
+  03_matriz_operativa: 3 → 3 filas físicas
+  04_catalogo_tablas: 1 → 1 filas físicas
+  05_celdas_doble_entrada: 9 → 9 filas físicas
+  06_grafo_referencias: 10 → 10 filas físicas
+  01_documentos_catalogo: LanceDB 1 (1 vigentes) · DataFusion 1 (1)
+  02_chunks_normativa: LanceDB 9 (9 vigentes) · DataFusion 9 (9)
+  03_matriz_operativa: LanceDB 3 (3 vigentes) · DataFusion 3 (3)
+  04_catalogo_tablas: LanceDB 1 (1 vigentes) · DataFusion 1 (1)
+  05_celdas_doble_entrada: LanceDB 9 (9 vigentes) · DataFusion 9 (9)
+  06_grafo_referencias: LanceDB 10 (10 vigentes) · DataFusion 10 (10)
+  índice semántico: 12 fragmentos · LanceDB 02+03: 12
+  grafo: 10 aristas vigentes en 06 · 10 en el recorrido · no recorridas []
+  ingesta procedimiento_recepcion_rev04.md → PO-ALM-03 v4 [41.3 s] chunks 9 · hitos 3 · tablas 1 · celdas 9 · aristas 11 · deroga [3]
+  01_documentos_catalogo: LanceDB 2 (1 vigentes) · DataFusion 2 (1)
+  02_chunks_normativa: LanceDB 18 (9 vigentes) · DataFusion 18 (9)
+  03_matriz_operativa: LanceDB 6 (3 vigentes) · DataFusion 6 (3)
+  04_catalogo_tablas: LanceDB 2 (1 vigentes) · DataFusion 2 (1)
+  05_celdas_doble_entrada: LanceDB 18 (9 vigentes) · DataFusion 18 (9)
+  06_grafo_referencias: LanceDB 21 (11 vigentes) · DataFusion 21 (11)
+  índice semántico: 24 fragmentos · LanceDB 02+03: 24
+  grafo: 11 aristas vigentes en 06 · 11 en el recorrido · no recorridas []
+
+RESULTADO P8 tri-store: OK en 125.4 s
+ok
+test s9_1_multicentro_solo_se_leen_los_datos_del_centro_activo ...   documentos visibles desde A: {"NT-SOL-01", "PCC-01", "PO-ALM-03"}
+  SQL de A sobre la vista de B → {"error":"Error en motor analítico o consulta: 'Error en motor analítico o consulta: 'Error de planificación SQL: Error during planning: table 'datafusion.public.obra-aceptacion-b_01_documentos_catalogo' not found' | SQL ejecutada: SELECT * FROM \"obra-aceptacion-b_01_documentos_catalogo\"'"}
+  tool sobre B inactivo → {"error":"Error de validación de entidad: 'El centro 'obra-aceptacion-b' no está activo o no tiene vistas proyectadas'"}
+
+  [sonnet, 20.7 s] P: Lista todos los documentos del catálogo de este centro con su revisión.
+  R: # Documentos vigentes del centro `obra-aceptacion-a`
+
+El catálogo devuelve **3 documentos**, todos vigentes a la fecha de consulta (2026-10-19), ordenados por nivel de prelación:
+
+| Nivel de prelación | doc_id | Revisión | Tipo de documento | Título | Fecha de vigor |
+|---|---|---|---|---|---|
+| 1 | **PCC-01** | Rev. 01 (v1) | Especificación del cliente | Pliego de Condiciones del Cliente — Planta Solar 01 | 2026-01-10 |
+| 2 | **PO-ALM-03** | Rev. 04 (v4) | Procedimiento de obra | Procedimiento de Recepción, Custodia e Inspección de Tubería de Acero al Carbono | 2026-09-15 |
+| 5 | **NT-SOL-01** | Rev. 02 (v2) | Norma internacional | Norma Técnica de Soldeo de Acero al Carbono (extracto sintético de validación) | 2025-05-01 |
+
+## Tabla de doble entrada registrada
+
+- **Tabla:** `PO-ALM-03@v4-TAB-0000`, «Tabla 4-A — Temperatura mínima de precalentamiento (°C)» (PO-ALM-03, Rev. 04, nivel 2).
+- **Ejes:** X = `espesor_nominal_mm` (rango numérico, mm); Y = `carbono_equivalente_pct` (rango numérico, %).
+- **Salida:** `temperatura_precalentamiento_min_c`.
+
+## Observaciones
+
+- Ante un conflicto normativo prevalece el documento de menor nivel: PCC-01 sobre PO-ALM-03, y este sobre NT-SOL-01, q…
+    tool inspect_lakehouse_catalog [ok] args={"centro_id":"obra-aceptacion-a"} → {"centro_id":"obra-aceptacion-a","documentos":[{"doc_id":"PCC-01","fecha_vigor":"2026-01-10","nivel_prelacion":1,"revision":"Rev. 01","tipo_documento":"ESPECIFICACION_CLIENTE","titulo":"Pliego de Condiciones del Cliente — Planta Solar 01","version_num":1,"vige…
+
+RESULTADO §9.1 multi-centro: OK en 20.7 s
+ok
+test s9_4_selector_de_modelos_en_caliente_con_tools_en_vivo ...   catálogo real de Claude Code: ["default", "opus", "fable", "sonnet", "haiku", "claude-haiku-4-5-20251001", "claude-sonnet-5", "claude-opus-5", "claude-fable-5", "claude-opus-4-8", "claude-opus-4-7", "claude-opus-4-6", "claude-sonnet-4-6"]
+
+  [haiku → --model haiku, 20.7 s] P: ¿Quién es el responsable de la custodia y qué registro llena?
+  subprocesos: ["haiku", "haiku"]
+  tools en vivo: ["query_operational_matrix"]
+  R: ## Responsable de custodia y registro
+
+En la fase **CUSTODIA** de la matriz operativa vigente del centro `obra-aceptacion-a`, existe un único hito:
+
+- **Responsable:** Jefe de Producción
+- **Ejecutor:** Auxiliar de Almacén
+- **Registro:** FOR-ALM-05, *Registro de Custodia, Preservación y Trazabilidad*
+- **Condición de aplicación:** solo cuando el acopio supera 7 días naturales
+- **Cita:** PO-ALM-03, Rev. 04 (versión 4), nivel de prelación 2 (procedimiento de obra). Breadcrumb: *2. Secuencia Operativa > 2.2 Fase 2 — CUSTODIA*. Chunk de origen: PO-ALM-03@v4-CHK-0005.
+- **Criterio de aceptación:*…
+
+  [sonnet → --model sonnet, 20.5 s] P: ¿Y quién firma la recepción y con qué registro?
+  subprocesos: ["sonnet", "sonnet"]
+  tools en vivo: ["query_operational_matrix"]
+  R: ## Responsable de la recepción y registro
+
+En la fase **RECEPCION** de la matriz operativa vigente del centro `obra-aceptacion-a` hay un único hito:
+
+- **Responsable:** Jefe de Almacén
+- **Ejecutor:** Almacenero
+- **Registro:** FOR-ALM-01, *Parte de Recepción de Materiales*
+- **Condición de aplicación:** no se indica ninguna (`condicion_aplicacion` vacía), por lo que el hito no está sujeto a una condición específica.
+- **Alcance:** lotes de tubería de acero al carbono (S275JR y S355J2) suministrados a obra.
+- **Criterio de aceptación:** el albarán coincide con el pedido y cada lote dispone de …
+
+  [opus → --model opus, 23.3 s] P: ¿Y la inspección? Responsable y registro.
+  subprocesos: ["opus", "opus"]
+  tools en vivo: ["query_operational_matrix"]
+  R: ## Responsable de la inspección y registro
+
+En la fase **INSPECCION** de la matriz operativa vigente del centro `obra-aceptacion-a` hay un único hito:
+
+- **Responsable:** Inspector QA/QC
+- **Ejecutor:** Técnico de Calidad
+- **Registro:** PPI-MAT-09, *Protocolo de Inspección de Materiales*
+- **Condición de aplicación:** el hito no tiene condición específica (`condicion_aplicacion` vacía).
+- **Alcance:** tubería de acero al carbono recepcionada.
+- **Criterio de aceptación:** inspección visual al 100 %, control dimensional por muestreo (1 de cada 10 tubos) y verificación de la trazabilidad de col…
+
+RESULTADO §9.4 selector de modelos: OK en 65.7 s
+ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 604.90s
+
+
+real	10m6.738s
+user	0m0.015s
+sys	0m0.031s

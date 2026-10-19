@@ -407,3 +407,41 @@ async fn test_ids_y_rutas_de_centro_hostiles_desde_la_ventana() {
         );
     }
 }
+
+/// Fase 15 (prueba guiada): toda la barra de título arrastra la ventana, no solo la marca
+#[test]
+fn test_toda_la_barra_de_titulo_es_zona_de_arrastre() {
+    let html = include_str!("../src/presentation/gui/web/index.html");
+    for contenedor in [
+        "class=\"titlebar\"",
+        "class=\"titlebar-brand\"",
+        "class=\"titlebar-centro\"",
+        "class=\"titlebar-actions\"",
+    ] {
+        let etiqueta = html
+            .lines()
+            .find(|l| l.contains(contenedor))
+            .unwrap_or_else(|| panic!("falta {contenedor}"));
+        assert!(
+            etiqueta.contains("data-tauri-drag-region"),
+            "{contenedor} no arrastra: {etiqueta}"
+        );
+    }
+}
+
+/// Fase 15 (prueba guiada): el icono de tema es monocromo (SVG con currentColor, sin emoji)
+#[test]
+fn test_el_icono_de_tema_es_monocromo_y_sin_emoji() {
+    let html = include_str!("../src/presentation/gui/web/index.html");
+    let inicio = html.find("id=\"btn-theme-toggle\"").expect("botón de tema");
+    let fin = inicio + html[inicio..].find("</button>").unwrap();
+    let boton = &html[inicio..fin];
+    assert!(
+        boton.contains("<svg") && boton.contains("currentColor"),
+        "{boton}"
+    );
+    assert!(
+        !boton.chars().any(|c| c as u32 >= 0x2600),
+        "el botón de tema contiene emoji: {boton}"
+    );
+}

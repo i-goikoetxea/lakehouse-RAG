@@ -21,6 +21,7 @@ use crate::application::dtos::ingestion::{
 use crate::application::ports::llm_distiller::LlmDistillerPort;
 use crate::domain::errors::DomainError;
 use crate::infrastructure::llm::ocultar_consola_en_windows;
+use crate::infrastructure::llm::sesion_claude::{MENSAJE_SESION_CLAUDE, es_fallo_de_sesion};
 
 /// Timeout por defecto de una destilación (O2: los documentos reales superan los 60 s)
 pub const TIMEOUT_DESTILACION_SEGUNDOS: u64 = 300;
@@ -169,6 +170,11 @@ impl ClaudeHeadlessDistiller {
             return deserializar_paquete(sobre, limpia);
         }
         if sobre.get("is_error").and_then(serde_json::Value::as_bool) == Some(true) {
+            if es_fallo_de_sesion(limpia) {
+                return Err(DomainError::LlmDistillationError(
+                    MENSAJE_SESION_CLAUDE.to_string(),
+                ));
+            }
             return Err(error_destilacion(
                 "Claude CLI devolvió is_error = true".to_string(),
                 limpia,
@@ -240,6 +246,11 @@ impl ClaudeHeadlessDistiller {
         let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
+            if es_fallo_de_sesion(&format!("{stdout}\n{stderr}")) {
+                return Err(DomainError::LlmDistillationError(
+                    MENSAJE_SESION_CLAUDE.to_string(),
+                ));
+            }
             return Err(DomainError::LlmDistillationError(format!(
                 "Claude Headless finalizó con código de error {}: {} {}",
                 output.status.code().unwrap_or(-1),

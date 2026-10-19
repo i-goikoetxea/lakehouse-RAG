@@ -5,6 +5,7 @@
 //! `LakehouseApp` (centros, ingesta, preguntas e integridad).
 
 pub mod ejecutor;
+pub mod proceso;
 pub mod salida;
 
 /// Subcomandos de consola sobre la composición única
@@ -133,7 +134,8 @@ impl ModoEjecucion {
 === Lakehouse RAG Industrial (SOTA 2026) ===
 
 USO:
-    lakehouse_rag.exe [OPCIONES]
+    lakehouse_rag.exe [OPCIONES]        Ventana (por defecto) o subcomandos
+    lakehouse_rag_cli.exe [OPCIONES]    Solo consola: PowerShell lo espera y $LASTEXITCODE es fiable
 
 OPCIONES:
     --mcp-server, -m    Inicia el servidor MCP en modo stdio (para Claude Desktop, Claude Code, Cursor, Gemini)

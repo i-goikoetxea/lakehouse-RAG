@@ -23,7 +23,7 @@
       <span class="brand-title" data-tauri-drag-region>Lakehouse RAG Industrial</span>
     </div>
 
-    <div class="titlebar-centro">
+    <div class="titlebar-centro" data-tauri-drag-region>
       <label class="pill-label" for="select-centro">Centro</label>
       <select id="select-centro" class="select-compacto" disabled>
         <option value="" selected>Cargando centros…</option>
@@ -36,10 +36,10 @@
       </button>
     </div>
 
-    <div class="titlebar-actions">
+    <div class="titlebar-actions" data-tauri-drag-region>
       <button id="btn-theme-toggle" class="btn btn-icono" title="Alternar tema claro / oscuro">
-        <span class="theme-icon-dark">🌙</span>
-        <span class="theme-icon-light">☀️</span>
+        <svg class="theme-icon-dark" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path></svg>
+        <svg class="theme-icon-light" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"></circle><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"></path></svg>
       </button>
       <div class="window-controls">
         <button id="btn-minimize" class="ctrl-btn" title="Minimizar">
@@ -108,12 +108,6 @@
           <h2 class="panel-title">Asistente técnico</h2>
           <p class="chat-subtitle">Respuestas con citas verificables y tools del Lakehouse</p>
         </div>
-        <div class="model-selector">
-          <label class="pill-label" for="select-modelo">Modelo</label>
-          <select id="select-modelo" class="select-compacto" disabled>
-            <option value="" selected>Cargando modelos…</option>
-          </select>
-        </div>
       </div>
 
       <div id="chat-messages" class="chat-messages scroll-fino">
@@ -129,16 +123,25 @@
           </div>
         </div>
       </div>
-      <button id="btn-ir-final" class="btn-ir-final" hidden title="Ir al final">↓</button>
-
       <div class="chat-input-wrapper">
+        <button id="btn-ir-final" class="btn-ir-final" type="button" hidden title="Ir al final" aria-label="Ir al final">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"></line><polyline points="19 12 12 19 5 12"></polyline></svg>
+        </button>
         <form id="chat-form" class="chat-form">
-          <textarea id="chat-input" class="chat-input" rows="1" placeholder="Pregunta sobre el centro activo…" autocomplete="off"></textarea>
-          <button type="submit" id="btn-send" class="btn-send" title="Enviar (Intro)">
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="22" y1="2" x2="11" y2="13"></line><polygon points="22 2 15 22 11 13 2 9 22 2"></polygon></svg>
-          </button>
+          <textarea id="chat-input" class="chat-input scroll-fino" rows="1" placeholder="Pregunta sobre el centro activo…" autocomplete="off"></textarea>
+          <div class="composer-pie">
+            <div class="model-selector" title="Modelo de Claude (se puede cambiar entre preguntas)">
+              <select id="select-modelo" class="select-compacto" disabled aria-label="Modelo">
+                <option value="" selected>Cargando modelos…</option>
+              </select>
+            </div>
+            <span class="chat-ayuda">Intro para enviar · Mayús+Intro, nueva línea</span>
+            <button type="submit" id="btn-send" class="btn-send" title="Enviar (Intro)" aria-label="Enviar">
+              <svg class="icono-enviar" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="19" x2="12" y2="5"></line><polyline points="5 12 12 5 19 12"></polyline></svg>
+              <svg class="icono-detener" width="12" height="12" viewBox="0 0 12 12"><rect width="12" height="12" rx="2" fill="currentColor"></rect></svg>
+            </button>
+          </div>
         </form>
-        <p class="chat-ayuda">Intro para enviar · Mayús+Intro para nueva línea</p>
       </div>
     </section>
 

@@ -23,7 +23,7 @@
 | **12** | Centros en disco y proyección LanceDB → DataFusion/Petgraph | Sesión 12 | `[COMPLETADO]` | 291 / 291 |
 | **13** | Tools v2: matriz exacta, lookup, SQL de solo lectura, grafo antisupernodos, `search_normative_context` | Sesión 13 | `[COMPLETADO]` | 322 / 322 |
 | **14** | Cableado de la app: `ingestar_documento`, gestión de centros, system prompt de prelación | Sesión 14 | `[COMPLETADO]` | 341 / 341 |
-| **15** | Aceptación: `tests/acceptance_8_problemas.rs` y prueba manual de la GUI | - | `[NO INICIADO]` | - |
+| **15** | Aceptación: `tests/acceptance_8_problemas.rs` y prueba manual de la GUI | Sesión 15 | `[COMPLETADO]` | 367 / 367 + 19 ignorados (aceptación real 30/30 en 3 ejecuciones) |
 
 
 
@@ -164,6 +164,18 @@
 - [x] Release: `cargo build --release`; `--centros` y `--ask` escriben en la consola padre; la GUI release no abre consolas al lanzar `claude`.
 - [x] Verificación real de la ventana con capturas en `docs/validacion/fase14/`.
 - [x] Suites `tests/integration_gui_v2.rs` (3) y `tests/adversarial_gui_v2_tests.rs` (8).
+
+### Fase 15: Aceptación final (plan v2 §1, §3.1; especificación §9)
+- [x] `tests/acceptance_8_problemas.rs`: un test por problema (P1–P8) más §9.1 (multi-centro) y §9.4 (selector de modelos en caliente), con Claude Code y FastEmbed reales sobre `bootstrap::composicion_real` (la misma composición que la GUI). **10/10 en 2 ejecuciones** (605 s y 609 s).
+- [x] `bootstrap::composicion_real` / `ComposicionReal` (los adaptadores reales antes de construir la fachada) y `MotoresConsulta.indice`.
+- [x] Mensaje accionable cuando Claude Code no tiene sesión o ha caducado (`infrastructure/llm/sesion_claude.rs`, en el agente y el destilador) + `tests/adversarial_sesion_claude_tests.rs` (un `claude` falso con la salida real).
+- [x] Binario de consola `lakehouse_rag_cli` (`src/bin/`) + `presentation/cli/proceso.rs` compartido + `tests/integration_cli_consola.rs`; `default-run = "lakehouse_rag"`.
+- [x] `petgraph` retirado de `Cargo.toml`.
+- [x] Botón «Eliminar centro» con confirmación: ya existía (Sesión 14b), así que se incluye en el checklist.
+- [x] Auditoría: `cargo build --release`, suite completa, clippy, fmt y todas las suites `#[ignore]` reales.
+- [x] Informe `docs/validacion/aceptacion_final.md` y logs en `docs/validacion/fase15/`.
+- [x] Prueba guiada de la ventana con el usuario (checklist §7 y demo `GUIA_DEMO.md`); aprobada el 2026-10-19.
+- [x] Chat en vivo (streaming `stream-json`, Detener, rediseño según la referencia REA). La aceptación real repetida con streaming da 10/10 (620 s).
 
 ---
 
@@ -809,4 +821,97 @@
 * **Pendiente para la Fase 15:**
   * Probar con el usuario el arrastre real desde el Explorador, el diálogo nativo y el redimensionado con ratón real. El redimensionado se verificó con eventos de puntero sintéticos.
   * Mensaje claro cuando la sesión de Claude Code ha caducado. Hoy se muestra el JSON del CLI; está propuesto, sin hacer.
+
+### Sesión 15 (2026-10-19) — Fase 15: Aceptación final
+* **Objetivo:** demostrar con evidencia real que la app controla los 8 problemas (plan v2 §1) y cumple §9 de la especificación; cerrar los pendientes de la Fase 14.
+* **Contratos nuevos o cambiados:**
+  * `infrastructure/bootstrap.rs`:
+    * `ComposicionReal { dependencias, indice }` y `composicion_real(config)`. `componer_lakehouse` delega en esta función.
+    * `MotoresConsulta` expone `indice`.
+  * `infrastructure/llm/sesion_claude.rs`: `es_fallo_de_sesion(salida)` y `MENSAJE_SESION_CLAUDE`.
+    * `ClaudeAgentRunner` lo aplica con código ≠ 0 y con un aviso breve con código 0.
+    * `ClaudeHeadlessDistiller` lo aplica con código ≠ 0 y con el sobre `is_error`.
+    * El catálogo de modelos no lo necesita: el CLI real lo sirve sin sesión, comprobado con un `CLAUDE_CONFIG_DIR` vacío.
+  * `presentation/cli/proceso.rs`: arranque compartido por `main.rs` y el nuevo binario `src/bin/lakehouse_rag_cli.rs`, que es de subsistema consola. Funciones: `ejecutar_comando`, `informar_error_argumentos`, `imprimir_mcp_info` y `servir_mcp`.
+  * `Cargo.toml`: `default-run = "lakehouse_rag"`; se retira `petgraph`.
+* **Decisiones:**
+  * **CLI:** un binario de consola aparte es lo más simple y robusto. PowerShell lo espera y `$LASTEXITCODE` es fiable, como se verificó en release: códigos 0, 1 y 2. `lakehouse_rag.exe` sigue siendo la ventana sin consola.
+  * **P4:** los documentos sintéticos se destilan con un paquete fijo (`DestiladorEnrutado` en el test). Extraer 1.000 aristas con Claude no es viable, y lo que se valida es el recorrido acotado. El resto de la tubería es real.
+  * **P8:** un decorador del almacén real falla en la tabla 05. Después se comprueba que las vistas DataFusion, el índice semántico y el grafo coinciden con LanceDB.
+  * **§9.4:** un decorador del agente real registra el modelo de cada subproceso. Los tres modelos se usan en la misma conversación.
+* **TDD:**
+  * En rojo antes de implementar se vieron los 3 tests de sesión: salían la salida cruda y el JSON del CLI.
+  * El binario de consola y la suite de aceptación fallaban por compilación.
+  * La suite de aceptación pasó a la primera.
+* **Tests añadidos (+8 que corren, +10 ignorados reales):**
+  * Unitarios de `sesion_claude` (3).
+  * `adversarial_sesion_claude_tests` (3).
+  * `integration_cli_consola` (2).
+  * `acceptance_8_problemas` (10, `#[ignore]`).
+* **Verificación:** `cargo test` 349 OK + 19 ignorados; `cargo clippy --all-targets -- -D warnings` sin avisos; `cargo fmt --check` OK; `cargo build --release` OK (79 s).
+* **Suites reales (`--ignored --test-threads=1`, binario debug, Claude Code 2.1.302, FastEmbed E5-large):**
+
+  | Suite | Resultado | Duración |
+  | --- | --- | ---: |
+  | `acceptance_8_problemas` (ejecución 1) | 10/10 OK | 605 s |
+  | `acceptance_8_problemas` (ejecución 2) | 10/10 OK | 609 s |
+  | `acceptance_e2e_etapa1_ingesta` | 3/3 OK | 122 s |
+  | `e2e_binario_fase12` | 2/2 OK | 186 s |
+  | `e2e_binario_fase13` | 1/1 OK | 272 s |
+  | `acceptance_gui_chat_claude_headless` | 1/1 OK | 19 s |
+  | `integration_claude_model_catalog` | 1/1 OK | 8 s |
+
+  No se ejecutó el generador `render_markdown_gui_tests::…banco_render` (`#[ignore]`): no es una suite, sino que regenera un HTML de revisión visual.
+* **Pendiente (requiere al usuario):**
+  * La prueba guiada de la ventana: checklist en `docs/validacion/aceptacion_final.md` §7, con arrastre real, diálogo nativo, redimensionado, centros, ingestas, preguntas del oráculo y cambio de modelo.
+  * Cuando el usuario la apruebe: commit `feat(phase-15): …`. El push solo con su aprobación explícita.
+* **Notas para la siguiente sesión:**
+  * Disco D: al 99 % (17 GB libres) y `target/` > 30 GB. Si hace falta espacio, borra `target/debug/incremental`.
+  * Los logs de la aceptación se regeneran en `target/aceptacion/`. Las copias de evidencia están en `docs/validacion/fase15/`.
+
+### Sesión 15b (2026-10-19) — Fase 15: prueba guiada, documentos de demostración y chat en vivo
+* **Origen:** comentarios del usuario en la prueba guiada:
+  * La barra de título solo se arrastraba por la izquierda.
+  * El icono del tema era de colores.
+  * Un id de centro repetido (ya existía `obra-prueba`): no era un fallo.
+  * Pidió documentos de demostración y un chat con streaming y un diseño de referencia (ChatGPT, analizado con REA).
+  * Aprobó (SÍ) el diseño de streaming.
+* **Arreglos de la ventana (TDD):**
+  * `data-tauri-drag-region` en toda la barra.
+  * Iconos de tema monocromos en SVG.
+  * Tests nuevos en `adversarial_gui_v2_tests` (2).
+* **Sesión caducada real:** el CLI devolvió «Failed to authenticate: OAuth session expired and could not be refreshed». El detector no la reconocía; se añade con su test, que primero falló.
+* **Documentos de demostración:** `docs/validacion/fase15/demo/`, con 4 documentos de hormigonado y `GUIA_DEMO.md` (8 preguntas con su respuesta esperada). Validados con la CLI real: 8/8 correctas, y la segunda subida de la Rev. 02 se detecta como «ya ingerido».
+* **Referencia de UX:** `docs/validacion/fase15/informe_chat_referencia.md` (REA sobre la app de escritorio de ChatGPT, que es Electron; capturas en `referencia_chat/`).
+* **Contratos nuevos (aprobados):**
+  * `AgentRunnerPort::ejecutar_turno_en_vivo(…, ObservadorTexto)`, con una implementación por defecto que delega en `ejecutar_turno`.
+  * `infrastructure/llm/stream_json.rs`: `interpretar_linea` y `FiltroTextoVisible`. Un turno que empieza por `{` o por una valla de código es una petición de tool y no se muestra.
+  * `ClaudeAgentRunner` usa `--output-format stream-json --include-partial-messages --verbose`.
+  * El orquestador emite `TextDelta`.
+  * `GuiChatService`: `ChatStreamEvento` (`texto`, `herramientaInicio`, `herramientaFin`; camelCase), `enviar_mensaje_en_vivo` y `detener(turno_id)`. Detener suelta el futuro, así que el subproceso muere por `kill_on_drop` y no queda rastro en el historial.
+  * Comandos Tauri: `enviar_mensaje_chat` (con `turnoId`, emite `chat-stream`), `detener_respuesta` y `renderizar_markdown`.
+* **Frontend:**
+  * Columna de 768 px y burbuja del usuario (70 % de ancho, radio 18 px).
+  * Asistente sin burbuja, con interlineado de 1,625.
+  * Composer con radio de 22 px que crece hasta el 25 % de la altura (25vh). El pie lleva el modelo, la ayuda y el botón circular enviar/detener.
+  * «Pensando / Consultando *tool*…» con brillo; tools en vivo (● → ✓).
+  * Markdown renderizado en Rust cada 120 ms, con un punto latiendo al final. Se mantiene un único `innerHTML` (`pintarHtmlSeguro`).
+  * Scroll pegado al final con un umbral de 24 px, botón «↓» y pregunta anclada arriba mediante un espaciador.
+  * Acciones visibles al pasar el ratón: «Copiar» → «✓ Copiado».
+* **Tests nuevos:**
+  * Unitarios: `stream_json` (4) y orquestador en vivo (1).
+  * `integration_streaming_claude` (3, con un `claude` falso que reproduce la salida real de stream-json, con pausas).
+  * `integration_chat_en_vivo` (3).
+  * `ux_chat_tests` (5).
+  * Módulo común `tests/comun_claude_falso/`.
+  * Fixtures `tests/fixtures/claude_stream_json/`.
+* **Verificación real en la ventana** (CDP, `docs/validacion/fase15/cdp_chat_en_vivo.js`; capturas `19`–`22`):
+  * El texto aparece de forma progresiva (de 205 a 2.306 caracteres en unos 3 s) con `dist=0`, es decir, pegado al final.
+  * Las tools se ven en vivo.
+  * La pregunta queda anclada a 116–124 px del borde superior.
+* **Fallos encontrados en la verificación real y corregidos con su test:**
+  * Colapsar el espaciador para medirlo recortaba el scroll.
+  * La respuesta se insertaba delante del espaciador del turno anterior, así que quedaba encima de la nueva pregunta.
+* **Observado una vez y no reproducido:** en un segundo turno inmediato, la vista quedó a 400 px del final hasta terminar la respuesta.
+* **Cierre:** el usuario probó la demo y el chat nuevo y aprobó la Fase 15. Con el runner en streaming, la aceptación real da 10/10 (620 s; `docs/validacion/fase15/acceptance_8_problemas_ejecucion3_streaming.log`). La suite queda en 367 OK + 19 ignorados, con clippy y fmt limpios. Commit `feat(phase-15)` sin push, pendiente de la aprobación explícita del usuario.
 

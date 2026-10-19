@@ -6,15 +6,25 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use serde_json::Value;
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 use tokio::time::timeout;
 
 use crate::application::dtos::agent::{AgentMessage, AgentTurnOutput, ClaudeModel};
 use crate::application::dtos::tools::{ToolCall, ToolDefinition};
-use crate::application::ports::agent_runner::AgentRunnerPort;
+use crate::application::ports::agent_runner::{AgentRunnerPort, ObservadorTexto};
 use crate::domain::errors::DomainError;
 use crate::infrastructure::llm::ocultar_consola_en_windows;
+use crate::infrastructure::llm::sesion_claude::{MENSAJE_SESION_CLAUDE, es_fallo_de_sesion};
+use crate::infrastructure::llm::stream_json::{
+    EventoStream, FiltroTextoVisible, interpretar_linea,
+};
+
+/// Longitud máxima de una salida que puede ser un aviso de sesión y no una respuesta
+const MAX_AVISO_SESION: usize = 200;
+
+/// Caracteres de diagnóstico que se conservan de una salida fallida
+const MAX_SALIDA_DIAGNOSTICO: usize = 2000;
 
 /// Configuración para la ejecución de Claude Headless
 #[derive(Debug, Clone)]
@@ -178,6 +188,121 @@ impl ClaudeAgentRunner {
         args
     }
 
+    /// Argumentos del modo streaming (`stream-json` con mensajes parciales)
+    pub fn construir_argumentos_en_vivo(
+        &self,
+        modelo: &ClaudeModel,
+        system_prompt: &str,
+    ) -> Vec<String> {
+        let mut args = self.construir_argumentos(modelo, system_prompt);
+        let streaming = [
+            "--output-format",
+            "stream-json",
+            "--include-partial-messages",
+            "--verbose",
+        ];
+        args.splice(1..1, streaming.iter().map(|a| a.to_string()));
+        args
+    }
+
+    /// Lanza el CLI en modo streaming: reenvía el texto visible y devuelve el texto completo
+    async fn ejecutar_cli_en_vivo(
+        &self,
+        args: Vec<String>,
+        entrada: String,
+        observador: ObservadorTexto,
+    ) -> Result<String, DomainError> {
+        let error_io = |e: std::io::Error| {
+            DomainError::AgentError(format!(
+                "Fallo ejecutando binario Claude CLI en '{:?}': {e}",
+                self.config.binary_path
+            ))
+        };
+
+        let mut cmd = Command::new(&self.config.binary_path);
+        cmd.args(&args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+        ocultar_consola_en_windows(&mut cmd);
+
+        let mut child = cmd.spawn().map_err(error_io)?;
+        if let Some(mut stdin) = child.stdin.take() {
+            stdin
+                .write_all(entrada.as_bytes())
+                .await
+                .map_err(error_io)?;
+        }
+        let stdout = child.stdout.take().ok_or_else(|| {
+            DomainError::AgentError("No se pudo abrir stdout de Claude CLI".to_string())
+        })?;
+        let mut stderr = child.stderr.take();
+        let lector_stderr = tokio::spawn(async move {
+            let mut texto = String::new();
+            if let Some(stderr) = stderr.as_mut() {
+                let _ = stderr.read_to_string(&mut texto).await;
+            }
+            texto
+        });
+
+        let lectura = async {
+            let mut filtro = FiltroTextoVisible::nuevo();
+            let mut resultado: Option<(String, bool)> = None;
+            let mut otras_lineas = String::new();
+            let mut lineas = BufReader::new(stdout).lines();
+            while let Some(linea) = lineas.next_line().await.map_err(error_io)? {
+                match interpretar_linea(&linea) {
+                    EventoStream::Fragmento(fragmento) => {
+                        if let Some(visible) = filtro.alimentar(&fragmento) {
+                            observador(&visible);
+                        }
+                    }
+                    EventoStream::Resultado { texto, es_error } => {
+                        resultado = Some((texto, es_error))
+                    }
+                    EventoStream::Ignorado => {
+                        if otras_lineas.len() < MAX_SALIDA_DIAGNOSTICO {
+                            otras_lineas.push_str(&linea);
+                            otras_lineas.push('\n');
+                        }
+                    }
+                }
+            }
+            let estado = child.wait().await.map_err(error_io)?;
+            Ok::<_, DomainError>((estado, resultado, otras_lineas))
+        };
+        let (estado, resultado, otras_lineas) = timeout(self.config.timeout_duration, lectura)
+            .await
+            .map_err(|_| {
+                DomainError::AgentError(format!(
+                    "Timeout agotado ({:?}) esperando respuesta de Claude CLI",
+                    self.config.timeout_duration
+                ))
+            })??;
+        let stderr = lector_stderr.await.unwrap_or_default();
+
+        match resultado {
+            Some((texto, false)) if estado.success() => Ok(texto),
+            otro => {
+                let texto = otro.map(|(t, _)| t).unwrap_or_default();
+                let diagnostico = format!("{texto}\n{otras_lineas}\n{stderr}");
+                if es_fallo_de_sesion(&diagnostico) {
+                    return Err(DomainError::AgentError(MENSAJE_SESION_CLAUDE.to_string()));
+                }
+                Err(DomainError::AgentError(format!(
+                    "Claude CLI terminó con error (código {:?}): {}",
+                    estado.code(),
+                    diagnostico
+                        .trim()
+                        .chars()
+                        .take(MAX_SALIDA_DIAGNOSTICO)
+                        .collect::<String>()
+                )))
+            }
+        }
+    }
+
     async fn ejecutar_cli(
         &self,
         args: Vec<String>,
@@ -216,9 +341,12 @@ impl ClaudeAgentRunner {
             })?
             .map_err(error_io)?;
 
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
         if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            let stdout = String::from_utf8_lossy(&output.stdout);
+            if es_fallo_de_sesion(&format!("{stdout}\n{stderr}")) {
+                return Err(DomainError::AgentError(MENSAJE_SESION_CLAUDE.to_string()));
+            }
             return Err(DomainError::AgentError(format!(
                 "Claude CLI terminó con error (código {:?}): {} {}",
                 output.status.code(),
@@ -227,7 +355,11 @@ impl ClaudeAgentRunner {
             )));
         }
 
-        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+        // Defensa: un aviso de sesión breve con código 0 tampoco es una respuesta del modelo
+        if stdout.trim().chars().count() <= MAX_AVISO_SESION && es_fallo_de_sesion(&stdout) {
+            return Err(DomainError::AgentError(MENSAJE_SESION_CLAUDE.to_string()));
+        }
+        Ok(stdout.into_owned())
     }
 }
 
@@ -245,6 +377,25 @@ impl AgentRunnerPort for ClaudeAgentRunner {
             .ejecutar_cli(self.construir_argumentos(modelo, system_prompt), entrada)
             .await?;
         Ok(Self::parsear_salida_claude(&stdout))
+    }
+
+    async fn ejecutar_turno_en_vivo(
+        &self,
+        modelo: &ClaudeModel,
+        system_prompt: &str,
+        historial: &[AgentMessage],
+        herramientas: &[ToolDefinition],
+        observador: ObservadorTexto,
+    ) -> Result<AgentTurnOutput, DomainError> {
+        let entrada = Self::construir_entrada_conversacion(historial, herramientas)?;
+        let texto = self
+            .ejecutar_cli_en_vivo(
+                self.construir_argumentos_en_vivo(modelo, system_prompt),
+                entrada,
+                observador,
+            )
+            .await?;
+        Ok(Self::parsear_salida_claude(&texto))
     }
 }
 

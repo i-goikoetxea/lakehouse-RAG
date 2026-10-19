@@ -2,6 +2,7 @@
 name = "lakehouse_rag"
 version = "0.1.0"
 edition = "2024"
+default-run = "lakehouse_rag"
 
 [dependencies]
 # Runtime Asíncrono
@@ -24,9 +25,6 @@ uuid = { version = "1.12", features = ["v4", "serde"] }
 # Logging y Observabilidad
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-
-# Grafo
-petgraph = { version = "0.7", features = ["serde-1"] }
 
 # Lakehouse, Motor Analítico y Vectorial
 arrow = { version = "53", features = ["prettyprint", "json"] }

@@ -20,7 +20,7 @@ use crate::application::dtos::agent::ModelDescriptor;
 use crate::application::dtos::centros::EXTENSIONES_INGERIBLES;
 use crate::application::dtos::ingestion::ObservadorIngesta;
 use crate::application::use_cases::lakehouse_app::LakehouseApp;
-use chat_service::GuiChatService;
+use chat_service::{ChatStreamEvento, GuiChatService, texto_a_html_seguro};
 use comandos::{
     ActivacionDto, CentroDto, DocumentoCatalogoDto, EVENTO_ARRASTRE, EVENTO_DOCUMENTOS_SOLTADOS,
     EVENTO_PROGRESO_INGESTA, IngestaDto, IntegridadDto, ProgresoIngestaDto,
@@ -38,6 +38,8 @@ pub fn iniciar_app_tauri(app: Arc<LakehouseApp>) -> Result<(), tauri::Error> {
         .invoke_handler(tauri::generate_handler![
             listar_modelos_claude,
             enviar_mensaje_chat,
+            detener_respuesta,
+            renderizar_markdown,
             listar_centros,
             crear_centro,
             activar_centro,
@@ -198,15 +200,40 @@ async fn listar_modelos_claude(
     servicio.listar_modelos().await
 }
 
-/// Comando IPC: turno de chat con el agente del Lakehouse vía Claude Code headless
+/// Evento con el texto y las herramientas de un turno de chat en curso
+pub const EVENTO_CHAT_STREAM: &str = "chat-stream";
+
+/// Comando IPC: turno de chat con el agente del Lakehouse vía Claude Code headless. Mientras
+/// dura, emite `chat-stream` (texto en vivo y herramientas); al final devuelve el payload.
 #[tauri::command]
 async fn enviar_mensaje_chat(
+    app_handle: tauri::AppHandle,
     servicio: tauri::State<'_, GuiChatService>,
     mensaje: String,
     centro_id: String,
     modelo: String,
+    turno_id: String,
 ) -> Result<ChatResponsePayload, String> {
-    servicio.enviar_mensaje(&mensaje, &centro_id, &modelo).await
+    let emisor = Arc::new(move |evento: ChatStreamEvento| {
+        if let Err(e) = app_handle.emit(EVENTO_CHAT_STREAM, evento) {
+            tracing::warn!("No se pudo emitir el evento del chat: {e}");
+        }
+    });
+    servicio
+        .enviar_mensaje_en_vivo(&mensaje, &centro_id, &modelo, &turno_id, emisor)
+        .await
+}
+
+/// Comando IPC: detiene el turno de chat en curso (botón Detener)
+#[tauri::command]
+fn detener_respuesta(servicio: tauri::State<'_, GuiChatService>, turno_id: String) -> bool {
+    servicio.detener(&turno_id)
+}
+
+/// Comando IPC: Markdown parcial → HTML seguro (render progresivo durante el streaming)
+#[tauri::command]
+fn renderizar_markdown(texto: String) -> String {
+    texto_a_html_seguro(&texto)
 }
 
 /// Configuración de especificación de la ventana de escritorio

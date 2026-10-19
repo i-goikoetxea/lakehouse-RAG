@@ -5,7 +5,7 @@ use std::sync::Arc;
 use crate::application::dtos::agent::{
     AgentExecutionEvent, AgentMessage, AgentTurnOutput, ClaudeModel,
 };
-use crate::application::ports::agent_runner::AgentRunnerPort;
+use crate::application::ports::agent_runner::{AgentRunnerPort, ObservadorTexto};
 use crate::application::ports::tool_server::ToolServerPort;
 use crate::domain::errors::DomainError;
 use crate::domain::models::center::CenterId;
@@ -81,10 +81,33 @@ impl AgentOrchestrator {
         while paso < self.max_steps {
             paso += 1;
 
-            let turn_output = self
-                .runner
-                .ejecutar_turno(modelo, &system_prompt, historial, &herramientas_disponibles)
-                .await?;
+            let turn_output = match &on_event {
+                Some(cb) => {
+                    let cb = Arc::clone(cb);
+                    let observador: ObservadorTexto = Arc::new(move |fragmento: &str| {
+                        cb(AgentExecutionEvent::TextDelta(fragmento.to_string()))
+                    });
+                    self.runner
+                        .ejecutar_turno_en_vivo(
+                            modelo,
+                            &system_prompt,
+                            historial,
+                            &herramientas_disponibles,
+                            observador,
+                        )
+                        .await?
+                }
+                None => {
+                    self.runner
+                        .ejecutar_turno(
+                            modelo,
+                            &system_prompt,
+                            historial,
+                            &herramientas_disponibles,
+                        )
+                        .await?
+                }
+            };
 
             match turn_output {
                 AgentTurnOutput::FinalMessage(respuesta) => {
@@ -186,6 +209,61 @@ mod tests {
             }
             Ok(guard.remove(0))
         }
+    }
+
+    /// Runner con streaming: emite la respuesta final en dos fragmentos
+    struct RunnerEnVivo;
+
+    #[async_trait]
+    impl AgentRunnerPort for RunnerEnVivo {
+        async fn ejecutar_turno(
+            &self,
+            _modelo: &ClaudeModel,
+            _system_prompt: &str,
+            _historial: &[AgentMessage],
+            _herramientas: &[ToolDefinition],
+        ) -> Result<AgentTurnOutput, DomainError> {
+            Ok(AgentTurnOutput::FinalMessage("Hola mundo".to_string()))
+        }
+
+        async fn ejecutar_turno_en_vivo(
+            &self,
+            modelo: &ClaudeModel,
+            system_prompt: &str,
+            historial: &[AgentMessage],
+            herramientas: &[ToolDefinition],
+            observador: ObservadorTexto,
+        ) -> Result<AgentTurnOutput, DomainError> {
+            observador("Hola ");
+            observador("mundo");
+            self.ejecutar_turno(modelo, system_prompt, historial, herramientas)
+                .await
+        }
+    }
+
+    #[tokio::test]
+    async fn test_el_texto_de_la_respuesta_llega_en_vivo_antes_de_completar() {
+        let orquestador = AgentOrchestrator::new(Arc::new(RunnerEnVivo), Arc::new(DummyToolServer));
+        let eventos: Arc<Mutex<Vec<AgentExecutionEvent>>> = Arc::default();
+        let destino = eventos.clone();
+        let mut historial = vec![AgentMessage::user("Hola")];
+        orquestador
+            .procesar_turno(
+                &ClaudeModel::sonnet(),
+                &CenterId::new("planta_1").unwrap(),
+                &mut historial,
+                Some(Arc::new(move |e| destino.lock().unwrap().push(e))),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            *eventos.lock().unwrap(),
+            vec![
+                AgentExecutionEvent::TextDelta("Hola ".into()),
+                AgentExecutionEvent::TextDelta("mundo".into()),
+                AgentExecutionEvent::Completed("Hola mundo".into()),
+            ]
+        );
     }
 
     #[tokio::test]

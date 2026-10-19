@@ -41,6 +41,7 @@
   --ancho-fuentes: 300px;
   --ancho-studio: 380px;
   --ancho-lectura: 780px;
+  --ancho-chat: 768px;
 }
 
 [data-theme="light"] {
@@ -281,8 +282,8 @@ button { cursor: pointer; }
 .chat-subtitle { font-size: 11px; color: var(--color-ink-subtle); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .model-selector { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
 
-.chat-messages { flex: 1; min-height: 0; padding: 20px 24px 8px; scroll-behavior: smooth; }
-.chat-columna { max-width: var(--ancho-lectura); margin: 0 auto; display: flex; flex-direction: column; gap: 18px; }
+.chat-messages { flex: 1; min-height: 0; padding: 24px 16px 8px; overflow-anchor: none; }
+.chat-columna { max-width: var(--ancho-chat); margin: 0 auto; padding: 0 16px; display: flex; flex-direction: column; gap: 28px; }
 
 .chat-vacio { margin-top: 8vh; text-align: center; color: var(--color-ink-subtle); }
 .chat-vacio h3 { font-size: 16px; color: var(--color-ink); margin-bottom: 6px; }
@@ -295,11 +296,10 @@ button { cursor: pointer; }
 .ejemplo:hover { border-color: var(--color-primary); color: var(--color-ink); }
 
 .mensaje-usuario {
-  align-self: flex-end; max-width: 80%;
-  background: var(--color-primary); color: var(--color-on-primary);
-  border-radius: 14px 14px 4px 14px;
-  padding: 9px 14px; font-size: 13.5px; line-height: 1.5;
-  white-space: pre-wrap; overflow-wrap: anywhere;
+  align-self: flex-end; max-width: 70%;
+  background: var(--color-surface-3); color: var(--color-ink);
+  border-radius: 18px; padding: 10px 16px;
+  font-size: 14px; line-height: 1.55; white-space: pre-wrap; overflow-wrap: anywhere; user-select: text;
 }
 .mensaje-asistente { display: flex; flex-direction: column; gap: 10px; }
 .mensaje-meta { display: flex; align-items: center; gap: 8px; font-size: 11px; color: var(--color-ink-subtle); }
@@ -329,7 +329,7 @@ button { cursor: pointer; }
 .tool-linea.fallo .nombre, .tool-linea.fallo .resumen { color: var(--color-danger); }
 
 /* Respuesta tipo documento: Markdown ya saneado en Rust */
-.respuesta { font-size: 14px; line-height: 1.62; color: var(--color-ink); overflow-wrap: anywhere; user-select: text; }
+.respuesta { font-size: 14px; line-height: 1.625; color: var(--color-ink); overflow-wrap: anywhere; user-select: text; }
 .respuesta > * + * { margin-top: 0.7em; }
 .respuesta h1, .respuesta h2, .respuesta h3, .respuesta h4, .respuesta h5, .respuesta h6 { line-height: 1.3; font-weight: 650; margin-top: 1.1em; }
 .respuesta h1 { font-size: 1.25em; } .respuesta h2 { font-size: 1.15em; } .respuesta h3 { font-size: 1.05em; }
@@ -377,27 +377,44 @@ button { cursor: pointer; }
 .chip-fuente:hover { border-color: var(--color-primary); color: var(--color-ink); }
 .chip-fuente .doc { font-family: var(--font-mono); font-weight: 600; color: var(--color-primary); }
 .chip-fuente .contador { background: var(--color-surface-3); border-radius: var(--radius-pill); padding: 0 6px; font-size: 10.5px; }
-.acciones-respuesta { display: flex; gap: 8px; align-items: center; }
+.acciones-respuesta { opacity: 0; display: flex; gap: 4px; align-items: center; transition: opacity 0.2s ease; }
+.mensaje-asistente:hover .acciones-respuesta, .mensaje-asistente:focus-within .acciones-respuesta,
+.mensaje-asistente.ultimo .acciones-respuesta { opacity: 1; }
+.btn-accion {
+  display: inline-flex; align-items: center; gap: 5px; height: 28px; padding: 0 8px;
+  border: none; border-radius: var(--radius-md); background: transparent; color: var(--color-ink-subtle); font-size: 11.5px;
+}
+.btn-accion:hover { background: var(--color-surface-3); color: var(--color-ink); }
+.btn-accion .ok { display: none; }
+.btn-accion.copiado .ok { display: inline; }
+.btn-accion.copiado .copiar { display: none; }
 
 .btn-ir-final {
-  position: absolute; right: 28px; bottom: 96px;
-  width: 32px; height: 32px; border-radius: 50%;
+  position: absolute; left: 50%; top: -44px; transform: translateX(-50%);
+  width: 32px; height: 32px; border-radius: 50%; display: flex; align-items: center; justify-content: center;
   border: 1px solid var(--color-border); background: var(--color-surface-1); color: var(--color-ink-muted);
-  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.25);
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.25); animation: aparecer 0.15s ease;
 }
 .btn-ir-final:hover { color: var(--color-ink); border-color: var(--color-primary); }
 
-.chat-input-wrapper { padding: 10px 24px 12px; }
+.chat-input-wrapper { position: relative; padding: 8px 16px 14px; }
 .chat-form {
-  max-width: var(--ancho-lectura); margin: 0 auto;
-  display: flex; align-items: flex-end; gap: 8px;
-  background: var(--color-surface-1);
+  max-width: calc(var(--ancho-chat) - 32px); margin: 0 auto;
+  display: flex; flex-direction: column; gap: 4px;
+  background: var(--color-surface-2);
   border: 1px solid var(--color-border);
-  border-radius: 14px; padding: 6px 6px 6px 14px;
+  border-radius: 22px; padding: 10px 10px 8px 16px;
+  box-shadow: 0 4px 18px rgba(0, 0, 0, 0.18);
 }
 .chat-form:focus-within { border-color: var(--color-border-focus); box-shadow: 0 0 0 3px var(--color-primary-glow); }
-.chat-input { flex: 1; resize: none; border: none; background: transparent; outline: none; font-size: 13.5px; line-height: 1.5; padding: 6px 0; max-height: 160px; overflow-y: auto; }
-.btn-send { width: 34px; height: 34px; border-radius: 10px; border: none; background: var(--color-primary); color: #fff; display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
+.chat-input { width: 100%; resize: none; border: none; background: transparent; outline: none; font-size: 14px; line-height: 1.55; padding: 4px 0; min-height: 26px; max-height: 25vh; overflow-y: auto; }
+.composer-pie { display: flex; align-items: center; gap: 8px; }
+.composer-pie .model-selector { margin-left: -6px; }
+.composer-pie .chat-ayuda { font-size: 10.5px; color: var(--color-ink-tertiary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.btn-send { width: 32px; height: 32px; border-radius: 50%; border: none; background: var(--color-ink); color: var(--color-surface-1); display: flex; align-items: center; justify-content: center; flex-shrink: 0; transition: opacity 0.15s ease; }
+.btn-send .icono-detener { display: none; }
+.btn-send.detener .icono-detener { display: block; }
+.btn-send.detener .icono-enviar { display: none; }
 .btn-send:disabled { opacity: 0.5; cursor: default; }
 .chat-ayuda { max-width: var(--ancho-lectura); margin: 4px auto 0; font-size: 10.5px; color: var(--color-ink-tertiary); text-align: right; }
 
@@ -466,3 +483,20 @@ button { cursor: pointer; }
 .fila-ruta input { flex: 1; min-width: 0; }
 .form-error { color: var(--color-danger); font-size: 12px; min-height: 16px; }
 .form-acciones { display: flex; justify-content: flex-end; gap: 8px; }
+
+/* ---------- Chat en vivo (Fase 15) ---------- */
+@keyframes aparecer { from { opacity: 0; transform: translate(-50%, 6px); } to { opacity: 1; transform: translate(-50%, 0); } }
+@keyframes brillo { from { background-position: 200% 0; } to { background-position: -200% 0; } }
+@keyframes latido { 0%, 100% { opacity: 0.25; } 50% { opacity: 1; } }
+.trabajando {
+  font-size: 13px; width: fit-content;
+  background: linear-gradient(90deg, var(--color-ink-subtle) 30%, var(--color-ink) 50%, var(--color-ink-subtle) 70%);
+  background-size: 200% 100%; -webkit-background-clip: text; background-clip: text; color: transparent;
+  animation: brillo 2.5s linear infinite;
+}
+.respuesta.en-vivo > :last-child::after {
+  content: ''; display: inline-block; width: 8px; height: 8px; margin-left: 4px; border-radius: 50%;
+  background: var(--color-ink); vertical-align: middle; animation: latido 1s ease-in-out infinite;
+}
+.tool-linea.en-curso .estado { animation: latido 1s ease-in-out infinite; }
+.espaciador-ancla { flex-shrink: 0; pointer-events: none; }

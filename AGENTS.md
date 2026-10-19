@@ -102,23 +102,25 @@ Antes de finalizar la sesión, el agente **DEBE**:
 
 ---
 
-## 6. Estado de la Fase 7 y Guía de Continuación (Hand-off para Claude Code)
+## 6. Estado actual (Fase 15: aceptación final) y guía de continuación
 
-### Estado General del Código:
-- **124 / 124 tests pasando al 100%** (73 unitarios + 51 adversariales y de integración).
-- `cargo clippy --all-targets -- -D warnings` pasa con **0 advertencias**.
-- `cargo fmt --check` verificado al **100%**.
+### Estado general del código (2026-10-19)
+- **367 tests pasando, más 19 `#[ignore]`.** Los ignorados son las suites reales con Claude Code y FastEmbed, más un generador visual.
+- `cargo clippy --all-targets -- -D warnings`: 0 avisos. `cargo fmt --check`: OK. `cargo build --release`: OK.
+- **Aceptación real** `tests/acceptance_8_problemas.rs`:
+  - 10/10 en 2 ejecuciones: los 8 problemas del plan v2 §1, más §9.1 y §9.4 de la especificación.
+  - También pasan las suites reales de la etapa 1 y de las fases 12 y 13.
+  - Informe para el usuario: `docs/validacion/aceptacion_final.md`.
+- **Fase 15 aprobada por el usuario** tras la prueba guiada (demo en `docs/validacion/fase15/demo/`). El chat responde en streaming (`stream-json`) y tiene botón Detener. El plan v2 está completo.
 
-### Componentes Listos y Validados:
-1. **Servidor MCP Stdio (`src/infrastructure/mcp/`):**
-   - Protocolo JSON-RPC 2.0 operativo sobre stdio.
-   - 5 herramientas del Lakehouse expuestas con esquemas JSON Schema.
-   - Verificado con 4 tests unitarios y 4 tests adversariales en `tests/adversarial_mcp_tests.rs`.
-   - Herramientas de instalación en la raíz: `MCP_GUIDE.md`, `install_mcp.ps1` y flag CLI `--mcp-info`.
-2. **Frontend GUI SOTA (`src/presentation/gui/web/`):**
-   - `index.html`: 3 paneles (NotebookLM) con titlebar frameless personalizada y controles de ventana.
-   - `styles.css`: Dark mode nativo Linear (`#08090a`), variables CSS, tema claro/oscuro y componentes.
-   - `app.js`: Lógica completa de drag & drop, tarjetas de tools, citas interactivas, alternancia de tema y visor Arrow/Grafo.
+### Componentes y puntos de entrada
+1. **Fachada única `LakehouseApp`**, compuesta en `infrastructure/bootstrap.rs` (`composicion_real` / `componer_lakehouse`). La usan la GUI, el MCP y la CLI.
+2. **Binarios:**
+   - `lakehouse_rag.exe`: ventana Tauri sin consola en release. También acepta subcomandos.
+   - `lakehouse_rag_cli.exe`: subsistema consola, para terminales, scripts y `--mcp-server`, con `$LASTEXITCODE` fiable.
+3. **MCP stdio** con las 6 tools v2 (`MCP_GUIDE.md`).
+4. **GUI** (`src/presentation/gui/web/`): 3 paneles redimensionables, centros (crear, activar y quitar con confirmación), ingesta por diálogo nativo o arrastre, chat con selector de modelo en caliente y Studio.
+5. **Sesión de Claude Code ausente o caducada:** mensaje accionable (`infrastructure/llm/sesion_claude.rs`).
 
 ### Diagnóstico Técnico del Despliegue de GUI (Tauri 2 en Windows) para Claude Code:
 1. **Supresión de Terminal en Windows:**

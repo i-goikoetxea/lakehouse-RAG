@@ -62,7 +62,7 @@ Modelo **multilingüe** de 1024 dims (`MultilingualE5Large` de fastembed; BGE-M3
 | **12** | Centros en disco + proyección LanceDB → DataFusion/Petgraph (activar/desactivar, reconstrucción tras ingesta) + `raw_docs/` y `center_manifest.json` (`schema_version = 2`) | 6, 8 | Completado (Sesión 12, 2026-10-17; 291 tests; puerta E2E con el binario real) |
 | **13** | Tools v2: matriz exacta, lookup con fronteras, SQL de solo lectura, grafo antisupernodos, `search_normative_context` con prelación y *time travel* | 2, 3, 4, 5, 6, 7 | Completado (Sesión 13, 2026-10-17; 322 tests; puerta E2E real 1/1 OK, 6 preguntas) |
 | **14** | Cableado de la app: `ingestar_documento` (GUI, MCP y CLI), gestión de centros en la GUI, system prompt de prelación y citas | todos | Completado (Sesión 14, 2026-10-17; 326 tests; ventana verificada con capturas en `docs/validacion/fase14/`) |
-| **15** | Aceptación: suite `tests/acceptance_8_problemas.rs` (Claude y FastEmbed reales) + criterios §9 + prueba manual de la GUI | todos | Pendiente |
+| **15** | Aceptación: suite `tests/acceptance_8_problemas.rs` (Claude y FastEmbed reales) + criterios §9 + prueba manual de la GUI | todos | Completado (Sesión 15, 2026-10-19; 367 tests; aceptación real 10/10 en 3 ejecuciones; prueba guiada aprobada por el usuario; chat en streaming; informe `docs/validacion/aceptacion_final.md`) |
 
 ## 3.1 Criterio de terminado: la app funciona de punta a punta (exigido por el usuario)
 - **Fachada única `LakehouseApp`** (composición en un solo punto) que usan la GUI (comandos Tauri), el MCP y la CLI (`--ingest <archivo> --centro <id>`, `--ask "<pregunta>" --centro <id> --modelo <alias>`, `--centros`). La prueba E2E ejecuta el **binario real** con la misma composición que la GUI.
