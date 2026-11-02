@@ -4,6 +4,10 @@ use thiserror::Error;
 
 #[derive(Debug, Error, PartialEq, Clone, Eq)]
 pub enum DomainError {
+    /// Hito sin ejecutor, responsable ni registro: no puede llegar a la matriz
+    #[error("El hito '{0}' no tiene rol ni registro")]
+    HitoSinTitular(String),
+
     #[error("Identificador de centro inválido: '{0}'")]
     InvalidCenterId(String),
 

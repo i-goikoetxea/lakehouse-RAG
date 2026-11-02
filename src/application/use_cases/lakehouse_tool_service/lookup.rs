@@ -241,7 +241,7 @@ impl LakehouseToolService {
                     "SELECT t.tabla_id, t.titulo_tabla, t.doc_id, t.version_num, d.revision, t.eje_x_nombre, t.eje_x_unidad, t.eje_y_nombre, t.eje_y_unidad, t.valor_salida_nombre FROM {} t {} WHERE {} ORDER BY d.nivel_prelacion, t.tabla_id",
                     contexto.vista(TABLA_CATALOGO_TABLAS),
                     contexto.union_catalogo("t", "d"),
-                    contexto.predicado_vigencia("t", "d")
+                    contexto.predicado_firme("t", "d")
                 ),
             )
             .await?;
@@ -320,7 +320,7 @@ impl LakehouseToolService {
                     "SELECT e.*, d.revision FROM {} e {} WHERE {} AND e.tabla_id = {}",
                     contexto.vista(TABLA_CELDAS_DOBLE_ENTRADA),
                     contexto.union_catalogo("e", "d"),
-                    contexto.predicado_vigencia("e", "d"),
+                    contexto.predicado_firme("e", "d"),
                     literal_sql(&texto(tabla, "tabla_id"))
                 ),
             )

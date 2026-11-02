@@ -39,7 +39,7 @@ async fn test_crear_centro_genera_estructura_y_manifiesto_v2_inactivo() {
     let manifiesto: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(ruta.join(ARCHIVO_MANIFIESTO)).unwrap())
             .unwrap();
-    assert_eq!(manifiesto["schema_version"], 2);
+    assert_eq!(manifiesto["schema_version"], 5);
     assert_eq!(manifiesto["modelo_embeddings"], MODELO_E5);
     assert_eq!(manifiesto["dimension_embeddings"], 1024);
     assert_eq!(manifiesto["centro_id"], CENTRO);
@@ -68,7 +68,7 @@ async fn test_ciclo_activar_ingerir_consultar_y_desactivar() {
         .unwrap();
 
     let vacio = entorno.app.activar_centro(CENTRO).await.unwrap();
-    assert_eq!(vacio.vistas.len(), 6);
+    assert_eq!(vacio.vistas.len(), 7);
     assert!(vacio.vistas.iter().all(|v| v.filas == 0));
     // Las vistas vacías existen: la agregación devuelve 0, no un error
     assert_eq!(
@@ -135,7 +135,7 @@ async fn test_ciclo_activar_ingerir_consultar_y_desactivar() {
         .ejecutar_herramienta(&ToolCall {
             id: "m".into(),
             name: "query_operational_matrix".into(),
-            arguments: json!({ "centro_id": CENTRO, "fase": "custodia" }),
+            arguments: json!({ "centro_id": CENTRO, "fase": "custodia", "solo_declarados": false }),
         })
         .await
         .unwrap();
@@ -170,7 +170,7 @@ async fn test_ciclo_activar_ingerir_consultar_y_desactivar() {
     )
     .unwrap();
     let tablas = inventario["tablas"].as_array().unwrap();
-    assert_eq!(tablas.len(), 6);
+    assert_eq!(tablas.len(), 7);
     assert_eq!(
         tablas[0]["vista_datafusion"],
         format!("{CENTRO}_01_documentos_catalogo")
@@ -415,18 +415,71 @@ async fn test_ingesta_fallida_no_deja_filas_ni_toca_las_vistas() {
         Arc::new(MockAgentRunner::new_scripted(Vec::new())),
         modelo_e5(),
     );
-    let error = fallida.ingestar(&v4, CENTRO).await.unwrap_err().to_string();
-    assert!(error.contains("Claude no responde"), "{error}");
+    let provisional = fallida.ingestar(&v4, CENTRO).await.unwrap().informe;
+    assert_eq!(provisional.estado_contenido, "PARCIAL_UNIVERSAL");
+    assert!(provisional.avisos[0].contains("Claude no responde"));
 
     assert!(entorno.app.integridad(CENTRO).await.unwrap().es_integro());
     let vigente = sql(
         &entorno.herramientas,
         CENTRO,
-        "SELECT version_num FROM 01_documentos_catalogo WHERE vigente = true",
+        "SELECT version_num FROM 01_documentos_catalogo WHERE vigente = true AND doc_id = 'PO-ALM-03'",
     )
     .await;
     assert_eq!(vigente.output["resultado"], json!([{ "version_num": 3 }]));
     let _ = (ARCHIVO_V3, CONTENIDO_V3);
+}
+
+#[tokio::test]
+async fn test_reintentar_destilacion_sustituye_el_provisional_y_reconstruye_las_vistas() {
+    let entorno = entorno();
+    let (v3, v4) = entorno.escribir_revisiones();
+    entorno
+        .app
+        .crear_centro(CENTRO, &entorno.ruta_centro_texto("obra"), None)
+        .await
+        .unwrap();
+    entorno.app.ingestar(&v3, CENTRO).await.unwrap();
+    entorno.app.activar_centro(CENTRO).await.unwrap();
+
+    let destilador = MockDistiller::new();
+    destilador.programar_error("Claude no responde");
+    let (sin_claude, _) = construir_app(
+        &entorno.config(),
+        Arc::new(destilador),
+        Arc::new(MockAgentRunner::new_scripted(Vec::new())),
+        modelo_e5(),
+    );
+    let provisional = sin_claude.ingestar(&v4, CENTRO).await.unwrap().informe;
+    assert!(provisional.pendiente_destilacion);
+
+    let resultado = entorno
+        .app
+        .reintentar_destilacion(&v4, CENTRO)
+        .await
+        .unwrap();
+    assert_eq!(resultado.informe.doc_id, "PO-ALM-03");
+    assert_eq!(resultado.informe.versiones_derogadas, vec![3]);
+    assert!(resultado.proyeccion.is_some(), "vistas reconstruidas");
+    assert!(entorno.app.integridad(CENTRO).await.unwrap().es_integro());
+
+    let filas = sql(
+        &entorno.herramientas,
+        CENTRO,
+        "SELECT doc_id, version_num FROM 01_documentos_catalogo WHERE vigente = true",
+    )
+    .await;
+    assert_eq!(
+        filas.output["resultado"],
+        json!([{ "doc_id": "PO-ALM-03", "version_num": 4 }])
+    );
+    let nodos = sql(
+        &entorno.herramientas,
+        CENTRO,
+        "SELECT COUNT(*) AS total FROM 07_indice_jerarquico WHERE vigente = true AND doc_id <> 'PO-ALM-03'",
+    )
+    .await;
+    assert_eq!(nodos.output["resultado"], json!([{ "total": 0 }]));
 }
 
 /// Regresión de la puerta E2E: la Rev. 04 trae `DEROGA_A` hacia su propio código (Rev. 03).

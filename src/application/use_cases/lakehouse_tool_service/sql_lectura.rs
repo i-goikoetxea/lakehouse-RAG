@@ -48,7 +48,7 @@ fn reemplazar_identificador(sql: &str, tabla: &str, destino: &str) -> String {
     salida
 }
 
-/// Traduce las 6 tablas canónicas v2 (`03_matriz_operativa`…) a las vistas del centro
+/// Traduce las 7 tablas canónicas (`03_matriz_operativa`…) a las vistas del centro
 pub fn reescribir_tablas_canonicas(sql: &str, centro: &CenterId) -> String {
     TODAS_LAS_TABLAS
         .iter()

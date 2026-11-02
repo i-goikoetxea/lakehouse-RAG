@@ -146,6 +146,52 @@ fn quitar_parentesis(texto: &str) -> String {
         .collect()
 }
 
+/// De dónde sale el responsable de un hito
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum OrigenResponsable {
+    /// El texto de la sección de origen nombra el rol
+    Declarado,
+    /// Deducido por el extractor: no se puede presentar como dato del documento
+    Inferido,
+    NoConsta,
+}
+
+impl OrigenResponsable {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Declarado => "DECLARADO",
+            Self::Inferido => "INFERIDO",
+            Self::NoConsta => "NO_CONSTA",
+        }
+    }
+
+    pub fn parse(valor: &str) -> Option<Self> {
+        match normalizar_token(valor).as_str() {
+            "DECLARADO" => Some(Self::Declarado),
+            "INFERIDO" => Some(Self::Inferido),
+            "NO_CONSTA" => Some(Self::NoConsta),
+            _ => None,
+        }
+    }
+
+    /// Red de seguridad sobre lo que dice el extractor: un rol vacío no consta y solo es
+    /// declarado si el texto de su sección lo nombra (palabras completas, sin tildes ni mayúsculas)
+    pub fn verificar(afirmado: &str, rol: &str, texto_de_seccion: &str) -> Self {
+        let rol = tokens_de(rol);
+        if rol.is_empty() {
+            return Self::NoConsta;
+        }
+        let nombrado = tokens_de(texto_de_seccion)
+            .windows(rol.len())
+            .any(|ventana| ventana == rol.as_slice());
+        if nombrado && Self::parse(afirmado) == Some(Self::Declarado) {
+            Self::Declarado
+        } else {
+            Self::Inferido
+        }
+    }
+}
+
 /// Defecto de extracción que obliga a revisar el hito (`calidad_extraccion = REVISAR`)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum AlertaExtraccion {
@@ -156,6 +202,8 @@ pub enum AlertaExtraccion {
     SinRegistro,
     /// El código de registro no está en forma canónica (`FOR-ALM-02`)
     RegistroNoCanonico,
+    /// El responsable es inferido: el documento no lo declara en la sección de origen
+    ResponsableInferido,
 }
 
 impl AlertaExtraccion {
@@ -166,6 +214,7 @@ impl AlertaExtraccion {
             Self::ResponsableVacio => "RESPONSABLE_VACIO",
             Self::SinRegistro => "SIN_REGISTRO",
             Self::RegistroNoCanonico => "REGISTRO_NO_CANONICO",
+            Self::ResponsableInferido => "RESPONSABLE_INFERIDO",
         }
     }
 }
@@ -196,14 +245,17 @@ pub struct BorradorHito {
     pub objeto_alcance: String,
     pub rol_ejecutor: String,
     pub rol_responsable: String,
+    pub origen_responsable: OrigenResponsable,
     pub registro_codigo: Option<String>,
     pub registro_nombre: Option<String>,
     pub criterio_aceptacion: String,
     pub condicion_aplicacion: Option<String>,
 }
 
-/// Hito operativo validado: una fila de la matriz con roles y registro en columnas separadas
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// Hito operativo validado: una fila de la matriz con roles y registro en columnas separadas.
+/// Solo se construye con `new`, que exige al menos un rol o un registro.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[non_exhaustive]
 pub struct HitoOperativo {
     pub hito_id: String,
     pub doc_id: DocId,
@@ -212,11 +264,37 @@ pub struct HitoOperativo {
     pub objeto_alcance: String,
     pub rol_ejecutor: String,
     pub rol_responsable: String,
+    pub origen_responsable: OrigenResponsable,
     pub registro_codigo: Option<String>,
     pub registro_nombre: Option<String>,
     pub criterio_aceptacion: String,
     pub condicion_aplicacion: Option<String>,
 }
+
+/// Valores con los que un extractor rellena un campo que no consta (`normalizar_token`)
+const VALORES_DE_RELLENO: [&str; 21] = [
+    "N_A",
+    "NA",
+    "N_D",
+    "ND",
+    "S_D",
+    "SD",
+    "NO_APLICA",
+    "NO_CONSTA",
+    "NO_DECLARADO",
+    "NO_DEFINIDO",
+    "NO_ESPECIFICADO",
+    "NO_INDICADO",
+    "NINGUNO",
+    "NINGUNA",
+    "NADA",
+    "SIN_DATO",
+    "SIN_DATOS",
+    "DESCONOCIDO",
+    "NONE",
+    "NULL",
+    "POR_DEFINIR",
+];
 
 /// Separadores (incluidos sus homoglifos Unicode) que delatan varios roles en un campo
 const SEPARADORES_DE_ROLES: [char; 16] = [
@@ -269,6 +347,23 @@ impl HitoOperativo {
             Self::MAX_LONGITUD_CAMPO,
         )?;
         exigir_no_vacio("objeto_alcance", &objeto_alcance)?;
+        let rol_ejecutor = limpiar_rol("rol_ejecutor", &borrador.rol_ejecutor)?;
+        let rol_responsable = limpiar_rol("rol_responsable", &borrador.rol_responsable)?;
+        let registro_codigo = limpiar_registro("registro_codigo", borrador.registro_codigo)?;
+        let registro_nombre = limpiar_registro("registro_nombre", borrador.registro_nombre)?;
+        if !tiene_rol_o_registro(
+            &rol_ejecutor,
+            &rol_responsable,
+            registro_codigo.as_deref(),
+            registro_nombre.as_deref(),
+        ) {
+            return Err(DomainError::HitoSinTitular(hito_id));
+        }
+        let origen_responsable = if rol_responsable.is_empty() {
+            OrigenResponsable::NoConsta
+        } else {
+            borrador.origen_responsable
+        };
 
         Ok(Self {
             hito_id,
@@ -276,18 +371,11 @@ impl HitoOperativo {
             orden_secuencia: borrador.orden_secuencia,
             fase: borrador.fase,
             objeto_alcance,
-            rol_ejecutor: limpiar_campo(
-                "rol_ejecutor",
-                &borrador.rol_ejecutor,
-                Self::MAX_LONGITUD_CAMPO,
-            )?,
-            rol_responsable: limpiar_campo(
-                "rol_responsable",
-                &borrador.rol_responsable,
-                Self::MAX_LONGITUD_CAMPO,
-            )?,
-            registro_codigo: limpiar_opcional("registro_codigo", borrador.registro_codigo)?,
-            registro_nombre: limpiar_opcional("registro_nombre", borrador.registro_nombre)?,
+            rol_ejecutor,
+            rol_responsable,
+            origen_responsable,
+            registro_codigo,
+            registro_nombre,
             criterio_aceptacion: limpiar_campo(
                 "criterio_aceptacion",
                 &borrador.criterio_aceptacion,
@@ -314,6 +402,11 @@ impl HitoOperativo {
             (
                 AlertaExtraccion::ResponsableVacio,
                 self.rol_responsable.is_empty(),
+            ),
+            (
+                AlertaExtraccion::ResponsableInferido,
+                !self.rol_responsable.is_empty()
+                    && self.origen_responsable != OrigenResponsable::Declarado,
             ),
             (
                 AlertaExtraccion::SinRegistro,
@@ -444,6 +537,43 @@ fn responsable_incluye_ejecutor(responsable: &str, ejecutor: &str) -> bool {
         .any(|ventana| ventana == tokens_ejecutor.as_slice())
 }
 
+/// Sin alfanuméricos (`-`, `—`, en blanco) o uno de los rellenos habituales, completo
+pub fn es_valor_de_relleno(valor: &str) -> bool {
+    !valor.chars().any(char::is_alphanumeric)
+        || VALORES_DE_RELLENO.contains(&tokens_de(valor).join("_").as_str())
+}
+
+/// Invariante de la Tabla 03: un hito tiene algún rol o algún registro
+pub fn tiene_rol_o_registro(
+    ejecutor: &str,
+    responsable: &str,
+    registro_codigo: Option<&str>,
+    registro_nombre: Option<&str>,
+) -> bool {
+    [
+        Some(ejecutor),
+        Some(responsable),
+        registro_codigo,
+        registro_nombre,
+    ]
+    .into_iter()
+    .flatten()
+    .any(|valor| !es_valor_de_relleno(valor))
+}
+
+fn limpiar_rol(nombre: &str, valor: &str) -> Result<String, DomainError> {
+    let limpio = limpiar_campo(nombre, valor, HitoOperativo::MAX_LONGITUD_CAMPO)?;
+    Ok(if es_valor_de_relleno(&limpio) {
+        String::new()
+    } else {
+        limpio
+    })
+}
+
+fn limpiar_registro(nombre: &str, valor: Option<String>) -> Result<Option<String>, DomainError> {
+    Ok(limpiar_opcional(nombre, valor)?.filter(|limpio| !es_valor_de_relleno(limpio)))
+}
+
 fn limpiar_campo(nombre: &str, valor: &str, max_longitud: usize) -> Result<String, DomainError> {
     let recortado = valor.trim();
     if recortado.len() > max_longitud {
@@ -493,6 +623,7 @@ mod tests {
             objeto_alcance: "Material acopiado en almacén".to_string(),
             rol_ejecutor: "Almacenero".to_string(),
             rol_responsable: "Jefe de Producción".to_string(),
+            origen_responsable: OrigenResponsable::Declarado,
             registro_codigo: Some("FOR-ALM-02".to_string()),
             registro_nombre: Some("Parte de custodia".to_string()),
             criterio_aceptacion: "Sin daños ni corrosión".to_string(),
@@ -625,6 +756,139 @@ mod tests {
                 "{responsable}"
             );
         }
+    }
+
+    #[test]
+    fn test_calidad_no_es_ok_con_responsable_inferido_o_ausente() {
+        let mut borrador = borrador_custodia();
+        borrador.origen_responsable = OrigenResponsable::Inferido;
+        let hito = HitoOperativo::new(borrador.clone()).unwrap();
+        assert_eq!(hito.calidad_extraccion(), CalidadExtraccion::Revisar);
+        borrador.origen_responsable = OrigenResponsable::NoConsta;
+        borrador.rol_responsable = String::new();
+        let hito = HitoOperativo::new(borrador).unwrap();
+        assert_eq!(hito.calidad_extraccion(), CalidadExtraccion::Revisar);
+    }
+
+    #[test]
+    fn test_origen_declarado_exige_el_rol_en_el_texto_de_la_seccion() {
+        use OrigenResponsable::*;
+        let texto = "La firma corresponde al JEFE DE PRODUCCIÓN de la obra.";
+        let verificar = OrigenResponsable::verificar;
+        assert_eq!(
+            verificar("DECLARADO", "Jefe de Producción", texto),
+            Declarado
+        );
+        assert_eq!(
+            verificar("DECLARADO", "jefe de produccion", texto),
+            Declarado
+        );
+        assert_eq!(verificar("DECLARADO", "Jefe de Calidad", texto), Inferido);
+        // Palabras completas y en secuencia: una subcadena o palabras sueltas no bastan
+        assert_eq!(verificar("DECLARADO", "Produc", texto), Inferido);
+        assert_eq!(verificar("DECLARADO", "Producción Jefe", texto), Inferido);
+    }
+
+    #[test]
+    fn test_origen_vacio_desconocido_o_contradictorio() {
+        use OrigenResponsable::*;
+        let texto = "El Inspector firma.";
+        let verificar = OrigenResponsable::verificar;
+        assert_eq!(verificar("DECLARADO", "  ", texto), NoConsta);
+        assert_eq!(verificar("INFERIDO", "", texto), NoConsta);
+        assert_eq!(verificar("INFERIDO", "Inspector", texto), Inferido);
+        assert_eq!(verificar("NO_CONSTA", "Inspector", texto), Inferido);
+        assert_eq!(verificar("", "Inspector", texto), Inferido);
+        assert_eq!(verificar("SEGURO", "Inspector", texto), Inferido);
+    }
+
+    fn sin_titular() -> BorradorHito {
+        BorradorHito {
+            rol_ejecutor: String::new(),
+            rol_responsable: String::new(),
+            origen_responsable: OrigenResponsable::NoConsta,
+            registro_codigo: None,
+            registro_nombre: None,
+            ..borrador_custodia()
+        }
+    }
+
+    #[test]
+    fn test_hito_sin_rol_ni_registro_es_invalido() {
+        assert_eq!(
+            HitoOperativo::new(sin_titular()).unwrap_err(),
+            DomainError::HitoSinTitular("PO-ALM-03@v3-HIT-0002".to_string())
+        );
+        for relleno in [
+            "   ",
+            "N/A",
+            "n/a",
+            "NA",
+            "-",
+            "--",
+            "—",
+            ".",
+            "No aplica",
+            "No consta",
+            "Ninguno",
+            "s/d",
+        ] {
+            let borrador = BorradorHito {
+                rol_ejecutor: relleno.to_string(),
+                rol_responsable: relleno.to_string(),
+                registro_codigo: Some(relleno.to_string()),
+                registro_nombre: Some(relleno.to_string()),
+                ..sin_titular()
+            };
+            assert!(
+                matches!(
+                    HitoOperativo::new(borrador),
+                    Err(DomainError::HitoSinTitular(_))
+                ),
+                "{relleno}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_hito_vale_con_un_solo_rol_o_un_registro() {
+        let solo = [
+            BorradorHito {
+                rol_ejecutor: "Almacenero".to_string(),
+                ..sin_titular()
+            },
+            BorradorHito {
+                rol_responsable: "Inspector".to_string(),
+                ..sin_titular()
+            },
+            BorradorHito {
+                registro_codigo: Some("FOR-ALM-02".to_string()),
+                ..sin_titular()
+            },
+            BorradorHito {
+                registro_nombre: Some("Parte de custodia".to_string()),
+                ..sin_titular()
+            },
+        ];
+        for borrador in solo {
+            assert!(HitoOperativo::new(borrador.clone()).is_ok(), "{borrador:?}");
+        }
+    }
+
+    #[test]
+    fn test_roles_de_relleno_se_vacian_y_no_constan() {
+        let hito = HitoOperativo::new(BorradorHito {
+            rol_responsable: "N/A".to_string(),
+            origen_responsable: OrigenResponsable::Declarado,
+            ..borrador_custodia()
+        })
+        .unwrap();
+        assert_eq!(hito.rol_responsable, "");
+        assert_eq!(hito.origen_responsable, OrigenResponsable::NoConsta);
+        assert_eq!(hito.rol_ejecutor, "Almacenero");
+        // Un rol que solo contiene esas letras no es relleno
+        assert!(!es_valor_de_relleno("NASA"));
+        assert!(!es_valor_de_relleno("Jefe N/A"));
     }
 
     #[test]

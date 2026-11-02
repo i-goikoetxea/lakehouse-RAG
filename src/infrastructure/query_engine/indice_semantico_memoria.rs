@@ -59,6 +59,11 @@ mod tests {
             condicion_aplicacion: None,
             texto: "texto".to_string(),
             chunk_origen_id: None,
+            nodo_id: None,
+            tipo_bloque: None,
+            estado_contenido: None,
+            pagina_inicio: None,
+            pagina_fin: None,
             vector: vec![1.0, 0.0],
         }
     }

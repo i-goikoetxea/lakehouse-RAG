@@ -7,14 +7,16 @@ use std::sync::Arc;
 use crate::application::ports::embedding_engine::EmbeddingEnginePort;
 use crate::application::ports::semantic_index::IndiceSemanticoPort;
 use crate::application::use_cases::lakehouse_app::{DependenciasLakehouse, LakehouseApp};
-use crate::application::use_cases::lakehouse_tool_service::LakehouseToolService;
+use crate::application::use_cases::lakehouse_tool_service::{
+    ConfiguracionHerramientas, LakehouseToolService,
+};
 use crate::infrastructure::embeddings::fastembed_engine::MODELO_POR_DEFECTO;
 use crate::infrastructure::embeddings::lazy_engine::LazyFastEmbedEngine;
 use crate::infrastructure::llm::{
     ClaudeAgentConfig, ClaudeAgentRunner, ClaudeHeadlessConfig, ClaudeHeadlessDistiller,
     ClaudeHeadlessModelCatalog, ClaudeModelCatalogConfig,
 };
-use crate::infrastructure::parsers::markdown_parser::MarkdownParser;
+use crate::infrastructure::parsers::ParserPorFormato;
 use crate::infrastructure::query_engine::datafusion_engine::DataFusionEngine;
 use crate::infrastructure::query_engine::indice_semantico_memoria::IndiceSemanticoMemoria;
 use crate::infrastructure::query_engine::lakehouse_projection::LanceProjection;
@@ -53,13 +55,20 @@ pub struct MotoresConsulta {
 /// DataFusion y el índice semántico vacíos, enlazados con la
 /// proyección y las tools (que vectorizan la consulta de búsqueda con `embeddings`)
 pub fn motores_consulta(embeddings: Arc<dyn EmbeddingEnginePort>) -> MotoresConsulta {
+    motores_consulta_con(embeddings, ConfiguracionHerramientas::default())
+}
+
+/// `motores_consulta` con los límites de las tools indicados
+pub fn motores_consulta_con(
+    embeddings: Arc<dyn EmbeddingEnginePort>,
+    config: ConfiguracionHerramientas,
+) -> MotoresConsulta {
     let datafusion = Arc::new(DataFusionEngine::new());
     let indice = Arc::new(IndiceSemanticoMemoria::new());
-    let herramientas = Arc::new(LakehouseToolService::new(
-        datafusion.clone(),
-        indice.clone(),
-        embeddings,
-    ));
+    let herramientas = Arc::new(
+        LakehouseToolService::new(datafusion.clone(), indice.clone(), embeddings)
+            .con_configuracion(config),
+    );
     MotoresConsulta {
         proyeccion: Arc::new(LanceProjection::new(datafusion).con_indice_semantico(indice.clone())),
         herramientas,
@@ -87,7 +96,7 @@ pub fn composicion_real(config: &ConfiguracionComposicion) -> ComposicionReal {
             registro: Arc::new(JsonCenterRegistry::new(&config.directorio_config)),
             espacio: Arc::new(DiskCenterWorkspace::new()),
             proyeccion: motores.proyeccion,
-            parser: Arc::new(MarkdownParser::new()),
+            parser: Arc::new(ParserPorFormato::new()),
             destilador: Arc::new(ClaudeHeadlessDistiller::new(ClaudeHeadlessConfig::default())),
             modelo_embeddings: embeddings.modelo_activo(),
             embeddings,

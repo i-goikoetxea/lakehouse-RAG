@@ -246,10 +246,91 @@ async fn test_adv_resistencia_a_inyecciones_en_filtros_de_matriz_operativa() {
     let intacta = invocar(
         servicio,
         LakehouseToolName::QueryOperationalMatrix.as_str(),
-        json!({ "centro_id": centro.as_str() }),
+        json!({ "centro_id": centro.as_str(), "solo_declarados": false }),
     )
     .await;
     assert_eq!(intacta.output["total"], 2, "{}", intacta.output);
+}
+
+/// Con la tabla ya en el historial, la regla de auditoría debe llegar al modelo y el cruce debe
+/// pasar por la tool en el turno actual, con su telemetría. El runner solo pide el lookup si
+/// recibe la regla: que el modelo real obedezca lo comprueba `acceptance_8_problemas` (ignorado).
+#[tokio::test]
+async fn test_adv_cruce_tabular_con_tabla_en_historial_invoca_lookup_y_emite_telemetria() {
+    use async_trait::async_trait;
+    use lakehouse_rag::application::dtos::agent::AgentExecutionEvent;
+    use lakehouse_rag::application::dtos::tools::ToolDefinition;
+    use std::sync::Mutex;
+
+    const TABLA_EN_HISTORIAL: &str = "Tabla 4-A: e ≤ 20 → 50 °C; e > 20 → 125 °C";
+
+    #[derive(Default)]
+    struct RunnerSujetoALaRegla {
+        turnos: Mutex<usize>,
+    }
+
+    #[async_trait]
+    impl AgentRunnerPort for RunnerSujetoALaRegla {
+        async fn ejecutar_turno(
+            &self,
+            _modelo: &ClaudeModel,
+            system_prompt: &str,
+            historial: &[AgentMessage],
+            _herramientas: &[ToolDefinition],
+        ) -> Result<AgentTurnOutput, DomainError> {
+            let mut turnos = self.turnos.lock().unwrap();
+            *turnos += 1;
+            let tabla_visible = format!("{historial:?}").contains(TABLA_EN_HISTORIAL);
+            if *turnos == 1 && tabla_visible && system_prompt.contains("REGLA DE AUDITORÍA") {
+                return Ok(AgentTurnOutput::ToolCalls(vec![ToolCall {
+                    id: "call_cruce".to_string(),
+                    name: "lookup_double_entry_table".to_string(),
+                    arguments: json!({
+                        "centro_id": "planta_auditoria",
+                        "tabla_id": "4-A",
+                        "valor_x": 30,
+                        "valor_y": 0.42
+                    }),
+                }]));
+            }
+            Ok(AgentTurnOutput::FinalMessage("Respuesta".to_string()))
+        }
+    }
+
+    let entorno = entorno_vacio();
+    let centro = CenterId::new("planta_auditoria").unwrap();
+    sembrar_centro(&entorno, &centro).await;
+    let orchestrator = AgentOrchestrator::new(
+        Arc::new(RunnerSujetoALaRegla::default()),
+        entorno.servicio.clone(),
+    );
+    let mut historial = vec![
+        AgentMessage::user("Lee el apartado de la tabla"),
+        AgentMessage::assistant(TABLA_EN_HISTORIAL.to_string()),
+        AgentMessage::user("¿Qué valor corresponde a 30 mm y CE 0,42?"),
+    ];
+    let eventos: Arc<Mutex<Vec<AgentExecutionEvent>>> = Arc::default();
+    let destino = eventos.clone();
+
+    orchestrator
+        .procesar_turno(
+            &ClaudeModel::sonnet(),
+            &centro,
+            &mut historial,
+            Some(Arc::new(move |evento| destino.lock().unwrap().push(evento))),
+        )
+        .await
+        .unwrap();
+
+    let eventos = eventos.lock().unwrap();
+    assert!(eventos.iter().any(|evento| matches!(
+        evento,
+        AgentExecutionEvent::CallingTool { name, .. } if name == "lookup_double_entry_table"
+    )));
+    assert!(eventos.iter().any(|evento| matches!(
+        evento,
+        AgentExecutionEvent::ToolResultReceived { name, .. } if name == "lookup_double_entry_table"
+    )));
 }
 
 #[tokio::test]

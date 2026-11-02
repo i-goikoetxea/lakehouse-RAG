@@ -6,6 +6,7 @@
 use async_trait::async_trait;
 
 use crate::domain::models::center::CenterId;
+use crate::domain::models::estructura_documental::{EstadoContenido, TipoBloque};
 
 /// Tabla de origen de un fragmento indexado
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -38,6 +39,15 @@ pub struct FragmentoIndexado {
     pub texto: String,
     /// Chunk de origen (solo hitos), para la cita
     pub chunk_origen_id: Option<String>,
+    /// Sección en la tabla 07 (los hitos la heredan de su chunk de origen)
+    pub nodo_id: Option<String>,
+    /// Solo chunks; `None` en hitos o si el valor guardado está fuera de vocabulario
+    pub tipo_bloque: Option<TipoBloque>,
+    /// Solo chunks; `None` en hitos o si el valor guardado está fuera de vocabulario
+    pub estado_contenido: Option<EstadoContenido>,
+    /// Páginas de la sección en el original, si el formato las tiene (los hitos las heredan)
+    pub pagina_inicio: Option<i32>,
+    pub pagina_fin: Option<i32>,
     /// Vector del fragmento; vacío si la fila no tenía vector
     pub vector: Vec<f32>,
 }

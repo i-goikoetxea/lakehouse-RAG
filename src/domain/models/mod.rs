@@ -4,6 +4,7 @@ pub mod alcance;
 pub mod center;
 pub mod document;
 pub mod double_entry_table;
+pub mod estructura_documental;
 pub mod identificadores;
 pub mod operational_matrix;
 pub mod reference_graph;

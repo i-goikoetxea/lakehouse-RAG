@@ -109,7 +109,7 @@ async fn test_matriz_filas_atomicas_filtros_exactos_y_time_travel() {
     let custodia = ok(
         h,
         "query_operational_matrix",
-        args(json!({ "fase": "Custodia" })),
+        args(json!({ "solo_declarados": false, "fase": "Custodia" })),
     )
     .await;
     assert_eq!(custodia["total"], 1, "{custodia}");
@@ -129,7 +129,7 @@ async fn test_matriz_filas_atomicas_filtros_exactos_y_time_travel() {
     let recepcion = ok(
         h,
         "query_operational_matrix",
-        args(json!({ "fase": "Recepción" })),
+        args(json!({ "solo_declarados": false, "fase": "Recepción" })),
     )
     .await;
     assert_eq!(recepcion["total"], 1);
@@ -138,7 +138,7 @@ async fn test_matriz_filas_atomicas_filtros_exactos_y_time_travel() {
     let antes = ok(
         h,
         "query_operational_matrix",
-        args(json!({ "fase": "CUSTODIA", "fecha_referencia": FECHA_ANTERIOR_REV04 })),
+        args(json!({ "solo_declarados": false, "fase": "CUSTODIA", "fecha_referencia": FECHA_ANTERIOR_REV04 })),
     )
     .await;
     assert_eq!(antes["filas"][0]["registro_codigo"], "FOR-ALM-02");
@@ -147,7 +147,7 @@ async fn test_matriz_filas_atomicas_filtros_exactos_y_time_travel() {
     let firma = ok(
         h,
         "query_operational_matrix",
-        args(json!({ "rol": "jefe de produccion", "rol_en": "responsable" })),
+        args(json!({ "solo_declarados": false, "rol": "jefe de produccion", "rol_en": "responsable" })),
     )
     .await;
     assert_eq!(
@@ -157,7 +157,9 @@ async fn test_matriz_filas_atomicas_filtros_exactos_y_time_travel() {
     let como_ejecutor = ok(
         h,
         "query_operational_matrix",
-        args(json!({ "rol": "Jefe de Producción", "rol_en": "ejecutor" })),
+        args(
+            json!({ "solo_declarados": false, "rol": "Jefe de Producción", "rol_en": "ejecutor" }),
+        ),
     )
     .await;
     assert_eq!(como_ejecutor["total"], 0);
@@ -165,7 +167,7 @@ async fn test_matriz_filas_atomicas_filtros_exactos_y_time_travel() {
     let por_registro = ok(
         h,
         "query_operational_matrix",
-        args(json!({ "registro": "for-alm-01" })),
+        args(json!({ "solo_declarados": false, "registro": "for-alm-01" })),
     )
     .await;
     assert_eq!(

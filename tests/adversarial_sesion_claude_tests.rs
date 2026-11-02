@@ -83,6 +83,8 @@ async fn test_destilador_sin_sesion_devuelve_mensaje_accionable_sin_json() {
         secciones: Vec::new(),
         tablas: Vec::new(),
         contenido_completo: "# PO-ALM-03\nRecepción de tubería.".into(),
+        avisos_extraccion: Vec::new(),
+        requiere_ocr: false,
     };
     let error = destilador
         .distill(&documento)

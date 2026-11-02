@@ -61,6 +61,7 @@ pub fn servir_mcp() -> anyhow::Result<()> {
             }
         }
         McpServer::new(app.servidor_herramientas())
+            .con_reintento(app)
             .run_stdio()
             .await
     })?;

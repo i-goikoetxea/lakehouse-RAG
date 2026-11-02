@@ -5,12 +5,12 @@
 //!   `version_num`, `fecha_vigor` y `fecha_derogacion`), para que la Fase 13 resuelva el
 //!   *time travel* con SQL. Las filas `STAGED` nunca se proyectan. Las tools filtran
 //!   `vigente = true` por defecto.
-//! * Las columnas vectoriales (`vector`, `vector_hito`, `vector_tabla`) no se proyectan:
+//! * Las columnas vectoriales (`vector`, `vector_hito`, `vector_tabla`, `vector_seccion`) no se proyectan:
 //!   los vectores de chunks e hitos alimentan el índice semántico en memoria y un `SELECT *`
 //!   no debe volcar 1024 floats.
 //! * Las tools v2 resuelven grafo y tablas de doble entrada con SQL sobre las vistas del
 //!   centro, así que no hay motores globales que recargar.
-//! * La lectura de las 6 tablas se completa antes de tocar DataFusion: si una falla (p. ej. un
+//! * La lectura de las 7 tablas se completa antes de tocar DataFusion: si una falla (p. ej. un
 //!   `.lance` borrado a mano), las vistas previas no se alteran y el error nombra la tabla.
 
 use std::collections::{HashMap, HashSet};
@@ -26,7 +26,7 @@ use async_trait::async_trait;
 use serde_json::json;
 use tokio::sync::Mutex;
 
-use crate::application::dtos::centros::DIRECTORIO_GLUE_CATALOG;
+use crate::application::dtos::centros::{DIRECTORIO_GLUE_CATALOG, VERSION_ESQUEMA_CENTRO};
 use crate::application::ports::analytical_engine::AnalyticalEnginePort;
 use crate::application::ports::center_workspace::CentroAbierto;
 use crate::application::ports::lakehouse_projection::{
@@ -41,6 +41,7 @@ use crate::application::ports::semantic_index::{
 };
 use crate::domain::errors::DomainError;
 use crate::domain::models::center::CenterId;
+use crate::domain::models::estructura_documental::{EstadoContenido, TipoBloque};
 use crate::infrastructure::query_engine::datafusion_engine::DataFusionEngine;
 use crate::infrastructure::storage::schemas::obtener_esquema_por_nombre;
 
@@ -140,6 +141,13 @@ fn entero_en(lote: &RecordBatch, nombre: &str, fila: usize) -> i64 {
         .map_or(0, |c| i64::from(c.value(fila)))
 }
 
+fn pagina_en(lote: &RecordBatch, nombre: &str, fila: usize) -> Option<i32> {
+    lote.column_by_name(nombre)
+        .and_then(|c| c.as_any().downcast_ref::<Int32Array>())
+        .filter(|c| c.is_valid(fila))
+        .map(|c| c.value(fila))
+}
+
 fn vector_en(lote: &RecordBatch, nombre: &str, fila: usize) -> Vec<f32> {
     let Some(lista) = lote
         .column_by_name(nombre)
@@ -173,6 +181,11 @@ fn fragmento_base(
         condicion_aplicacion: texto_en(lote, "condicion_aplicacion", fila),
         texto: String::new(),
         chunk_origen_id: None,
+        nodo_id: None,
+        tipo_bloque: None,
+        estado_contenido: None,
+        pagina_inicio: None,
+        pagina_fin: None,
         vector: Vec::new(),
     }
 }
@@ -185,6 +198,13 @@ fn fragmentos_de_chunks(lotes: &[RecordBatch]) -> Vec<FragmentoIndexado> {
             f.breadcrumb_jerarquia =
                 texto_en(lote, "breadcrumb_jerarquia", fila).unwrap_or_default();
             f.texto = texto_en(lote, "texto_contenido", fila).unwrap_or_default();
+            f.nodo_id = texto_en(lote, "nodo_id", fila);
+            f.tipo_bloque =
+                texto_en(lote, "tipo_bloque", fila).and_then(|t| TipoBloque::parse(&t).ok());
+            f.estado_contenido = texto_en(lote, "estado_contenido", fila)
+                .and_then(|t| EstadoContenido::parse(&t).ok());
+            f.pagina_inicio = pagina_en(lote, "pagina_inicio", fila);
+            f.pagina_fin = pagina_en(lote, "pagina_fin", fila);
             f.vector = vector_en(lote, "vector", fila);
             fragmentos.push(f);
         }
@@ -196,11 +216,12 @@ fn fragmentos_de_chunks(lotes: &[RecordBatch]) -> Vec<FragmentoIndexado> {
 fn texto_hito(lote: &RecordBatch, fila: usize) -> String {
     let campo = |nombre: &str| texto_en(lote, nombre, fila).unwrap_or_else(|| "-".to_string());
     format!(
-        "Fase {}: {}. Ejecutor: {}. Responsable: {}. Registro: {} {}. Criterio: {}",
+        "Fase {}: {}. Ejecutor: {}. Responsable: {} (origen: {}). Registro: {} {}. Criterio: {}",
         campo("fase_operativa"),
         campo("objeto_alcance"),
         campo("rol_ejecutor"),
         campo("rol_responsable"),
+        campo("origen_responsable"),
         campo("registro_codigo"),
         campo("registro_nombre"),
         campo("criterio_aceptacion"),
@@ -209,18 +230,23 @@ fn texto_hito(lote: &RecordBatch, fila: usize) -> String {
 
 fn fragmentos_de_hitos(
     lotes: &[RecordBatch],
-    breadcrumbs: &HashMap<String, String>,
+    chunks_origen: &HashMap<String, &FragmentoIndexado>,
 ) -> Vec<FragmentoIndexado> {
     let mut fragmentos = Vec::new();
     for lote in lotes {
         for fila in 0..lote.num_rows() {
             let mut f = fragmento_base(lote, fila, "hito_id", OrigenFragmento::Hito);
             f.chunk_origen_id = texto_en(lote, "chunk_origen_id", fila);
-            f.breadcrumb_jerarquia = f
+            if let Some(chunk) = f
                 .chunk_origen_id
                 .as_ref()
-                .and_then(|c| breadcrumbs.get(c).cloned())
-                .unwrap_or_default();
+                .and_then(|c| chunks_origen.get(c))
+            {
+                f.breadcrumb_jerarquia = chunk.breadcrumb_jerarquia.clone();
+                f.nodo_id = chunk.nodo_id.clone();
+                f.pagina_inicio = chunk.pagina_inicio;
+                f.pagina_fin = chunk.pagina_fin;
+            }
             f.texto = texto_hito(lote, fila);
             f.vector = vector_en(lote, "vector_hito", fila);
             fragmentos.push(f);
@@ -239,14 +265,10 @@ fn fragmentos_indexables(leidas: &[TablaLeida]) -> Vec<FragmentoIndexado> {
             .unwrap_or_default()
     };
     let mut fragmentos = fragmentos_de_chunks(&lotes_de(TABLA_CHUNKS_NORMATIVA));
-    let breadcrumbs: HashMap<String, String> = fragmentos
-        .iter()
-        .map(|f| (f.id.clone(), f.breadcrumb_jerarquia.clone()))
-        .collect();
-    fragmentos.extend(fragmentos_de_hitos(
-        &lotes_de(TABLA_MATRIZ_OPERATIVA),
-        &breadcrumbs,
-    ));
+    let chunks_origen: HashMap<String, &FragmentoIndexado> =
+        fragmentos.iter().map(|f| (f.id.clone(), f)).collect();
+    let hitos = fragmentos_de_hitos(&lotes_de(TABLA_MATRIZ_OPERATIVA), &chunks_origen);
+    fragmentos.extend(hitos);
     fragmentos
 }
 
@@ -329,7 +351,7 @@ pub fn inventario_glue(
         .collect();
     json!({
         "centro_id": centro_id.as_str(),
-        "schema_version": 2,
+        "schema_version": VERSION_ESQUEMA_CENTRO,
         "instrucciones": "En execute_athena_sql usa el nombre canónico de la tabla (p. ej. \
             03_matriz_operativa): la herramienta lo traduce a la vista del centro. Las vistas \
             contienen todas las revisiones confirmadas: filtra vigente = true para la normativa \
@@ -417,7 +439,16 @@ impl LakehouseProjectionPort for LanceProjection {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::infrastructure::storage::schemas::schema_matriz_operativa;
+    use crate::application::dtos::lakehouse_filas::{ClaveDocumental, FilaChunk, LoteIngesta};
+    use crate::domain::models::document::{DocId, TipoDocumento};
+    use crate::domain::models::estructura_documental::NodoId;
+    use crate::domain::models::identificadores::IngestId;
+    use crate::infrastructure::storage::lotes_arrow::{
+        ColumnasTransaccionales, lote_a_record_batch,
+    };
+    use crate::infrastructure::storage::schemas::{
+        DIMENSION_EMBEDDINGS, schema_indice_jerarquico, schema_matriz_operativa,
+    };
 
     #[test]
     fn test_esquema_sin_vectores_quita_solo_las_columnas_vectoriales() {
@@ -427,6 +458,50 @@ mod tests {
         assert!(proyectado.field_with_name("vector_hito").is_err());
         assert_eq!(proyectado.fields().len(), original.fields().len() - 1);
         assert!(proyectado.field_with_name("rol_responsable").is_ok());
+    }
+
+    #[test]
+    fn test_esquema_del_indice_07_se_proyecta_sin_su_vector() {
+        let proyectado = esquema_sin_vectores(&schema_indice_jerarquico());
+        assert!(proyectado.field_with_name("vector_seccion").is_err());
+        assert!(proyectado.field_with_name("ruta_linaje").is_ok());
+    }
+
+    #[test]
+    fn test_fragmento_de_chunk_lleva_las_columnas_stair() {
+        let clave = ClaveDocumental {
+            centro_id: CenterId::new("obra-a").unwrap(),
+            doc_id: DocId::new("DOC").unwrap(),
+            version_num: 1,
+        };
+        let chunk = FilaChunk {
+            pagina_inicio: Some(3),
+            pagina_fin: Some(4),
+            chunk_id: "DOC-c0".to_string(),
+            clave,
+            nodo_id: NodoId::new("DOC#sec-1").unwrap(),
+            tipo_bloque: TipoBloque::Alcance,
+            estado_contenido: EstadoContenido::ParcialUniversal,
+            nivel_prelacion: TipoDocumento::ProcedimientoObra.nivel_prelacion(),
+            breadcrumb_jerarquia: "1".to_string(),
+            condicion_aplicacion: None,
+            texto_contenido: "texto".to_string(),
+            tablas_vinculadas: Vec::new(),
+            hitos_vinculados: Vec::new(),
+            vector: vec![0.5; DIMENSION_EMBEDDINGS as usize],
+        };
+        let transaccion = ColumnasTransaccionales::staged(&IngestId::new("ING").unwrap());
+        let lote = lote_a_record_batch(&LoteIngesta::Chunks(vec![chunk]), &transaccion).unwrap();
+
+        let fragmentos = fragmentos_de_chunks(&[lote]);
+        assert_eq!(fragmentos[0].nodo_id.as_deref(), Some("DOC#sec-1"));
+        assert_eq!(fragmentos[0].tipo_bloque, Some(TipoBloque::Alcance));
+        assert_eq!(
+            fragmentos[0].estado_contenido,
+            Some(EstadoContenido::ParcialUniversal)
+        );
+        assert_eq!(fragmentos[0].pagina_inicio, Some(3));
+        assert_eq!(fragmentos[0].pagina_fin, Some(4));
     }
 
     #[test]

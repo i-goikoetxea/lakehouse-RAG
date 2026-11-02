@@ -11,7 +11,7 @@ use lakehouse_rag::domain::models::alcance::{
 use lakehouse_rag::domain::models::document::{DocId, TipoDocumento};
 use lakehouse_rag::domain::models::identificadores::{TipoEntidad, id_versionado};
 use lakehouse_rag::domain::models::operational_matrix::{
-    AlertaExtraccion, BorradorHito, FaseOperativa, HitoOperativo,
+    AlertaExtraccion, BorradorHito, FaseOperativa, HitoOperativo, OrigenResponsable,
 };
 use lakehouse_rag::domain::models::reference_graph::TipoRelacionNormativa;
 use lakehouse_rag::domain::models::vigencia::VentanaVigencia;
@@ -41,6 +41,7 @@ fn hito_con_responsable(ejecutor: &str, responsable: &str) -> HitoOperativo {
         objeto_alcance: "Material acopiado".to_string(),
         rol_ejecutor: ejecutor.to_string(),
         rol_responsable: responsable.to_string(),
+        origen_responsable: OrigenResponsable::Declarado,
         registro_codigo: Some("FOR-ALM-02".to_string()),
         registro_nombre: None,
         criterio_aceptacion: "Sin daños".to_string(),

@@ -27,6 +27,18 @@
 
 
 
+### Proyecto STAIR (rama `feat/stair-rag-dual`; contrato en `docs/arquitectura/decisiones_stair.md`)
+
+| Fase STAIR | Título | Estado | Tests |
+| :---: | :--- | :---: | :---: |
+| **1** | Esquemas: tabla 07, columnas de 02 y 01, `schema_version` 3 | `[COMPLETADO]` (pendiente de commit por la sesión orquestadora) | Solo suites específicas; ver Bitácora |
+| **2** | Ingesta universal | `[COMPLETADO]` (pendiente de commit por la sesión orquestadora) | Solo suites específicas; ver Bitácora |
+| **3** | PDF | `[COMPLETADO]` | Solo suites específicas; ver Bitácora |
+| **4** | Búsqueda y tools | `[COMPLETADO]` (pendiente de commit por la sesión orquestadora) | Solo suites específicas; ver Bitácora |
+| **5** | Aceptación | `[COMPLETADO]` (pendiente de commit; merge congelado hasta la revisión del usuario) | 522 pasan, 29 ignorados; E2E real 4/4 en 3 ejecuciones |
+| **6** | Calidad de datos: fecha nula, apartados, origen del responsable | `[COMPLETADO]` | 566 pasan, 31 ignorados |
+| **7** | Hitos, roles e índice para documentos largos; esquema v5 | `[COMPLETADO]` (pendiente de commit; merge congelado hasta la revisión del usuario) | 600 pasan, 31 ignorados; aceptación real 10/10 en 5 pasadas seguidas |
+
 *Estados posibles:* `[NO INICIADO]`, `[EN PROGRESO]`, `[COMPLETADO]`, `[BLOQUEADO]`
 
 ---
@@ -176,6 +188,47 @@
 - [x] Informe `docs/validacion/aceptacion_final.md` y logs en `docs/validacion/fase15/`.
 - [x] Prueba guiada de la ventana con el usuario (checklist §7 y demo `GUIA_DEMO.md`); aprobada el 2026-10-19.
 - [x] Chat en vivo (streaming `stream-json`, Detener, rediseño según la referencia REA). La aceptación real repetida con streaming da 10/10 (620 s).
+
+---
+
+### STAIR Fase 1: Esquemas
+- [x] Contrato en `docs/arquitectura/decisiones_stair.md`.
+- [x] Dominio: `EstadoContenido`, `TipoBloque`, `NodoId`, `NivelJerarquico`.
+- [x] Tabla `07_indice_jerarquico`; `nodo_id`, `tipo_bloque` y `estado_contenido` en 02; `doc_id_provisional` en 01.
+- [x] `FilaIndice`, `LoteIngesta::Indice`, `FragmentoIndexado` y proyección actualizados.
+- [x] 07 en staged, commit, rollback, retirada de vigencia, integridad, lecturas `COMMITTED` y time travel.
+- [x] `schema_version` 3: un centro anterior se rechaza con error claro. No hay migración.
+- [x] Ingesta actual con valores mínimos y sin escribir 07 (hasta la Fase 2).
+- [x] Suite `tests/adversarial_esquemas_stair_tests.rs`.
+
+---
+
+### STAIR Fase 2: Ingesta universal
+- [x] Preámbulo, secciones sin texto y BOM en `markdown_parser.rs`.
+- [x] Árbol ToC y resumen extractivo (`domain/services/arbol_secciones.rs`); filas de 07 en la ingesta.
+- [x] Fragmentación 600/512/64 con estimación determinista (`domain/services/fragmentacion.rs`).
+- [x] Tablas Markdown íntegras en 02.
+- [x] Fallback sin Claude: `doc_id` provisional, `PARCIAL_UNIVERSAL` y avisos en el informe, CLI y GUI.
+- [x] `reintentar_destilacion` en el servicio y en `LakehouseApp`; `confirmar_sustitucion` en el store.
+- [x] Retirados el `continue` de 07 y la tolerancia «revisión sin 07».
+- [x] Comando de reintento en GUI, CLI y MCP (Fase 4).
+
+### STAIR Fase 4: Búsqueda y tools
+- [x] Páginas en `FragmentoIndexado` (los hitos las heredan) y citas con sección y página.
+- [x] `search_normative_context`: `modo`, `nodo_id`, `ruta_linaje_prefijo`, estado de contenido y `documentos_no_definitivos`.
+- [x] `stair_navigate_toc` y `stair_get_subtree_context`; alias provisional.
+- [x] System prompt con los 4 casos; MCP con 8 tools más el reintento administrativo; `MCP_GUIDE.md`.
+- [x] Reintento en GUI, CLI y MCP; estado en catálogo e informe; `app.js`.
+- [x] Fixtures `DOC-GENERICO-01.md` y `DOC-TECNICO-OBRA-02.md`, oráculo y esqueleto `#[ignore]` de `tests/e2e_rag_dual_validation.rs`.
+- [x] Ejecutar la matriz E2E con Claude real y probar la GUI (Fase 5).
+
+### STAIR Fase 5: Aceptación
+- [x] Suite completa, matriz E2E (3 veces) y suites `#[ignore]` reales.
+- [x] PDF real: ingesta, 7 preguntas en 2 ejecuciones, fallback sin Claude y reintento.
+- [x] Medida del recorte a 512 tokens y valoración del límite de 40.000 caracteres.
+- [x] GUI en ventana real por DevTools, con capturas en `docs/validacion/stair/`.
+- [ ] Comprobar a mano el diálogo nativo y el arrastre desde el Explorador.
+- [ ] Decisión del usuario sobre el merge y los fallos abiertos.
 
 ---
 
@@ -915,3 +968,133 @@
 * **Observado una vez y no reproducido:** en un segundo turno inmediato, la vista quedó a 400 px del final hasta terminar la respuesta.
 * **Cierre:** el usuario probó la demo y el chat nuevo y aprobó la Fase 15. Con el runner en streaming, la aceptación real da 10/10 (620 s; `docs/validacion/fase15/acceptance_8_problemas_ejecucion3_streaming.log`). La suite queda en 367 OK + 19 ignorados, con clippy y fmt limpios. Commit `feat(phase-15)` sin push, pendiente de la aprobación explícita del usuario.
 
+
+### Sesión STAIR 1 (2026-10-31) — Fase 1: Esquemas
+
+**Cambios:**
+- Contrato: `docs/arquitectura/decisiones_stair.md`. Prevalece sobre la especificación de Gemini.
+- Nuevo `domain/models/estructura_documental.rs` y validación `validar_estructura_stair`, que `escribir_staged` aplica antes de escribir.
+- `verificar_integridad` añade `nodos_huerfanos` y `valores_invalidos`, visibles en CLI y GUI.
+- `confirmar_ingesta` devuelve lo activado a `STAGED` si la activación falla a medias. Antes, un fallo así exponía la revisión parcial hasta el rollback.
+- `VERSION_ESQUEMA_CENTRO = 3`; `VERSION_ESQUEMA` y el `schema_version` del glue catalog se derivan de ella.
+
+**Tests:** se añade `adversarial_esquemas_stair_tests` (18). Se adaptan fixtures y recuentos de 6 a 7 tablas. Por regla del usuario no se ejecutó `cargo test` completo ni las suites `#[ignore]`.
+
+**Notas para la Fase 2:**
+- Leer `decisiones_stair.md` §4 y §5.
+- Enviar 02 y 07 en la misma llamada a `escribir_staged`.
+- Hay un `continue` temporal para la tabla 07 en `tests/integration_store_v2_transaccional.rs` (`servicio_revierte_todo_...`): debe retirarse cuando la ingesta escriba 07.
+
+### Sesión STAIR 2 (2026-10-31) — Fase 2: Ingesta universal
+
+**Cambios:** los contratos están en `decisiones_stair.md` §4.
+- Ingesta en dos etapas y una transacción: un fallo de Claude deja el documento indexado como provisional, con aviso. Solo revierten los fallos de embeddings o de disco.
+- `reintentar_destilacion` sustituye el provisional reutilizando vectores, o lo consolida si no hay código válido.
+- Puertos: `confirmar_sustitucion` en el store, `contar_truncados` en embeddings y `es_provisional` en `HuellaIngerida`.
+- `verificar_integridad` informa las revisiones con chunks y sin 07.
+
+**Tests:** nuevas `integration_ingesta_universal` (13) y `adversarial_ingesta_universal_tests` (14), más unitarios de fragmentación, árbol, parser y mapeo.
+- Cambian de contrato, porque un fallo de destilación ya no es error: `adversarial_store_v2_tests`, `adversarial_ingestion_tests`, `integration_lakehouse_app` y `acceptance_e2e_etapa1_ingesta`. `adversarial_esquemas_stair_tests` cambia porque una revisión sin 07 ya es huérfana.
+- `integration_gui_v2` esperaba 6 vistas y son 7: quedó pendiente de la Fase 1.
+- Por regla del usuario no se ejecutó `cargo test` completo, ni las suites `#[ignore]`, ni Claude real, ni el modelo real.
+
+**Notas para las siguientes fases:**
+- **Fase 3:** ver `decisiones_stair.md` §5.
+- **Fase 4:** exponer el reintento en GUI, CLI y MCP, y resolver el alias provisional.
+- **Fase 5:** ejecutar el test `#[ignore]` de `contar_truncados` y medir el truncado real de E5, limitado a 512 tokens. Puede obligar a revisar el umbral de 600.
+
+### Sesión STAIR 5 (2026-10-31) — Fase 5: Aceptación
+
+**Resultado:** `docs/validacion/stair/aceptacion_stair.md`. Funciona como RAG general con límites; se recomienda integrar tras decidir sobre los centros existentes. Merge congelado.
+
+**Cambios:**
+- `estructura.rs`: el límite del subárbol cuenta toda la sección serializada.
+- `app.js`: «Valores inválidos: undefined» y botón de reintento ilegible.
+
+**Tests:**
+- Nueva `tests/aceptacion_stair_pdf_real.rs` (`#[ignore]`; ruta del PDF por variable de entorno).
+- Tres tests de regresión, uno por cada fallo corregido.
+- `e2e_rag_dual_validation`: aserciones reforzadas con el oráculo.
+- `e2e_binario_fase12`: de 6 a 7 vistas, porque el test estaba obsoleto.
+- Final: 522 pasan, 0 fallan, 29 ignorados. Clippy y fmt limpios.
+
+**Notas para la siguiente sesión:**
+- Decidir los fallos abiertos del informe, empezando por la fecha de vigor inventada.
+- Falta comprobar a mano el diálogo nativo y el arrastre desde el Explorador.
+- Lanzar las suites reales con `FASTEMBED_CACHE_DIR` apuntando a la caché existente; si no, la etapa 1 descarga de nuevo el modelo en `target/`.
+- Tras corregir el límite solo se repitieron la matriz E2E y la suite normal.
+### Sesión STAIR 3 (2026-10-31) — Fase 3: PDF digital
+
+**Cambios:** los contratos están en `decisiones_stair.md` §5.
+- Nuevos `PdfParser`, `pdf_estructura` y `ParserPorFormato`, compuesto en `bootstrap`. GUI y CLI aceptan `.pdf`.
+- `parse_bytes`, `ingestar_bytes` y `reintentar_destilacion_bytes`: el hash se calcula sobre los bytes del original.
+- 02 añade `pagina_inicio` y `pagina_fin`. Los centros v3 creados antes de esta fase deben recrearse.
+- `REQUIERE_OCR` ya se produce: indexa sin destilar y no admite reintento.
+
+**Tests:** nuevas `integration_pdf_parser` (11, más 1 `#[ignore]` con PDF reales por `LAKEHOUSE_PDF_REALES`) y `adversarial_pdf_tests` (21), más unitarios de `pdf_estructura`. Por regla del usuario no se ejecutó `cargo test` completo, ni otras suites `#[ignore]`, ni Claude real, ni el modelo real.
+
+**Notas para las siguientes fases:**
+- **Fase 4:** ver `decisiones_stair.md` §6 (páginas en citas y explicación de `REQUIERE_OCR`).
+- **Fase 5:** ingerir un PDF real completo con Claude y modelo reales.
+
+### Sesión STAIR 4 (2026-10-31) — Fase 4: Búsqueda y tools
+
+**Cambios:** los contratos están en `decisiones_stair.md` §6.
+- Nuevo `lakehouse_tool_service/estructura.rs` con las dos tools STAIR y la resolución de documento, alias y sección.
+- `busqueda.rs` evoluciona con modos y filtros por sección. Un provisional nunca prevalece.
+- Dominio: `comparar_rutas_linaje`, `comparar_natural` y `reconstruir_sin_solape`.
+- `LakehouseApp::reintentar_documento` y `CenterWorkspacePort::localizar_original`; CLI `--reintentar`, comando GUI y botón, `McpServer::con_reintento`.
+- `FragmentoIndexado` añade páginas; `IngestaDto` y `DocumentoCatalogoDto` añaden estado; `CitationDto` añade `paginas`.
+
+**Tests:** nuevas `integration_tools_stair` (19) y `adversarial_tools_stair_tests` (7), más unitarios en dominio, `estructura.rs`, `busqueda.rs` y `resultados_tools.rs`. Pasan `--lib` (242, con 1 `#[ignore]` sin ejecutar) y las suites afectadas de tools, agente, GUI, MCP, CLI, app e ingesta universal. Por regla del usuario no se ejecutó `cargo test` completo, ni `#[ignore]`, ni Claude real, ni el modelo real. El esqueleto E2E solo se compiló.
+
+**Notas para la Fase 5:** ver `decisiones_stair.md` §7. El enrutamiento del agente **no está verificado**: los dobles no lo pueden comprobar.
+
+### Sesión STAIR 6 (2026-10-31) — Fase 6: Calidad de datos
+
+**Cambios:** los contratos están en `decisiones_stair.md` §8. Esquema v4, sin migración.
+- `fecha_vigor` nula: `validar_fecha_vigor`, `VentanaVigencia::estado_en`, `vigencia_no_declarada` en las tools; la confirmación compara con todas las fechas confirmadas.
+- Parser de PDF: títulos dudosos (puntuación final o más de 16 palabras) solo en secuencia exacta.
+- `origen_responsable` en 03 con `OrigenResponsable::verificar`; calidad `REVISAR` si es inferido o ausente; expuesto en matriz, SQL, GUI y system prompt.
+- Privacidad: preguntas de aceptación por `LAKEHOUSE_PREGUNTAS_ACEPTACION`; sin referencias a documentos reales en lo versionado.
+
+**TDD:** vistos en rojo: 8 unitarios de dominio, 17 de `adversarial_fase6_stair_tests` y los de numeración. Excepciones: `test_la_gui_muestra_no_declarada_y_el_origen` se añadió junto a la implementación, y `test_provisional_no_toma_la_fecha_de_la_ingesta` y los dos del esquema JSON, con ella; no se vieron en rojo por comportamiento. 13 tests adversariales pasaron desde el principio porque son guardas (falsos positivos).
+
+**Tests:**
+- Nueva `adversarial_fase6_stair_tests`.
+- Tests heredados adaptados a los tipos nuevos; `interpretar_fecha_vigor` se eliminó con su aserción, que exigía usar la fecha de hoy, contraria al contrato. Algunos fixtures ahora nombran el rol o usan `INFERIDO`; no se rebajó ninguna aserción.
+- Final: 566 pasan, 0 fallan, 31 ignorados. Clippy y fmt limpios.
+- Reales: e2e 4/4 y PDF real 4/4. `acceptance_8_problemas` **9/10**: `p6_agregacion` falló 1 de 4 veces.
+
+**Notas para la siguiente sesión:**
+- Resultados en el informe local `docs/validacion/stair/aceptacion_stair.md`.
+- Abierto: fallo intermitente de P6 (un hito sin rol ni registro), con propuesta sin aplicar.
+- Abierto: numeración que se reinicia en documentos largos, y umbral 600→512 (recomendado, no aplicado).
+- Lanzar las suites reales con `FASTEMBED_CACHE_DIR` apuntando a la caché existente.
+
+### Sesión STAIR 7 (2026-11-01) — Fase 7: Hitos, roles e índice largo
+
+**Cambios:** contratos en `decisiones_stair.md` §9. Esquema v5, sin migración.
+- `HitoOperativo` exige rol o registro; los descartados se cuentan en `hitos_derivados_capa0` y su texto sigue en la Capa 0. Barrera también al escribir.
+- `query_operational_matrix`: `solo_declarados`, `excluidos_no_declarados`, `sin_responsable_declarado`, `accion_sugerida`; reglas nuevas en el system prompt.
+- PDF: tramos por capítulo o reinicio, sub-nodos `SINTETICO` por páginas y páginas reales por chunk. `tipo_nodo` en 07, ToC, subárbol, integridad y GUI; las citas apuntan a la sección real.
+
+**Tests:** nueva `adversarial_fase7_stair_tests`. Final: 600 pasan, 0 fallan, 31 ignorados. Clippy y fmt limpios. Reales sobre el código final: e2e 4/4, PDF real, documento largo y `acceptance_8_problemas` 10/10 en 5 pasadas seguidas. Excepciones de TDD y tests heredados adaptados: informe local.
+
+**Notas para la siguiente sesión:**
+- Resultados, checklist manual y borrador de changelog: `docs/validacion/stair/aceptacion_stair.md`, sección Fase 7.
+- Abierto: umbral 600→512 (datos aportados, sin aplicar); `pattern` no válido en un campo del alta de centro (propuesta sin aplicar); pasos manuales de la GUI.
+- Límite aceptado: la matriz no es fuente fiable de roles en documentos en voz pasiva.
+
+### Sesión STAIR 8 (2026-11-02) — Ajustes tras la validación manual
+
+**Cambios:**
+- Regla 12 del system prompt (auditoría): un cruce tabular exige `lookup_double_entry_table` en el turno actual aunque la tabla ya esté en el historial.
+- PDF: una línea `ANEXO A`, `ANEXO 3` o `ANEXO IV`, con título opcional, abre un nodo raíz `REAL`; sus apartados cuelgan de él y el cuerpo conserva sus niveles. Una mención en mitad del cuerpo o la última entrada de un índice no cortan.
+
+**Tests:** 608 pasan, 0 fallan, 32 ignorados. Clippy y fmt limpios. Nuevos tests de parser y orquestador, `test_adv_cruce_tabular_con_tabla_en_historial...` con runner simulado y `p2_cruce_con_la_tabla_ya_en_el_historial_invoca_lookup` real e ignorado.
+
+**Notas para la siguiente sesión:**
+- El test real de la regla 12 no se ejecutó: el cumplimiento por Claude real queda sin verificar.
+- `Anexo A` en minúsculas no abre nodo, a propósito: suele ser una remisión.
+- Abierto: umbral 600→512; `pattern` no válido en un campo del alta de centro; pasos manuales de la GUI.

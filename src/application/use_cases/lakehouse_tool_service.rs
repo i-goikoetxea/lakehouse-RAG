@@ -1,4 +1,4 @@
-//! Servicio de las 6 herramientas v2 del Lakehouse (plan v2 §2.4, Fase 13).
+//! Servicio de las 8 herramientas del Lakehouse (plan v2 §2.4, Fase 13 y STAIR).
 //!
 //! Todas las tools leen las **vistas DataFusion del centro activo**, que contienen todas las
 //! revisiones confirmadas (Fase 12): así el *time travel* se resuelve con la ventana de
@@ -7,6 +7,7 @@
 
 mod busqueda;
 mod catalogo;
+mod estructura;
 mod grafo;
 mod lookup;
 mod matriz;
@@ -49,6 +50,10 @@ pub struct ConfiguracionHerramientas {
     pub max_nodos: usize,
     /// Resultados por defecto de `search_normative_context`
     pub top_k: usize,
+    /// Nodos máximos de una respuesta de `stair_navigate_toc`
+    pub max_nodos_toc: usize,
+    /// Caracteres máximos (texto y metadatos) de una respuesta de `stair_get_subtree_context`
+    pub max_caracteres_subarbol: usize,
 }
 
 impl Default for ConfiguracionHerramientas {
@@ -61,6 +66,8 @@ impl Default for ConfiguracionHerramientas {
             umbral_hub: 25,
             max_nodos: 50,
             top_k: 8,
+            max_nodos_toc: 100,
+            max_caracteres_subarbol: 40_000,
         }
     }
 }
@@ -85,11 +92,32 @@ impl ContextoConsulta {
     }
 
     /// Predicado de vigencia sobre el alias de la tabla (`t`) y el de su catálogo (`d`):
-    /// sin fecha → `t.vigente = true`; con fecha D → ventana `[fecha_vigor, fecha_derogacion)`
+    /// sin fecha → `t.vigente = true`; con fecha D → ventana firme más las revisiones de las que
+    /// no se puede afirmar nada, que cada tool marca con `marca_no_declarada`
     pub fn predicado_vigencia(&self, alias_tabla: &str, alias_catalogo: &str) -> String {
         match self.fecha {
             None => format!("{alias_tabla}.vigente = true"),
+            Some(fecha) => format!(
+                "(({}) OR ({}))",
+                predicado_ventana(alias_catalogo, fecha),
+                predicado_no_declarada(alias_catalogo, fecha)
+            ),
+        }
+    }
+
+    /// Solo lo afirmable: para motores de precisión y SQL, que no pueden marcar fila a fila
+    pub fn predicado_firme(&self, alias_tabla: &str, alias_catalogo: &str) -> String {
+        match self.fecha {
+            None => format!("{alias_tabla}.vigente = true"),
             Some(fecha) => predicado_ventana(alias_catalogo, fecha),
+        }
+    }
+
+    /// Expresión booleana para el `SELECT`: la fila no se puede afirmar vigente en la fecha
+    pub fn marca_no_declarada(&self, alias_catalogo: &str) -> String {
+        match self.fecha {
+            None => "false".to_string(),
+            Some(fecha) => format!("({})", predicado_no_declarada(alias_catalogo, fecha)),
         }
     }
 
@@ -108,13 +136,26 @@ impl ContextoConsulta {
     }
 }
 
-/// `fecha_vigor <= D AND (fecha_derogacion IS NULL OR fecha_derogacion > D)`
+/// Revisión afirmable como vigente en D. Sin derogación solo lo es la vigente hoy: una retirada
+/// por una revisión sin fecha tampoco tiene derogación, pero no se sabe cuándo dejó de estar en vigor.
+/// Equivale a `VentanaVigencia::estado_en`.
 pub(crate) fn predicado_ventana(alias_catalogo: &str, fecha: NaiveDate) -> String {
     let d = fecha.format("%Y-%m-%d");
     format!(
-        "{alias_catalogo}.fecha_vigor <= DATE '{d}' AND ({alias_catalogo}.fecha_derogacion IS NULL OR {alias_catalogo}.fecha_derogacion > DATE '{d}')"
+        "{alias_catalogo}.fecha_vigor <= DATE '{d}' AND (({alias_catalogo}.fecha_derogacion IS NULL AND {alias_catalogo}.vigente = true) OR {alias_catalogo}.fecha_derogacion > DATE '{d}')"
     )
 }
+
+/// Revisión de la que no se puede afirmar nada en D: sin fecha de vigor y no derogada antes de D,
+/// o con inicio conocido y fin desconocido
+pub(crate) fn predicado_no_declarada(alias_catalogo: &str, fecha: NaiveDate) -> String {
+    let d = fecha.format("%Y-%m-%d");
+    format!(
+        "({alias_catalogo}.fecha_vigor IS NULL AND ({alias_catalogo}.fecha_derogacion IS NULL OR {alias_catalogo}.fecha_derogacion > DATE '{d}')) OR ({alias_catalogo}.fecha_vigor <= DATE '{d}' AND {alias_catalogo}.fecha_derogacion IS NULL AND {alias_catalogo}.vigente = false)"
+    )
+}
+
+const AVISO_VIGENCIA_NO_DECLARADA: &str = "Estas revisiones no declaran su fecha de entrada en vigor o el fin de su vigencia: no afirmes si estaban vigentes en la fecha pedida, dilo expresamente. Sus filas, si las hay, llevan vigencia_no_declarada = true. El SQL, el grafo y las tablas de doble entrada no las incluyen.";
 
 /// Literal SQL escapado (solo para valores que ya vienen de las vistas o validados)
 pub(crate) fn literal_sql(valor: &str) -> String {
@@ -229,7 +270,7 @@ impl LakehouseToolService {
         Ok(ContextoConsulta { centro, fecha })
     }
 
-    /// Las 6 vistas del centro: únicas tablas que puede leer una consulta
+    /// Las vistas del centro: únicas tablas que puede leer una consulta
     pub(crate) fn politica(
         &self,
         contexto: &ContextoConsulta,
@@ -285,7 +326,50 @@ impl ToolServerPort for LakehouseToolService {
             LakehouseToolName::ExecuteAthenaSql => self.ejecutar_sql_agente(argumentos).await,
             LakehouseToolName::TraverseNormativeGraph => self.recorrer_grafo(argumentos).await,
             LakehouseToolName::SearchNormativeContext => self.buscar_contexto(argumentos).await,
+            LakehouseToolName::StairNavigateToc => self.navegar_toc(argumentos).await,
+            LakehouseToolName::StairGetSubtreeContext => self.leer_subarbol(argumentos).await,
+        };
+        let salida = match salida {
+            Ok(salida) => self.anotar_vigencia_no_declarada(argumentos, salida).await,
+            error => error,
         };
         Ok(resultado(&call.id, herramienta, salida))
+    }
+}
+
+impl LakehouseToolService {
+    /// Con `fecha_referencia`, toda tool lista las revisiones de las que no se puede afirmar la
+    /// vigencia en esa fecha, aunque no aporten ninguna fila
+    async fn anotar_vigencia_no_declarada(
+        &self,
+        argumentos: &Value,
+        mut salida: Value,
+    ) -> Result<Value, DomainError> {
+        let fecha = argumentos.get("fecha_referencia").and_then(Value::as_str);
+        let centro = argumentos.get("centro_id").and_then(Value::as_str);
+        let (Some(fecha), Some(centro)) = (fecha, centro) else {
+            return Ok(salida);
+        };
+        let contexto = self.contexto(centro, Some(fecha)).await?;
+        let filas = self
+            .consultar(
+                &contexto,
+                &format!(
+                    "SELECT d.doc_id, d.version_num, d.revision FROM {} d WHERE {} ORDER BY d.doc_id, d.version_num",
+                    contexto.vista(TABLA_DOCUMENTOS_CATALOGO),
+                    contexto.marca_no_declarada("d")
+                ),
+            )
+            .await?;
+        if let Some(objeto) = salida.as_object_mut() {
+            if !filas.is_empty() {
+                objeto.insert(
+                    "aviso_vigencia".to_string(),
+                    json!(AVISO_VIGENCIA_NO_DECLARADA),
+                );
+            }
+            objeto.insert("vigencia_no_declarada".to_string(), json!(filas));
+        }
+        Ok(salida)
     }
 }

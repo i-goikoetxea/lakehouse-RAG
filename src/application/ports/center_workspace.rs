@@ -51,4 +51,11 @@ pub trait CenterWorkspacePort: Send + Sync {
         ruta_centro: &Path,
         ruta_archivo: &Path,
     ) -> Result<DocumentoOriginal, DomainError>;
+
+    /// Lee la copia de `raw_docs/` con ese SHA-256, con su nombre de archivo original
+    async fn localizar_original(
+        &self,
+        ruta_centro: &Path,
+        sha256: &str,
+    ) -> Result<Option<DocumentoOriginal>, DomainError>;
 }

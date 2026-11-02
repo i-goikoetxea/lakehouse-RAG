@@ -73,7 +73,7 @@ async fn test_comandos_ciclo_crear_activar_ingerir_catalogo_integridad_y_elimina
     let activacion = comandos::activar_centro(&entorno.app, CENTRO)
         .await
         .unwrap();
-    assert_eq!((activacion.vistas, activacion.filas), (6, 0));
+    assert_eq!((activacion.vistas, activacion.filas), (7, 0));
     assert!(comandos::listar_centros(&entorno.app).await.unwrap()[0].activo);
 
     let etapas: Arc<Mutex<Vec<EtapaIngesta>>> = Arc::default();
@@ -197,7 +197,7 @@ async fn test_chat_de_la_ventana_rellena_citas_matriz_y_grafo_desde_las_tools_re
             llamada(
                 "m",
                 "query_operational_matrix",
-                json!({ "centro_id": CENTRO, "fase": "custodia" }),
+                json!({ "centro_id": CENTRO, "fase": "custodia", "solo_declarados": false }),
             ),
             llamada(
                 "g",
@@ -265,4 +265,19 @@ async fn test_chat_de_la_ventana_rellena_citas_matriz_y_grafo_desde_las_tools_re
     assert_eq!(grafo["nodoOrigen"], "PO-ALM-03");
     assert!(!grafo["nodos"].as_array().unwrap().is_empty());
     assert!(grafo["aristas"][0]["cita"]["doc_id"].is_string());
+}
+
+// --- STAIR Fase 5: fallos vistos en la ventana real ---
+
+#[test]
+fn test_ficha_de_integridad_lee_el_campo_camelcase_del_dto() {
+    let app_js = include_str!("../src/presentation/gui/web/app.js");
+    assert!(app_js.contains("String(i.valoresInvalidos)"));
+    assert!(!app_js.contains("i.valores_invalidos"));
+}
+
+#[test]
+fn test_boton_de_reintento_hereda_los_colores_del_tema() {
+    let app_js = include_str!("../src/presentation/gui/web/app.js");
+    assert!(app_js.contains("el('button', 'btn btn-reintentar'"));
 }

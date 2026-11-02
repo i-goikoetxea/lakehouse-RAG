@@ -1,0 +1,22 @@
+[
+  {
+    "id": "P1",
+    "categoria": "general",
+    "pregunta": "¿Cuál es el objeto de este documento?"
+  },
+  {
+    "id": "P2",
+    "categoria": "estructura",
+    "pregunta": "¿Qué capítulos tiene y qué apartados tiene el capítulo 2?"
+  },
+  {
+    "id": "P3",
+    "categoria": "seccion",
+    "pregunta": "¿Qué dice exactamente el apartado 2.1?"
+  },
+  {
+    "id": "P4",
+    "categoria": "negativa",
+    "pregunta": "¿Qué valor indica para un dato que no aparece en el documento?"
+  }
+]

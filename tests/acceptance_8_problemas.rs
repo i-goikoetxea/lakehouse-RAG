@@ -390,7 +390,7 @@ fn catalogo(doc_id: &str, titulo: &str, tipo: &str) -> CatalogoDestilado {
         tipo_documento: tipo.to_string(),
         revision: "Rev. 01".to_string(),
         version_num: 1,
-        fecha_vigor: "2026-01-01".to_string(),
+        fecha_vigor: Some("2026-01-01".to_string()),
         emisor: "Calidad".to_string(),
     }
 }
@@ -461,6 +461,7 @@ fn destilador_sintetico() -> MockDistiller {
                 objeto_alcance: "Tubería".to_string(),
                 rol_ejecutor: "Peón de Obra B".to_string(),
                 rol_responsable: "Encargado de Obra B".to_string(),
+                origen_responsable: "DECLARADO".to_string(),
                 registro_codigo: Some("FOR-B-99".to_string()),
                 registro_nombre: Some("Parte de custodia B".to_string()),
                 criterio_aceptacion: "Conforme".to_string(),
@@ -633,6 +634,59 @@ fn p2_tabla_cruce_exacto_con_nota_y_fronteras() {
         );
     });
     resultado("P2 tabla", inicio);
+}
+
+#[test]
+#[ignore = "real: Claude Code headless + FastEmbed E5-large"]
+fn p2_cruce_con_la_tabla_ya_en_el_historial_invoca_lookup() {
+    use lakehouse_rag::application::use_cases::agent_orchestrator::AgentOrchestrator;
+
+    let lh = compartido();
+    let inicio = Instant::now();
+    rt().block_on(async {
+        // Proyecta el centro y deja en el historial el mismo texto que ya vio el agente
+        let tabla = lh
+            .tool(
+                "lookup_double_entry_table",
+                json!({ "centro_id": CENTRO_A, "tabla_id": "4-A", "valor_x": 20, "valor_y": 0.42 }),
+            )
+            .await;
+        let mut historial = vec![
+            AgentMessage::user("Muéstrame la Tabla 4-A"),
+            AgentMessage::assistant(format!("Datos de la Tabla 4-A: {tabla}")),
+            AgentMessage::user(
+                "Con esa misma tabla, ¿qué temperatura corresponde a 30 mm y CE = 0,42 %?",
+            ),
+        ];
+        let usadas: Arc<Mutex<Vec<String>>> = Arc::default();
+        let destino = usadas.clone();
+        let orquestador = AgentOrchestrator::new(
+            Arc::new(ClaudeAgentRunner::new(ClaudeAgentConfig::default())),
+            lh.herramientas.clone(),
+        );
+        let respuesta = orquestador
+            .procesar_turno(
+                &ClaudeModel::sonnet(),
+                &CenterId::new(CENTRO_A).unwrap(),
+                &mut historial,
+                Some(Arc::new(move |evento| {
+                    if let AgentExecutionEvent::CallingTool { name, .. } = evento {
+                        destino.lock().unwrap().push(name);
+                    }
+                })),
+            )
+            .await
+            .unwrap();
+        assert!(respuesta.contains("125"), "{respuesta}");
+        let usadas = usadas.lock().unwrap();
+        assert!(
+            usadas
+                .iter()
+                .any(|nombre| nombre == "lookup_double_entry_table"),
+            "{usadas:?}"
+        );
+    });
+    resultado("P2 tabla en historial", inicio);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1030,6 +1084,13 @@ struct EspacioConFallo {
 
 #[async_trait]
 impl CenterWorkspacePort for EspacioConFallo {
+    async fn localizar_original(
+        &self,
+        ruta_centro: &Path,
+        sha256: &str,
+    ) -> Result<Option<DocumentoOriginal>, DomainError> {
+        self.interno.localizar_original(ruta_centro, sha256).await
+    }
     fn ruta_absoluta(&self, ruta: &Path) -> Result<PathBuf, DomainError> {
         self.interno.ruta_absoluta(ruta)
     }

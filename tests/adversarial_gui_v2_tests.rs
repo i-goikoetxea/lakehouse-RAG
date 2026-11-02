@@ -149,7 +149,7 @@ async fn test_extensiones_no_soportadas_se_rechazan_antes_de_leer_el_archivo() {
     let entrada = entorno.raiz.path().join("entrada");
     std::fs::create_dir_all(&entrada).unwrap();
     for nombre in [
-        "manual.pdf",
+        "manual.docx",
         "macro.exe",
         "datos.json",
         "sin_extension",
@@ -228,7 +228,7 @@ async fn test_html_y_js_malicioso_en_documento_y_respuesta_nunca_llega_vivo() {
             ToolCall {
                 id: "m".into(),
                 name: "query_operational_matrix".into(),
-                arguments: json!({ "centro_id": CENTRO, "fase": "CUSTODIA" }),
+                arguments: json!({ "centro_id": CENTRO, "fase": "CUSTODIA", "solo_declarados": false }),
             },
             ToolCall {
                 id: "l".into(),

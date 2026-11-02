@@ -18,7 +18,8 @@ use crate::application::dtos::agent::{
     AgentExecutionEvent, AgentMessage, ClaudeModel, ModelDescriptor,
 };
 use crate::application::dtos::centros::{
-    ManifiestoCentroDisco, ModeloEmbeddingsActivo, validar_ruta_centro, validar_ruta_documento,
+    DocumentoOriginal, ManifiestoCentroDisco, ModeloEmbeddingsActivo, validar_ruta_centro,
+    validar_ruta_documento,
 };
 use crate::application::dtos::ingestion::{EtapaIngesta, ObservadorIngesta};
 use crate::application::ports::agent_runner::AgentRunnerPort;
@@ -27,7 +28,10 @@ use crate::application::ports::center_workspace::{CenterWorkspacePort, CentroAbi
 use crate::application::ports::document_parser::DocumentParserPort;
 use crate::application::ports::embedding_engine::EmbeddingEnginePort;
 use crate::application::ports::lakehouse_projection::{LakehouseProjectionPort, ResumenProyeccion};
-use crate::application::ports::lakehouse_store::{InformeIntegridad, TODAS_LAS_TABLAS};
+use crate::application::ports::lakehouse_store::{
+    ConsultaTabla, InformeIntegridad, LIMITE_MAXIMO_LECTURA, TABLA_DOCUMENTOS_CATALOGO,
+    TODAS_LAS_TABLAS,
+};
 use crate::application::ports::llm_distiller::LlmDistillerPort;
 use crate::application::ports::model_catalog::ModelCatalogPort;
 use crate::application::ports::tool_server::ToolServerPort;
@@ -35,8 +39,35 @@ use crate::application::use_cases::agent_orchestrator::{AgentOrchestrator, Event
 use crate::application::use_cases::document_ingestion_service::{
     DocumentIngestionService, IngestionReport,
 };
+use crate::application::use_cases::lakehouse_tool_service::{entero, lotes_a_filas, texto};
 use crate::domain::errors::DomainError;
 use crate::domain::models::center::{CenterId, CenterManifest, CentroConocimiento};
+use crate::domain::services::normalizacion::codigo_canonico;
+
+/// SHA-256 de la revisión más reciente de un documento, por su `doc_id` o su alias provisional
+async fn hash_de_documento(abierto: &CentroAbierto, doc_id: &str) -> Result<String, DomainError> {
+    let consulta = ConsultaTabla::confirmadas(LIMITE_MAXIMO_LECTURA).del_centro(&abierto.id);
+    let lotes = abierto
+        .store
+        .leer_tabla(TABLA_DOCUMENTOS_CATALOGO, &consulta)
+        .await?;
+    let pedido = codigo_canonico(doc_id);
+    lotes_a_filas(&lotes)?
+        .iter()
+        .filter(|fila| {
+            !pedido.is_empty()
+                && (codigo_canonico(&texto(fila, "doc_id")) == pedido
+                    || codigo_canonico(&texto(fila, "doc_id_provisional")) == pedido)
+        })
+        .max_by_key(|fila| entero(fila, "version_num"))
+        .map(|fila| texto(fila, "hash_sha256"))
+        .ok_or_else(|| {
+            DomainError::ValidationError(format!(
+                "El documento '{doc_id}' no existe en el centro '{}'",
+                abierto.id
+            ))
+        })
+}
 
 /// Puertos que necesita la fachada (se componen en `infrastructure::bootstrap`)
 pub struct DependenciasLakehouse {
@@ -333,6 +364,28 @@ impl LakehouseApp {
         centro_id: &str,
         observador: Option<ObservadorIngesta>,
     ) -> Result<ResultadoIngesta, DomainError> {
+        self.procesar_documento(ruta_archivo, centro_id, observador, false)
+            .await
+    }
+
+    /// Vuelve a destilar un documento provisional a partir de su archivo. Si falla, la revisión
+    /// provisional queda intacta; sobre un documento ya definitivo no hace nada.
+    pub async fn reintentar_destilacion(
+        &self,
+        ruta_archivo: &Path,
+        centro_id: &str,
+    ) -> Result<ResultadoIngesta, DomainError> {
+        self.procesar_documento(ruta_archivo, centro_id, None, true)
+            .await
+    }
+
+    async fn procesar_documento(
+        &self,
+        ruta_archivo: &Path,
+        centro_id: &str,
+        observador: Option<ObservadorIngesta>,
+        es_reintento: bool,
+    ) -> Result<ResultadoIngesta, DomainError> {
         let ruta_archivo = validar_ruta_documento(&ruta_archivo.to_string_lossy())?;
         let _turno = self.ingestas.lock().await;
         let centro = self.centro_registrado(centro_id).await?;
@@ -342,7 +395,42 @@ impl LakehouseApp {
             .espacio
             .guardar_original(&abierto.ruta, &ruta_archivo)
             .await?;
+        self.procesar_original(&centro, &abierto, original, observador, es_reintento)
+            .await
+    }
 
+    /// Reintenta la destilación de un documento desde su copia en `raw_docs/`. `doc_id` admite el
+    /// provisional anterior; un documento definitivo devuelve `ya_ingerido` sin llamar a Claude.
+    pub async fn reintentar_documento(
+        &self,
+        doc_id: &str,
+        centro_id: &str,
+    ) -> Result<ResultadoIngesta, DomainError> {
+        let _turno = self.ingestas.lock().await;
+        let centro = self.centro_registrado(centro_id).await?;
+        let abierto = self.abrir(&centro).await?;
+        let sha256 = hash_de_documento(&abierto, doc_id).await?;
+        let original = self
+            .espacio
+            .localizar_original(&abierto.ruta, &sha256)
+            .await?
+            .ok_or_else(|| {
+                DomainError::IngestionError(format!(
+                    "No se encuentra el original de '{doc_id}' en raw_docs/ (SHA-256 {sha256}): vuelve a ingerir el archivo"
+                ))
+            })?;
+        self.procesar_original(&centro, &abierto, original, None, true)
+            .await
+    }
+
+    async fn procesar_original(
+        &self,
+        centro: &CentroConocimiento,
+        abierto: &CentroAbierto,
+        original: DocumentoOriginal,
+        observador: Option<ObservadorIngesta>,
+        es_reintento: bool,
+    ) -> Result<ResultadoIngesta, DomainError> {
         let servicio = DocumentIngestionService::new(
             Arc::clone(&self.parser),
             Arc::clone(&self.destilador),
@@ -350,14 +438,24 @@ impl LakehouseApp {
             Arc::clone(&abierto.store),
         )
         .con_observador(observador.clone());
-        let informe = servicio
-            .ingestar_documento(centro.id(), &original.nombre_archivo, &original.contenido)
-            .await?;
+        let informe = if es_reintento {
+            servicio
+                .reintentar_destilacion_bytes(
+                    centro.id(),
+                    &original.nombre_archivo,
+                    &original.contenido,
+                )
+                .await?
+        } else {
+            servicio
+                .ingestar_bytes(centro.id(), &original.nombre_archivo, &original.contenido)
+                .await?
+        };
 
         let (proyeccion, aviso_proyeccion) = if centro.esta_activo() && !informe.ya_ingerido {
             let _guardia = self.cambios.lock().await;
             notificar(&observador, EtapaIngesta::Proyeccion);
-            match self.proyeccion.reconstruir_vistas(&abierto).await {
+            match self.proyeccion.reconstruir_vistas(abierto).await {
                 Ok(resumen) => (Some(resumen), None),
                 Err(e) => (
                     None,

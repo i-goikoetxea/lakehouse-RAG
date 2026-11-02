@@ -52,6 +52,17 @@ Fixtures mínimos para los casos que los de `PO-ALM-03` no cubren: la **prelaci�
   **80 °C** como mínimo, **solo con temperatura ambiente bajo cero (< 0 °C)**: el párrafo vive en
   «6.1 Precalentamiento adicional», que hereda la condición de «6. Soldeo con temperatura ambiente bajo cero (< 0 °C)».
 
+## RAG dual (STAIR Fase 5): `DOC-GENERICO-01.md` y `DOC-TECNICO-OBRA-02.md`
+
+`tests/e2e_rag_dual_validation.rs` (`#[ignore]`, con Claude real). Los títulos no llevan datos del oráculo que no estén en el texto.
+
+| Caso | Pregunta | Herramienta esperada | Oráculo |
+| :--- | :--- | :--- | :--- |
+| E2E-01 | ¿Cuál es la política general sobre EPIs según el manual de bienvenida? | `search_normative_context` | Uso **obligatorio** en todas las zonas de obra, también para las visitas, con entrega sin coste; cita **DOC-GENERICO-01**. No dice «no hay datos». |
+| E2E-02 | ¿Qué apartados componen el Capítulo 3 del procedimiento técnico? | `stair_navigate_toc` | **3.1 Recepción**, **3.2 Custodia** y **3.3 Inspección de probetas**, sin otros. |
+| E2E-03 | ¿Quién custodia las probetas y qué formato se rellena? | `query_operational_matrix` | **Auxiliar de Laboratorio**, responsable **Jefe de Calidad**, **FOR-PROB-02**. No aparecen FOR-PROB-01, PPI-PROB-03 ni el Inspector QA/QC. |
+| E2E-04 | Para relación A/C de 0.45 y árido rodado, ¿cuál es la resistencia mínima fck? | `lookup_double_entry_table` o `execute_athena_sql` | **30 N/mm² (*)**, con la nota: solo con cemento **CEM I** y previa aprobación del Jefe de Calidad. |
+
 ## Tools v2 (Fase 13): oráculo de las tools sobre la Rev. 03 + Rev. 04
 
 - `lookup_double_entry_table(tabla 4-A, e = 30, CE = 0,42)` → **125 (*)** con la nota (*) (Rev. 04);

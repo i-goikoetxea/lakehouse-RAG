@@ -192,6 +192,28 @@ impl EmbeddingEnginePort for FastEmbedEngine {
         self.inferir(con_prefijo(self.prefijo_pasaje, texts)).await
     }
 
+    /// fastembed trunca a 512 tokens sin avisar (y E5 no admite más): el tokenizer real del modelo
+    /// informa del desbordamiento de cada pasaje
+    async fn contar_truncados(&self, texts: &[String]) -> Result<usize, DomainError> {
+        let pasajes = con_prefijo(self.prefijo_pasaje, texts);
+        let model_arc = Arc::clone(&self.model);
+        tokio::task::spawn_blocking(move || {
+            let model = model_arc.blocking_lock();
+            let mut truncados = 0;
+            for pasaje in &pasajes {
+                let codificado = model
+                    .tokenizer
+                    .encode(pasaje.as_str(), true)
+                    .map_err(|e| e.to_string())?;
+                truncados += usize::from(!codificado.get_overflowing().is_empty());
+            }
+            Ok::<usize, String>(truncados)
+        })
+        .await
+        .map_err(|e| DomainError::EmbeddingError(format!("Error en tarea de tokenizado: {e}")))?
+        .map_err(|e| DomainError::EmbeddingError(format!("Error tokenizando: {e}")))
+    }
+
     fn dimension(&self) -> usize {
         self.dimension
     }
@@ -200,6 +222,14 @@ impl EmbeddingEnginePort for FastEmbedEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    #[ignore = "requiere el modelo real; se autoriza en la Fase 5 de STAIR"]
+    async fn test_contar_truncados_detecta_el_limite_real_del_modelo() {
+        let motor = FastEmbedEngine::try_new(None).unwrap();
+        let textos = ["corto".to_string(), "palabra ".repeat(2000)];
+        assert_eq!(motor.contar_truncados(&textos).await.unwrap(), 1);
+    }
 
     #[test]
     fn test_cache_prioriza_parametro_luego_variable_y_nunca_el_cwd() {

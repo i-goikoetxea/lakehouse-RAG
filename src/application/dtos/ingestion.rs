@@ -10,23 +10,39 @@ use schemars::r#gen::SchemaGenerator;
 use schemars::schema::{InstanceType, Schema, SchemaObject};
 use serde::{Deserialize, Serialize};
 
+use crate::domain::models::estructura_documental::TipoNodoIndice;
+
 use crate::application::dtos::lakehouse_filas::{TipoEjeTabla, TipoNodoGrafo};
 use crate::domain::models::document::TipoDocumento;
 use crate::domain::models::operational_matrix::FaseOperativa;
 use crate::domain::models::reference_graph::TipoRelacionNormativa;
 
 /// Documento parseado con jerarquía estructural de títulos, secciones y tablas
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ParsedDocument {
     pub nombre_archivo: String,
     pub titulo: String,
     pub secciones: Vec<ParsedSection>,
     pub tablas: Vec<ParsedTableRaw>,
     pub contenido_completo: String,
+    /// Incidencias de la extracción que el operador debe ver (páginas ilegibles, por ejemplo)
+    #[serde(default)]
+    pub avisos_extraccion: Vec<String>,
+    /// PDF sin capa de texto suficiente: se indexa sin destilar y sin reintento (Fase 3)
+    #[serde(default)]
+    pub requiere_ocr: bool,
 }
 
 /// Sección documental con su código, su linaje jerárquico y la condición heredada (H7)
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+/// Punto del contenido de una sección donde empieza una página
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SaltoPagina {
+    /// Bytes desde el inicio de `ParsedSection::contenido`
+    pub desplazamiento: usize,
+    pub pagina: u32,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ParsedSection {
     pub codigo: String,
     pub titulo: String,
@@ -36,6 +52,19 @@ pub struct ParsedSection {
     pub breadcrumb: String,
     /// Condiciones de aplicación de la sección y de sus ancestros, unidas por ` Y `
     pub condicion_aplicacion: Option<String>,
+    /// Páginas (base 1) que abarca la sección; `None` en formatos sin páginas
+    #[serde(default)]
+    pub pagina_inicio: Option<u32>,
+    #[serde(default)]
+    pub pagina_fin: Option<u32>,
+    /// Saltos de página dentro de `contenido`; vacío en formatos sin páginas
+    #[serde(default)]
+    pub saltos_pagina: Vec<SaltoPagina>,
+    #[serde(default)]
+    pub tipo_nodo: TipoNodoIndice,
+    /// Identidad para el árbol si difiere de `codigo` (numeración reiniciada: códigos repetidos)
+    #[serde(default)]
+    pub clave_nodo: Option<String>,
 }
 
 /// Tabla cruda parseada desde formato Markdown u origen estructurado
@@ -72,8 +101,8 @@ pub struct CatalogoDestilado {
     pub revision: String,
     /// Número de la revisión (`Rev. 04` → 4)
     pub version_num: i64,
-    /// Fecha de entrada en vigor en ISO 8601 (`AAAA-MM-DD`)
-    pub fecha_vigor: String,
+    /// Fecha de entrada en vigor en ISO 8601 (`AAAA-MM-DD`); `null` si el documento no la declara
+    pub fecha_vigor: Option<String>,
     pub emisor: String,
 }
 
@@ -89,6 +118,10 @@ pub struct HitoDestilado {
     pub rol_ejecutor: String,
     /// Quién firma o responde formalmente (un solo rol, distinto del ejecutor)
     pub rol_responsable: String,
+    /// `DECLARADO` si el texto de la sección lo nombra; `INFERIDO` o `NO_CONSTA` en otro caso
+    #[serde(default)]
+    #[schemars(schema_with = "esquema_origen_responsable")]
+    pub origen_responsable: String,
     /// Código exacto del formato a rellenar (`FOR-ALM-01`)
     pub registro_codigo: Option<String>,
     pub registro_nombre: Option<String>,
@@ -199,6 +232,10 @@ fn esquema_tipo_documento(_: &mut SchemaGenerator) -> Schema {
     esquema_enum(TipoDocumento::VALORES_CANONICOS)
 }
 
+fn esquema_origen_responsable(_: &mut SchemaGenerator) -> Schema {
+    esquema_enum(["DECLARADO", "INFERIDO", "NO_CONSTA"])
+}
+
 fn esquema_fase_operativa(_: &mut SchemaGenerator) -> Schema {
     esquema_enum(FaseOperativa::VALORES_CANONICOS)
 }
@@ -225,7 +262,23 @@ fn esquema_tipo_nodo_destino(_: &mut SchemaGenerator) -> Schema {
 /// JSON Schema compacto del paquete v2 (lo que recibe `claude --json-schema`)
 pub fn json_schema_destilacion() -> String {
     let schema = schemars::schema_for!(DistilledDocumentPackage);
-    serde_json::to_string(&schema).unwrap_or_else(|_| "{}".to_string())
+    let mut valor = serde_json::to_value(&schema).unwrap_or_default();
+    exigir_campo(&mut valor, "CatalogoDestilado", "fecha_vigor");
+    exigir_campo(&mut valor, "HitoDestilado", "origen_responsable");
+    serde_json::to_string(&valor).unwrap_or_else(|_| "{}".to_string())
+}
+
+/// Un campo con valor por omisión o nulable sigue siendo obligatorio para Claude, que debe decidir
+fn exigir_campo(esquema: &mut serde_json::Value, definicion: &str, campo: &str) {
+    for contenedor in ["$defs", "definitions"] {
+        if let Some(requeridos) = esquema
+            .pointer_mut(&format!("/{contenedor}/{definicion}/required"))
+            .and_then(serde_json::Value::as_array_mut)
+            && !requeridos.iter().any(|r| r == campo)
+        {
+            requeridos.push(campo.into());
+        }
+    }
 }
 
 /// Etapas observables de una ingesta (la GUI las muestra como progreso)
@@ -317,6 +370,50 @@ mod tests {
             def("EjeDestilado", "tipo"),
             ["RANGO_NUMERICO", "CATEGORIA_EXACTA"]
         );
+    }
+
+    #[test]
+    fn test_json_schema_exige_fecha_nulable_y_origen_con_enum() {
+        let esquema: serde_json::Value = serde_json::from_str(&json_schema_destilacion()).unwrap();
+        let definiciones = esquema
+            .get("$defs")
+            .or_else(|| esquema.get("definitions"))
+            .unwrap();
+        let catalogo = &definiciones["CatalogoDestilado"];
+        assert!(
+            catalogo["required"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|r| r == "fecha_vigor")
+        );
+        let tipos = catalogo["properties"]["fecha_vigor"]["type"].to_string();
+        assert!(tipos.contains("null"), "{tipos}");
+        let hito = &definiciones["HitoDestilado"];
+        assert!(
+            hito["required"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|r| r == "origen_responsable")
+        );
+        let origen = hito["properties"]["origen_responsable"]["enum"].to_string();
+        for valor in ["DECLARADO", "INFERIDO", "NO_CONSTA"] {
+            assert!(origen.contains(valor), "{origen}");
+        }
+    }
+
+    #[test]
+    fn test_paquete_sin_fecha_ni_origen_se_interpreta_sin_inventarlos() {
+        let json = r#"{"catalogo":{"doc_id":"X","titulo":"T","tipo_documento":"PROCEDIMIENTO_GENERAL",
+            "revision":"Rev. 1","version_num":1,"fecha_vigor":null,"emisor":"E"},
+            "hitos":[{"orden_secuencia":1,"fase_operativa":"EJECUCION","objeto_alcance":"O",
+            "rol_ejecutor":"A","rol_responsable":"B","registro_codigo":null,"registro_nombre":null,
+            "criterio_aceptacion":"C","condicion_aplicacion":null,"seccion_origen":"1"}],
+            "tablas":[],"aristas":[]}"#;
+        let paquete: DistilledDocumentPackage = serde_json::from_str(json).unwrap();
+        assert_eq!(paquete.catalogo.fecha_vigor, None);
+        assert_eq!(paquete.hitos[0].origen_responsable, "");
     }
 
     #[test]

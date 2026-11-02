@@ -16,6 +16,13 @@ pub trait EmbeddingEnginePort: Send + Sync {
         texts: &[String],
     ) -> Result<Vec<Vec<f32>>, DomainError>;
 
+    /// Cuántos de estos pasajes recortaría el modelo por exceder su límite de entrada. Un motor sin
+    /// límite conocido devuelve 0.
+    async fn contar_truncados(&self, texts: &[String]) -> Result<usize, DomainError> {
+        let _ = texts;
+        Ok(0)
+    }
+
     /// Retorna la dimensión esperada de los vectores (ej. 1024)
     fn dimension(&self) -> usize;
 }

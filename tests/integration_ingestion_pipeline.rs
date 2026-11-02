@@ -76,7 +76,7 @@ Este procedimiento complementa a la norma NOM-STPS-001 en materia de protección
         tipo_documento: "PROCEDIMIENTO_GENERAL".to_string(),
         revision: format!("Rev. {version:02}"),
         version_num: version,
-        fecha_vigor: fecha.to_string(),
+        fecha_vigor: Some(fecha.to_string()),
         emisor: "INGENIERIA_ELECTROMECANICA".to_string(),
     };
     let hito = |seccion: &str, fase: &str, ejecutor: &str, responsable: &str, registro: &str| {
@@ -86,6 +86,7 @@ Este procedimiento complementa a la norma NOM-STPS-001 en materia de protección
             objeto_alcance: "Turbogenerador".to_string(),
             rol_ejecutor: ejecutor.to_string(),
             rol_responsable: responsable.to_string(),
+            origen_responsable: "DECLARADO".to_string(),
             registro_codigo: Some(registro.to_string()),
             registro_nombre: Some("Registro".to_string()),
             criterio_aceptacion: "Conforme a tabla".to_string(),
@@ -254,7 +255,7 @@ async fn test_integration_ingesta_control_de_versiones_invalida_previa() {
             tipo_documento: "NORMA_INTERNACIONAL".to_string(),
             revision: "Rev. 01".to_string(),
             version_num: 1,
-            fecha_vigor: "2025-01-01".to_string(),
+            fecha_vigor: Some("2025-01-01".to_string()),
             emisor: "OPERACIONES".to_string(),
         },
         hitos: Vec::new(),
@@ -278,7 +279,7 @@ async fn test_integration_ingesta_control_de_versiones_invalida_previa() {
     let doc_v2 = "# Norma de Presión V2\n## 1. Alcance Actualizado\nPresión máxima 12 bar.";
     paquete_v1.catalogo.version_num = 2;
     paquete_v1.catalogo.revision = "Rev. 02".to_string();
-    paquete_v1.catalogo.fecha_vigor = "2026-01-01".to_string();
+    paquete_v1.catalogo.fecha_vigor = Some("2026-01-01".to_string());
     distiller.registrar_respuesta("norma_v2.md", paquete_v1);
 
     service

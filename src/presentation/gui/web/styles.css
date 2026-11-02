@@ -500,3 +500,7 @@ button { cursor: pointer; }
 }
 .tool-linea.en-curso .estado { animation: latido 1s ease-in-out infinite; }
 .espaciador-ancla { flex-shrink: 0; pointer-events: none; }
+
+.chip-aviso { background: rgba(217, 119, 6, 0.15); color: #b45309; }
+.btn-reintentar { margin-top: 6px; font-size: 12px; padding: 3px 8px; cursor: pointer; }
+.btn-reintentar:disabled { opacity: 0.6; cursor: default; }

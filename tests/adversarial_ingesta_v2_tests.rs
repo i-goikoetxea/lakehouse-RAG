@@ -165,7 +165,11 @@ async fn adv_roles_fusionados_y_responsable_igual_al_ejecutor_quedan_en_revisar(
             Some("PPI-MAT-09"),
         ),
     ];
-    let (_dir, store) = ingerir(paquete, CONTENIDO_V3).await;
+    for hito in &mut paquete.hitos {
+        hito.origen_responsable = "DECLARADO".to_string();
+    }
+    let contenido = format!("{CONTENIDO_V3}Firma el Inspector QA/QC.\n");
+    let (_dir, store) = ingerir(paquete, &contenido).await;
     let matriz = leer(&store, TABLA_MATRIZ_OPERATIVA).await;
     let fases = texto(&matriz, "fase_operativa");
     let calidades = texto(&matriz, "calidad_extraccion");
@@ -272,6 +276,8 @@ async fn adv_prompt_injection_en_el_documento_no_escapa_del_delimitador() {
         secciones: Vec::new(),
         tablas: Vec::new(),
         contenido_completo: documento.to_string(),
+        avisos_extraccion: Vec::new(),
+        requiere_ocr: false,
     };
     let entrada = ClaudeHeadlessDistiller::construir_entrada(&parsed);
     assert_eq!(entrada.matches("</documento>").count(), 1);

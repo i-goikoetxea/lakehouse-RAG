@@ -1,4 +1,4 @@
-//! Filas tipadas de las 6 tablas v2 del Lakehouse (§4 de la especificación).
+//! Filas tipadas de las 7 tablas del Lakehouse (§4 de la especificación).
 //!
 //! El caso de uso construye estas filas con tipos de dominio ya validados y el adaptador de
 //! almacenamiento las convierte a Arrow. Las columnas transaccionales (`ingest_id`,
@@ -6,8 +6,16 @@
 //! una fila nunca puede «colarse» como confirmada o vigente.
 
 use crate::domain::models::center::CenterId;
+use std::collections::HashMap;
+
+use crate::domain::errors::DomainError;
 use crate::domain::models::document::{DocId, NivelPrelacion, TipoDocumento};
-use crate::domain::models::operational_matrix::{CalidadExtraccion, FaseOperativa};
+use crate::domain::models::estructura_documental::{
+    EstadoContenido, NivelJerarquico, NodoId, TipoBloque, TipoNodoIndice,
+};
+use crate::domain::models::operational_matrix::{
+    CalidadExtraccion, FaseOperativa, OrigenResponsable, tiene_rol_o_registro,
+};
 use crate::domain::models::reference_graph::TipoRelacionNormativa;
 use crate::domain::models::vigencia::VentanaVigencia;
 
@@ -28,6 +36,8 @@ pub struct FilaCatalogo {
     pub revision: String,
     pub vigencia: VentanaVigencia,
     pub hash_sha256: String,
+    /// Identidad provisional (ver `docs/arquitectura/decisiones_stair.md`, D4)
+    pub doc_id_provisional: Option<DocId>,
 }
 
 /// Tabla 02: apartado de texto con su linaje jerárquico y su embedding
@@ -35,10 +45,17 @@ pub struct FilaCatalogo {
 pub struct FilaChunk {
     pub chunk_id: String,
     pub clave: ClaveDocumental,
+    /// Sección en la tabla 07; los sub-chunks de una sección lo comparten
+    pub nodo_id: NodoId,
+    pub tipo_bloque: TipoBloque,
+    pub estado_contenido: EstadoContenido,
     pub nivel_prelacion: NivelPrelacion,
     pub breadcrumb_jerarquia: String,
     pub condicion_aplicacion: Option<String>,
     pub texto_contenido: String,
+    /// Páginas de la sección de origen (para citas); `None` en formatos sin páginas
+    pub pagina_inicio: Option<u32>,
+    pub pagina_fin: Option<u32>,
     pub tablas_vinculadas: Vec<String>,
     pub hitos_vinculados: Vec<String>,
     pub vector: Vec<f32>,
@@ -54,6 +71,7 @@ pub struct FilaHito {
     pub objeto_alcance: String,
     pub rol_ejecutor: String,
     pub rol_responsable: String,
+    pub origen_responsable: OrigenResponsable,
     pub registro_codigo: Option<String>,
     pub registro_nombre: Option<String>,
     pub criterio_aceptacion: String,
@@ -171,7 +189,24 @@ pub struct FilaArista {
     pub contexto_relacion: Option<String>,
 }
 
-/// Lote homogéneo de filas destinado a una de las 6 tablas
+/// Tabla 07: un nodo del índice jerárquico (ToC) de la revisión
+#[derive(Debug, Clone, PartialEq)]
+pub struct FilaIndice {
+    pub nodo_id: NodoId,
+    pub clave: ClaveDocumental,
+    pub estado_contenido: EstadoContenido,
+    pub tipo_nodo: TipoNodoIndice,
+    pub nivel_jerarquico: NivelJerarquico,
+    pub codigo_seccion: String,
+    pub titulo_seccion: String,
+    pub nodo_padre_id: Option<NodoId>,
+    pub ruta_linaje: String,
+    pub condiciones_alcance: Option<String>,
+    pub resumen_seccion: String,
+    pub vector_seccion: Vec<f32>,
+}
+
+/// Lote homogéneo de filas destinado a una de las 7 tablas
 #[derive(Debug, Clone, PartialEq)]
 pub enum LoteIngesta {
     Catalogo(Vec<FilaCatalogo>),
@@ -180,6 +215,7 @@ pub enum LoteIngesta {
     Tablas(Vec<FilaTabla>),
     Celdas(Vec<FilaCelda>),
     Aristas(Vec<FilaArista>),
+    Indice(Vec<FilaIndice>),
 }
 
 impl LoteIngesta {
@@ -191,6 +227,7 @@ impl LoteIngesta {
             Self::Tablas(filas) => filas.len(),
             Self::Celdas(filas) => filas.len(),
             Self::Aristas(filas) => filas.len(),
+            Self::Indice(filas) => filas.len(),
         }
     }
 
@@ -207,7 +244,127 @@ impl LoteIngesta {
             Self::Tablas(filas) => filas.iter().map(|f| &f.clave).collect(),
             Self::Celdas(filas) => filas.iter().map(|f| &f.clave).collect(),
             Self::Aristas(filas) => filas.iter().map(|f| &f.clave).collect(),
+            Self::Indice(filas) => filas.iter().map(|f| &f.clave).collect(),
         }
+    }
+}
+
+/// Coherencia entre 02 y 07 de una escritura; las dos tablas deben ir en la misma llamada.
+/// Una escritura sin 07 solo comprueba la pertenencia de los `nodo_id` a su documento.
+pub fn validar_estructura_stair(lotes: &[LoteIngesta]) -> Result<(), DomainError> {
+    let chunks: Vec<&FilaChunk> = lotes
+        .iter()
+        .filter_map(|lote| match lote {
+            LoteIngesta::Chunks(filas) => Some(filas),
+            _ => None,
+        })
+        .flatten()
+        .collect();
+    let nodos: Vec<&FilaIndice> = lotes
+        .iter()
+        .filter_map(|lote| match lote {
+            LoteIngesta::Indice(filas) => Some(filas),
+            _ => None,
+        })
+        .flatten()
+        .collect();
+
+    for chunk in &chunks {
+        exigir_pertenencia(&chunk.nodo_id, &chunk.clave)?;
+    }
+    for hito in lotes
+        .iter()
+        .filter_map(|lote| match lote {
+            LoteIngesta::Hitos(filas) => Some(filas),
+            _ => None,
+        })
+        .flatten()
+    {
+        exigir_rol_o_registro(hito)?;
+    }
+    let niveles = niveles_por_nodo(&nodos)?;
+    for nodo in &nodos {
+        validar_nodo(nodo, &niveles)?;
+    }
+    if !nodos.is_empty()
+        && let Some(chunk) = chunks.iter().find(|c| !niveles.contains_key(&c.nodo_id))
+    {
+        return Err(DomainError::ValidationError(format!(
+            "El chunk '{}' apunta al nodo '{}', que no está en 07",
+            chunk.chunk_id, chunk.nodo_id
+        )));
+    }
+    Ok(())
+}
+
+/// Última barrera de la invariante de `HitoOperativo`: 03 nunca guarda un hito sin titular
+fn exigir_rol_o_registro(hito: &FilaHito) -> Result<(), DomainError> {
+    if tiene_rol_o_registro(
+        &hito.rol_ejecutor,
+        &hito.rol_responsable,
+        hito.registro_codigo.as_deref(),
+        hito.registro_nombre.as_deref(),
+    ) {
+        return Ok(());
+    }
+    Err(DomainError::HitoSinTitular(hito.hito_id.clone()))
+}
+
+fn niveles_por_nodo<'a>(
+    nodos: &[&'a FilaIndice],
+) -> Result<HashMap<&'a NodoId, NivelJerarquico>, DomainError> {
+    let mut niveles = HashMap::with_capacity(nodos.len());
+    for nodo in nodos {
+        if niveles
+            .insert(&nodo.nodo_id, nodo.nivel_jerarquico)
+            .is_some()
+        {
+            return Err(DomainError::ValidationError(format!(
+                "nodo_id duplicado en 07: '{}'",
+                nodo.nodo_id
+            )));
+        }
+    }
+    Ok(niveles)
+}
+
+/// El padre debe existir y tener un nivel estrictamente menor, lo que también impide los ciclos
+fn validar_nodo(
+    nodo: &FilaIndice,
+    niveles: &HashMap<&NodoId, NivelJerarquico>,
+) -> Result<(), DomainError> {
+    exigir_pertenencia(&nodo.nodo_id, &nodo.clave)?;
+    if !nodo.ruta_linaje.starts_with('/') {
+        return Err(DomainError::ValidationError(format!(
+            "ruta_linaje de '{}' debe empezar por '/': {:?}",
+            nodo.nodo_id, nodo.ruta_linaje
+        )));
+    }
+    let Some(padre) = &nodo.nodo_padre_id else {
+        return Ok(());
+    };
+    exigir_pertenencia(padre, &nodo.clave)?;
+    match niveles.get(padre) {
+        Some(nivel) if *nivel < nodo.nivel_jerarquico => Ok(()),
+        Some(_) => Err(DomainError::ValidationError(format!(
+            "El padre '{padre}' de '{}' debe tener un nivel menor",
+            nodo.nodo_id
+        ))),
+        None => Err(DomainError::ValidationError(format!(
+            "El padre '{padre}' de '{}' no está en 07",
+            nodo.nodo_id
+        ))),
+    }
+}
+
+fn exigir_pertenencia(nodo: &NodoId, clave: &ClaveDocumental) -> Result<(), DomainError> {
+    if nodo.pertenece_a(&clave.doc_id) {
+        Ok(())
+    } else {
+        Err(DomainError::ValidationError(format!(
+            "El nodo '{nodo}' no pertenece al documento '{}'",
+            clave.doc_id
+        )))
     }
 }
 

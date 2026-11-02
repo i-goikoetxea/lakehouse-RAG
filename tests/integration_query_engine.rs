@@ -7,7 +7,9 @@ use lakehouse_rag::application::ports::lakehouse_store::EstadoIngesta;
 use lakehouse_rag::domain::models::center::CenterId;
 use lakehouse_rag::domain::models::document::{DocId, TipoDocumento};
 use lakehouse_rag::domain::models::identificadores::IngestId;
-use lakehouse_rag::domain::models::operational_matrix::{CalidadExtraccion, FaseOperativa};
+use lakehouse_rag::domain::models::operational_matrix::{
+    CalidadExtraccion, FaseOperativa, OrigenResponsable,
+};
 use lakehouse_rag::infrastructure::query_engine::datafusion_engine::DataFusionEngine;
 use lakehouse_rag::infrastructure::storage::lotes_arrow::{
     ColumnasTransaccionales, lote_a_record_batch,
@@ -47,6 +49,7 @@ fn hito(
         objeto_alcance: "Tubería principal".to_string(),
         rol_ejecutor: rol_ejecutor.to_string(),
         rol_responsable: "Jefe de Calidad".to_string(),
+        origen_responsable: OrigenResponsable::Declarado,
         registro_codigo: None,
         registro_nombre: None,
         criterio_aceptacion: criterio.to_string(),

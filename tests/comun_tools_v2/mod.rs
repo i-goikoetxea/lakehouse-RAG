@@ -54,7 +54,7 @@ fn catalogo(doc_id: &str, tipo: &str, version: i64, fecha_vigor: &str) -> Catalo
         tipo_documento: tipo.to_string(),
         revision: format!("Rev. {version:02}"),
         version_num: version,
-        fecha_vigor: fecha_vigor.to_string(),
+        fecha_vigor: Some(fecha_vigor.to_string()),
         emisor: "Calidad".to_string(),
     }
 }
@@ -73,6 +73,7 @@ fn hito(
         objeto_alcance: "Tubería de acero al carbono".to_string(),
         rol_ejecutor: ejecutor.to_string(),
         rol_responsable: responsable.to_string(),
+        origen_responsable: "DECLARADO".to_string(),
         registro_codigo: Some(registro.to_string()),
         registro_nombre: Some(format!("Registro {registro}")),
         criterio_aceptacion: "Conforme al procedimiento".to_string(),

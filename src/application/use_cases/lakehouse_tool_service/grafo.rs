@@ -229,7 +229,7 @@ impl LakehouseToolService {
                     "SELECT g.edge_id, g.doc_id, g.version_num, g.origen_id, g.tipo_relacion, g.destino_id, g.contexto_relacion, d.revision FROM {} g {} WHERE {}",
                     contexto.vista(TABLA_GRAFO_REFERENCIAS),
                     contexto.union_catalogo("g", "d"),
-                    contexto.predicado_vigencia("g", "d")
+                    contexto.predicado_firme("g", "d")
                 ),
             )
             .await?;
@@ -248,7 +248,7 @@ impl LakehouseToolService {
                 &format!(
                     "SELECT d.doc_id, d.nivel_prelacion FROM {} d WHERE {}",
                     contexto.vista(TABLA_DOCUMENTOS_CATALOGO),
-                    contexto.predicado_vigencia("d", "d")
+                    contexto.predicado_firme("d", "d")
                 ),
             )
             .await?;

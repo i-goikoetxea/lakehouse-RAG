@@ -30,6 +30,10 @@ pub enum ComandoCli {
         modelo: Option<String>,
     },
     Integridad(String),
+    Reintentar {
+        doc_id: String,
+        centro: String,
+    },
 }
 
 /// Formato de la salida de los subcomandos
@@ -116,6 +120,10 @@ impl ModoEjecucion {
             let centro = argumentos.requerido("--centro", "--ingest <archivo> --centro <id>")?;
             return Ok(Some(ComandoCli::Ingest { archivo, centro }));
         }
+        if let Some(doc_id) = argumentos.valor_de("--reintentar")? {
+            let centro = argumentos.requerido("--centro", "--reintentar <doc_id> --centro <id>")?;
+            return Ok(Some(ComandoCli::Reintentar { doc_id, centro }));
+        }
         if let Some(texto) = argumentos.valor_de("--ask")? {
             let centro = argumentos.requerido("--centro", "--ask \"<texto>\" --centro <id>")?;
             let modelo = argumentos.valor_de("--modelo")?;
@@ -148,7 +156,8 @@ CENTROS E INGESTA (salida legible; añade --json para JSON):
     --crear-centro <id> <ruta> [nombre]      Crea un centro en <ruta> (queda inactivo)
     --activar <id> | --desactivar <id>       Activa (proyecta) o desactiva (cero acceso)
     --eliminar-centro <id>                   Lo quita del registro sin borrar el disco
-    --ingest <archivo> --centro <id>         Ingesta transaccional de un Markdown
+    --ingest <archivo> --centro <id>         Ingesta transaccional (Markdown, texto o PDF)
+    --reintentar <doc_id> --centro <id>      Vuelve a destilar un documento provisional
     --ask "<texto>" --centro <id> [--modelo <alias>]
                                              Pregunta al agente sobre un centro activo
     --integridad <id>                        Huérfanos, STAGED colgadas y tablas ausentes

@@ -1341,6 +1341,7 @@ fn hito_oro(
         objeto_alcance: "Tubería de acero al carbono".to_string(),
         rol_ejecutor: ejecutor.to_string(),
         rol_responsable: responsable.to_string(),
+        origen_responsable: "DECLARADO".to_string(),
         registro_codigo: Some(registro.to_string()),
         registro_nombre: Some(format!("Registro {registro}")),
         criterio_aceptacion: "Criterio de aceptación de la fase".to_string(),
@@ -1455,12 +1456,14 @@ fn paquete_oro(
             tipo_documento: "PROCEDIMIENTO_OBRA".to_string(),
             revision: format!("Rev. {version:02}"),
             version_num: version,
-            fecha_vigor: if version == 3 {
-                "2026-03-01"
-            } else {
-                "2026-09-15"
-            }
-            .to_string(),
+            fecha_vigor: Some(
+                if version == 3 {
+                    "2026-03-01"
+                } else {
+                    "2026-09-15"
+                }
+                .to_string(),
+            ),
             emisor: "Dirección de Calidad de Obra".to_string(),
         },
         hitos: vec![
@@ -1858,15 +1861,19 @@ async fn hallazgo_doc_id_con_comilla_se_neutraliza_y_el_vacio_se_rechaza() {
     for tabla in TODAS_LAS_TABLAS {
         antes.push(pipeline.store.contar_registros(tabla).await.unwrap());
     }
-    let error = ingerir_cronometrado(&pipeline, FIXTURE_REV04)
+    // Un código vacío no es válido: la revisión queda provisional, sin Capa 2 (STAIR Fase 2)
+    let provisional = ingerir_cronometrado(&pipeline, FIXTURE_REV04)
         .await
-        .unwrap_err();
-    assert!(matches!(error, DomainError::InvalidDocId(_)), "{error:?}");
-    for (tabla, filas_antes) in TODAS_LAS_TABLAS.iter().zip(antes) {
-        let filas = pipeline.store.contar_registros(tabla).await.unwrap();
-        assert_eq!(
-            filas, filas_antes,
-            "{tabla} tiene filas de la ingesta rechazada"
-        );
-    }
+        .unwrap();
+    assert_eq!(provisional.estado_contenido, "PARCIAL_UNIVERSAL");
+    assert_eq!(provisional.total_tuplas, 0);
+    let hitos = TODAS_LAS_TABLAS
+        .iter()
+        .position(|t| *t == "03_matriz_operativa");
+    let filas = pipeline
+        .store
+        .contar_registros("03_matriz_operativa")
+        .await
+        .unwrap();
+    assert_eq!(Some(filas), hitos.map(|i| antes[i]));
 }

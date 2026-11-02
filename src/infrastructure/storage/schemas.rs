@@ -1,27 +1,38 @@
-//! Esquemas Apache Arrow v2 de las 6 tablas del Lakehouse (§4 de la especificación y plan v2 §2.2)
+//! Esquemas Apache Arrow de las 7 tablas del Lakehouse (§4 de la especificación, plan v2 §2.2 y
+//! `docs/arquitectura/decisiones_stair.md`)
 
 use std::sync::Arc;
 
 use arrow_schema::{DataType, Field, Schema, SchemaRef};
 
+use crate::application::dtos::centros::VERSION_ESQUEMA_CENTRO;
 use crate::application::ports::lakehouse_store::{
     TABLA_CATALOGO_TABLAS, TABLA_CELDAS_DOBLE_ENTRADA, TABLA_CHUNKS_NORMATIVA,
-    TABLA_DOCUMENTOS_CATALOGO, TABLA_GRAFO_REFERENCIAS, TABLA_MATRIZ_OPERATIVA,
+    TABLA_DOCUMENTOS_CATALOGO, TABLA_GRAFO_REFERENCIAS, TABLA_INDICE_JERARQUICO,
+    TABLA_MATRIZ_OPERATIVA,
 };
 
 /// Versión del esquema que se guarda en `center_manifest.json`
-pub const VERSION_ESQUEMA: u32 = 2;
+pub const VERSION_ESQUEMA: u32 = VERSION_ESQUEMA_CENTRO;
 
 /// Dimensión de los vectores de embeddings (BGE-M3 / multilingual-e5-large)
 pub const DIMENSION_EMBEDDINGS: i32 = 1024;
 
-/// Columnas transaccionales y de linaje comunes a las 6 tablas
+/// Columnas transaccionales y de linaje comunes a las 7 tablas
 pub const COLUMNA_CENTRO_ID: &str = "centro_id";
 pub const COLUMNA_DOC_ID: &str = "doc_id";
 pub const COLUMNA_VERSION_NUM: &str = "version_num";
 pub const COLUMNA_VIGENTE: &str = "vigente";
 pub const COLUMNA_INGEST_ID: &str = "ingest_id";
 pub const COLUMNA_ESTADO_INGESTA: &str = "estado_ingesta";
+
+/// Columnas STAIR
+pub const COLUMNA_ESTADO_CONTENIDO: &str = "estado_contenido";
+pub const COLUMNA_TIPO_NODO: &str = "tipo_nodo";
+pub const COLUMNA_NODO_ID: &str = "nodo_id";
+pub const COLUMNA_NODO_PADRE_ID: &str = "nodo_padre_id";
+pub const COLUMNA_TIPO_BLOQUE: &str = "tipo_bloque";
+pub const COLUMNA_DOC_ID_PROVISIONAL: &str = "doc_id_provisional";
 
 fn utf8(nombre: &str) -> Field {
     Field::new(nombre, DataType::Utf8, false)
@@ -84,22 +95,28 @@ pub fn schema_documentos_catalogo() -> SchemaRef {
             utf8("tipo_documento"),
             nivel_prelacion(),
             utf8("revision"),
-            Field::new("fecha_vigor", DataType::Date32, false),
+            Field::new("fecha_vigor", DataType::Date32, true),
             Field::new("fecha_derogacion", DataType::Date32, true),
             utf8("hash_sha256"),
+            utf8_nulable(COLUMNA_DOC_ID_PROVISIONAL),
         ],
     )
 }
 
-/// `02_chunks_normativa`: contexto semántico con linaje jerárquico
+/// `02_chunks_normativa`: corpus universal sin pérdidas con linaje jerárquico
 pub fn schema_chunks_normativa() -> SchemaRef {
     esquema_con_comunes(
         Some("chunk_id"),
         vec![
+            utf8(COLUMNA_NODO_ID),
+            utf8(COLUMNA_TIPO_BLOQUE),
+            utf8(COLUMNA_ESTADO_CONTENIDO),
             nivel_prelacion(),
             utf8("breadcrumb_jerarquia"),
             utf8_nulable("condicion_aplicacion"),
             utf8("texto_contenido"),
+            Field::new("pagina_inicio", DataType::Int32, true),
+            Field::new("pagina_fin", DataType::Int32, true),
             lista_utf8("tablas_vinculadas"),
             lista_utf8("hitos_vinculados"),
             vector_nulable("vector"),
@@ -117,6 +134,7 @@ pub fn schema_matriz_operativa() -> SchemaRef {
             utf8("objeto_alcance"),
             utf8("rol_ejecutor"),
             utf8("rol_responsable"),
+            utf8("origen_responsable"),
             utf8_nulable("registro_codigo"),
             utf8_nulable("registro_nombre"),
             utf8("criterio_aceptacion"),
@@ -189,6 +207,25 @@ pub fn schema_grafo_referencias() -> SchemaRef {
     )
 }
 
+/// `07_indice_jerarquico`: árbol de contenidos (ToC) de cada revisión
+pub fn schema_indice_jerarquico() -> SchemaRef {
+    esquema_con_comunes(
+        Some(COLUMNA_NODO_ID),
+        vec![
+            utf8(COLUMNA_ESTADO_CONTENIDO),
+            utf8(COLUMNA_TIPO_NODO),
+            Field::new("nivel_jerarquico", DataType::Int8, false),
+            utf8("codigo_seccion"),
+            utf8("titulo_seccion"),
+            utf8_nulable(COLUMNA_NODO_PADRE_ID),
+            utf8("ruta_linaje"),
+            utf8_nulable("condiciones_alcance"),
+            utf8("resumen_seccion"),
+            vector_nulable("vector_seccion"),
+        ],
+    )
+}
+
 /// Resuelve el esquema correspondiente según el nombre de la tabla
 pub fn obtener_esquema_por_nombre(nombre_tabla: &str) -> Option<SchemaRef> {
     match nombre_tabla {
@@ -198,6 +235,7 @@ pub fn obtener_esquema_por_nombre(nombre_tabla: &str) -> Option<SchemaRef> {
         TABLA_CATALOGO_TABLAS => Some(schema_catalogo_tablas()),
         TABLA_CELDAS_DOBLE_ENTRADA => Some(schema_celdas_doble_entrada()),
         TABLA_GRAFO_REFERENCIAS => Some(schema_grafo_referencias()),
+        TABLA_INDICE_JERARQUICO => Some(schema_indice_jerarquico()),
         _ => None,
     }
 }
@@ -207,8 +245,8 @@ mod tests {
     use super::*;
     use crate::application::ports::lakehouse_store::{
         TABLA_CATALOGO_TABLAS, TABLA_CELDAS_DOBLE_ENTRADA, TABLA_CHUNKS_NORMATIVA,
-        TABLA_DOCUMENTOS_CATALOGO, TABLA_GRAFO_REFERENCIAS, TABLA_MATRIZ_OPERATIVA,
-        TODAS_LAS_TABLAS,
+        TABLA_DOCUMENTOS_CATALOGO, TABLA_GRAFO_REFERENCIAS, TABLA_INDICE_JERARQUICO,
+        TABLA_MATRIZ_OPERATIVA, TABLAS_DEPENDIENTES, TODAS_LAS_TABLAS,
     };
 
     fn tipo(esquema: &SchemaRef, campo: &str) -> DataType {
@@ -226,7 +264,7 @@ mod tests {
 
     #[test]
     fn test_version_y_nombres_de_tabla_de_la_especificacion() {
-        assert_eq!(VERSION_ESQUEMA, 2);
+        assert_eq!(VERSION_ESQUEMA, 5);
         assert_eq!(
             TODAS_LAS_TABLAS,
             [
@@ -236,13 +274,15 @@ mod tests {
                 "04_catalogo_tablas",
                 "05_celdas_doble_entrada",
                 "06_grafo_referencias",
+                "07_indice_jerarquico",
             ]
         );
+        assert!(TABLAS_DEPENDIENTES.contains(&TABLA_INDICE_JERARQUICO));
         assert!(obtener_esquema_por_nombre("01_doc_catalog").is_none());
     }
 
     #[test]
-    fn test_las_6_tablas_tienen_las_columnas_comunes_tipadas() {
+    fn test_las_7_tablas_tienen_las_columnas_comunes_tipadas() {
         for nombre in TODAS_LAS_TABLAS {
             let esquema = obtener_esquema_por_nombre(nombre).expect("esquema");
             assert_eq!(tipo(&esquema, "centro_id"), DataType::Utf8, "{nombre}");
@@ -269,7 +309,7 @@ mod tests {
                 .is_nullable()
         );
         assert!(
-            !esquema
+            esquema
                 .field_with_name("fecha_vigor")
                 .unwrap()
                 .is_nullable()
@@ -305,6 +345,7 @@ mod tests {
             "objeto_alcance",
             "rol_ejecutor",
             "rol_responsable",
+            "origen_responsable",
             "registro_codigo",
             "registro_nombre",
             "criterio_aceptacion",
@@ -380,6 +421,47 @@ mod tests {
         ] {
             assert_eq!(tipo(&grafo, campo), DataType::Utf8, "{campo}");
         }
+    }
+
+    #[test]
+    fn test_chunks_02_evolucionan_a_corpus_sin_tocar_estado_ingesta() {
+        let chunks = obtener_esquema_por_nombre(TABLA_CHUNKS_NORMATIVA).unwrap();
+        for campo in ["nodo_id", "tipo_bloque", "estado_contenido"] {
+            let columna = chunks.field_with_name(campo).unwrap();
+            assert_eq!(columna.data_type(), &DataType::Utf8, "{campo}");
+            assert!(!columna.is_nullable(), "{campo}");
+        }
+        let catalogo = obtener_esquema_por_nombre(TABLA_DOCUMENTOS_CATALOGO).unwrap();
+        let provisional = catalogo.field_with_name("doc_id_provisional").unwrap();
+        assert_eq!(provisional.data_type(), &DataType::Utf8);
+        assert!(provisional.is_nullable());
+        assert!(catalogo.field_with_name("estado_contenido").is_err());
+        assert!(obtener_esquema_por_nombre("00_corpus_universal").is_none());
+    }
+
+    #[test]
+    fn test_indice_07_tiene_auditoria_completa_y_nulables_justos() {
+        let indice = obtener_esquema_por_nombre(TABLA_INDICE_JERARQUICO).unwrap();
+        for campo in [
+            "nodo_id",
+            "estado_contenido",
+            "codigo_seccion",
+            "titulo_seccion",
+            "ruta_linaje",
+            "resumen_seccion",
+        ] {
+            let columna = indice.field_with_name(campo).unwrap();
+            assert_eq!(columna.data_type(), &DataType::Utf8, "{campo}");
+            assert!(!columna.is_nullable(), "{campo}");
+        }
+        for campo in ["nodo_padre_id", "condiciones_alcance"] {
+            assert!(
+                indice.field_with_name(campo).unwrap().is_nullable(),
+                "{campo}"
+            );
+        }
+        assert_eq!(tipo(&indice, "nivel_jerarquico"), DataType::Int8);
+        assert!(es_vector(&tipo(&indice, "vector_seccion")));
     }
 
     #[test]

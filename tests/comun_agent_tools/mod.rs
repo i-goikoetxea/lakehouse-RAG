@@ -25,7 +25,8 @@ use lakehouse_rag::infrastructure::query_engine::datafusion_engine::DataFusionEn
 use lakehouse_rag::infrastructure::query_engine::indice_semantico_memoria::IndiceSemanticoMemoria;
 use lakehouse_rag::infrastructure::storage::schemas::{
     schema_catalogo_tablas, schema_celdas_doble_entrada, schema_chunks_normativa,
-    schema_documentos_catalogo, schema_grafo_referencias, schema_matriz_operativa,
+    schema_documentos_catalogo, schema_grafo_referencias, schema_indice_jerarquico,
+    schema_matriz_operativa,
 };
 
 /// Nota al pie que acompaña a la celda «Electrodo E-308 (1)»
@@ -357,11 +358,16 @@ fn fragmento(id: &str, version: i32, texto: &str) -> FragmentoIndexado {
         condicion_aplicacion: Some("Cuando la temperatura ambiente es < 0 °C".to_string()),
         texto: texto.to_string(),
         chunk_origen_id: None,
+        nodo_id: None,
+        tipo_bloque: None,
+        estado_contenido: None,
+        pagina_inicio: None,
+        pagina_fin: None,
         vector: Vec::new(),
     }
 }
 
-/// Registra las 6 vistas del centro con las fixtures y alimenta el índice semántico
+/// Registra las 7 vistas del centro con las fixtures y alimenta el índice semántico
 pub async fn sembrar_centro(entorno: &EntornoTools, centro: &CenterId) {
     let vistas = [
         ("01_documentos_catalogo", lote_catalogo()),
@@ -373,6 +379,10 @@ pub async fn sembrar_centro(entorno: &EntornoTools, centro: &CenterId) {
         ("04_catalogo_tablas", lote_catalogo_tablas()),
         ("05_celdas_doble_entrada", lote_celdas()),
         ("06_grafo_referencias", lote_grafo()),
+        (
+            "07_indice_jerarquico",
+            RecordBatch::new_empty(schema_indice_jerarquico()),
+        ),
     ];
     for (tabla, lote) in vistas {
         entorno
@@ -401,7 +411,7 @@ pub async fn sembrar_centro(entorno: &EntornoTools, centro: &CenterId) {
         .await;
 }
 
-/// Registra las 6 vistas del centro vacías (centro activo sin documentos)
+/// Registra las 7 vistas del centro vacías (centro activo sin documentos)
 pub async fn registrar_centro_vacio(entorno: &EntornoTools, centro: &CenterId) {
     let esquemas = [
         ("01_documentos_catalogo", schema_documentos_catalogo()),
@@ -410,6 +420,7 @@ pub async fn registrar_centro_vacio(entorno: &EntornoTools, centro: &CenterId) {
         ("04_catalogo_tablas", schema_catalogo_tablas()),
         ("05_celdas_doble_entrada", schema_celdas_doble_entrada()),
         ("06_grafo_referencias", schema_grafo_referencias()),
+        ("07_indice_jerarquico", schema_indice_jerarquico()),
     ];
     for (tabla, esquema) in esquemas {
         entorno

@@ -4,7 +4,8 @@
 //!
 //! Formas de salida (Fase 13): matriz → `filas[].cita`; lookup → `estado`,
 //! `nota_pie_condicion`, `cita` (o `candidatas[].cita`); grafo → `nodos[]`, `aristas[].cita`;
-//! búsqueda → `grupos[].resultados[].cita`; SQL → `resultado[]` (sin citas).
+//! búsqueda → `grupos[].resultados[].cita`; índice → `cita`; subárbol → `secciones[].cita`;
+//! SQL → `resultado[]` (sin citas).
 //! Todo el texto se entrega tal cual: el frontend lo escapa siempre al pintarlo.
 
 use std::collections::HashSet;
@@ -31,6 +32,8 @@ pub struct CitationDto {
     pub herramienta: String,
     pub condicion_aplicacion: Option<String>,
     pub nota_pie: Option<String>,
+    /// Páginas del original (`3` o `3-5`), si el formato las tiene
+    pub paginas: Option<String>,
 }
 
 /// Citas de todas las tools que terminaron bien, sin duplicados y acotadas a `MAX_CITAS`
@@ -123,6 +126,12 @@ pub fn resumen_tool(nombre: &str, salida: &Value, estado: &str) -> String {
             if !fases.is_empty() {
                 partes.push(fases.join(", "));
             }
+            if let Some(excluidos) = salida["excluidos_no_declarados"]
+                .as_u64()
+                .filter(|n| *n > 0)
+            {
+                partes.push(format!("{excluidos} sin responsable declarado, fuera"));
+            }
             partes
         }
         Some(LakehouseToolName::LookupDoubleEntryTable) => {
@@ -167,6 +176,47 @@ pub fn resumen_tool(nombre: &str, salida: &Value, estado: &str) -> String {
             {
                 partes.push("conflicto de prelación".to_string());
             }
+            if !salida["documentos_no_definitivos"]
+                .as_array()
+                .is_none_or(Vec::is_empty)
+            {
+                partes.push("hay documentos sin destilar".to_string());
+            }
+            partes
+        }
+        Some(LakehouseToolName::StairNavigateToc) => {
+            let mut partes = vec![plural(cuenta("nodos"), "sección", "secciones")];
+            let tecnicos = salida["nodos"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter(|nodo| nodo["tipo_nodo"] == "SINTETICO")
+                .count();
+            if tecnicos > 0 {
+                partes.push(format!("{tecnicos} por páginas, no son apartados"));
+            }
+            if salida["truncado"].as_bool() == Some(true) {
+                partes.push("truncado".to_string());
+            }
+            if let Some(estado) = estado_no_completo(salida) {
+                partes.push(estado);
+            }
+            partes
+        }
+        Some(LakehouseToolName::StairGetSubtreeContext) => {
+            let mut partes = vec![
+                plural(cuenta("secciones"), "sección", "secciones"),
+                format!(
+                    "{} caracteres",
+                    salida["caracteres_entregados"].as_u64().unwrap_or(0)
+                ),
+            ];
+            if salida["truncado"].as_bool() == Some(true) {
+                partes.push("truncado".to_string());
+            }
+            if let Some(estado) = estado_no_completo(salida) {
+                partes.push(estado);
+            }
             partes
         }
         Some(LakehouseToolName::ExecuteAthenaSql) => {
@@ -186,6 +236,13 @@ pub fn resumen_tool(nombre: &str, salida: &Value, estado: &str) -> String {
         _ => vec![salida["estado"].as_str().unwrap_or("ok").replace('_', " ")],
     };
     partes.join(" · ")
+}
+
+fn estado_no_completo(salida: &Value) -> Option<String> {
+    salida["estado_contenido"]
+        .as_str()
+        .filter(|e| *e != "COMPLETO" && !e.is_empty())
+        .map(|e| e.replace('_', " "))
 }
 
 fn plural(n: usize, singular: &str, plural: &str) -> String {
@@ -214,6 +271,8 @@ pub fn extraer_matrix_result(tarjetas: &[ToolCardDto]) -> Option<Value> {
             "fechaReferencia": salida["fecha_referencia"],
             "total": salida["total"],
             "filas": salida["filas"],
+            "excluidosNoDeclarados": salida["excluidos_no_declarados"],
+            "sinResponsableDeclarado": salida["sin_responsable_declarado"],
         }))
     } else {
         let mut resultado = salida.clone();
@@ -279,6 +338,7 @@ fn cita_desde(cita: &Value, contenedor: &Value, herramienta: &str) -> Option<Cit
         herramienta: herramienta.to_string(),
         condicion_aplicacion: texto(contenedor, "condicion_aplicacion"),
         nota_pie: texto(contenedor, "nota_pie_condicion"),
+        paginas: texto(cita, "paginas"),
     })
 }
 
@@ -451,6 +511,30 @@ mod tests {
             Some("4. Soldeo > 4.1 Bajo cero")
         );
         assert_eq!(citas[2].herramienta, "search_normative_context");
+    }
+
+    #[test]
+    fn test_citas_del_subarbol_con_paginas_y_resumen_de_las_tools_stair() {
+        let salida = json!({
+            "secciones": [{
+                "condicion_aplicacion": "bajo cero",
+                "cita": { "doc_id": "D", "revision": "Rev. 01", "breadcrumb": "D > 4", "paginas": "3-5" }
+            }],
+            "caracteres_entregados": 120, "truncado": true, "estado_contenido": "PARCIAL_UNIVERSAL"
+        });
+        let citas = extraer_citas(&[tarjeta("stair_get_subtree_context", salida.clone(), "ok")]);
+        assert_eq!(citas[0].paginas.as_deref(), Some("3-5"));
+        assert_eq!(citas[0].condicion_aplicacion.as_deref(), Some("bajo cero"));
+        let resumen = resumen_tool("stair_get_subtree_context", &salida, "ok");
+        assert_eq!(
+            resumen,
+            "1 sección · 120 caracteres · truncado · PARCIAL UNIVERSAL"
+        );
+        let toc = json!({ "nodos": [{}, {}], "truncado": false, "estado_contenido": "COMPLETO" });
+        assert_eq!(
+            resumen_tool("stair_navigate_toc", &toc, "ok"),
+            "2 secciones"
+        );
     }
 
     #[test]

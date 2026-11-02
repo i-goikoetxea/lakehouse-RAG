@@ -83,6 +83,13 @@ impl EmbeddingEnginePort for LazyFastEmbedEngine {
         self.motor().await?.generate_batch_embeddings(texts).await
     }
 
+    async fn contar_truncados(&self, texts: &[String]) -> Result<usize, DomainError> {
+        if texts.is_empty() {
+            return Ok(0);
+        }
+        self.motor().await?.contar_truncados(texts).await
+    }
+
     fn dimension(&self) -> usize {
         self.dimension
     }

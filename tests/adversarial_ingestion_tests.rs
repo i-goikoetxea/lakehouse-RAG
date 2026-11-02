@@ -69,13 +69,13 @@ async fn test_adv_ingesta_fallo_controlado_por_destilacion_llm_corrupta() {
     let centro = CenterId::new("planta-test").unwrap();
     let doc = "# Norma\n## 1. Test\nContenido normal.";
 
-    let err = service
+    let informe = service
         .ingestar_documento(&centro, "doc.md", doc)
         .await
-        .unwrap_err();
+        .unwrap();
 
-    assert!(matches!(err, DomainError::LlmDistillationError(_)));
-    assert!(err.to_string().contains("Error 500"));
+    assert_eq!(informe.estado_contenido, "PARCIAL_UNIVERSAL");
+    assert!(informe.avisos[0].contains("Error 500"));
 }
 
 #[tokio::test]

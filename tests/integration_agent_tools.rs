@@ -58,8 +58,8 @@ async fn test_integration_e2e_las_6_tools_del_lakehouse() {
     sembrar_centro(&entorno, &centro).await;
     let servicio = entorno.servicio.as_ref();
 
-    assert_eq!(servicio.listar_herramientas().len(), 6);
-    assert_eq!(ToolDefinition::lakehouse_tools().len(), 6);
+    assert_eq!(servicio.listar_herramientas().len(), 8);
+    assert_eq!(ToolDefinition::lakehouse_tools().len(), 8);
 
     // --- TOOL 1: inspect_lakehouse_catalog (solo lo vigente, prelación ascendente) ---
     let catalogo = invocar(
@@ -96,7 +96,7 @@ async fn test_integration_e2e_las_6_tools_del_lakehouse() {
     let matriz = invocar(
         servicio,
         LakehouseToolName::QueryOperationalMatrix,
-        json!({ "centro_id": CENTRO, "fase": "Recepción" }),
+        json!({ "centro_id": CENTRO, "solo_declarados": false, "fase": "Recepción" }),
     )
     .await;
     assert_eq!(matriz["total"], 1, "{matriz}");
@@ -109,7 +109,7 @@ async fn test_integration_e2e_las_6_tools_del_lakehouse() {
     let matriz_antigua = invocar(
         servicio,
         LakehouseToolName::QueryOperationalMatrix,
-        json!({ "centro_id": CENTRO, "fase": "RECEPCION", "fecha_referencia": FECHA_ANTERIOR }),
+        json!({ "centro_id": CENTRO, "solo_declarados": false, "fase": "RECEPCION", "fecha_referencia": FECHA_ANTERIOR }),
     )
     .await;
     assert_eq!(matriz_antigua["total"], 1);
@@ -119,7 +119,7 @@ async fn test_integration_e2e_las_6_tools_del_lakehouse() {
     let por_rol = invocar(
         servicio,
         LakehouseToolName::QueryOperationalMatrix,
-        json!({ "centro_id": CENTRO, "rol": "jefe de calidad", "rol_en": "responsable" }),
+        json!({ "centro_id": CENTRO, "solo_declarados": false, "rol": "jefe de calidad", "rol_en": "responsable" }),
     )
     .await;
     assert_eq!(

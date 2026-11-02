@@ -8,7 +8,7 @@ use lakehouse_rag::domain::models::center::CenterId;
 use lakehouse_rag::domain::models::document::DocId;
 use lakehouse_rag::domain::models::double_entry_table::{LimiteRango, RangoNumerico};
 use lakehouse_rag::domain::models::operational_matrix::{
-    BorradorHito, FaseOperativa, HitoOperativo,
+    BorradorHito, FaseOperativa, HitoOperativo, OrigenResponsable,
 };
 use lakehouse_rag::domain::models::reference_graph::{AristaGrafo, TipoRelacionNormativa};
 
@@ -211,6 +211,7 @@ fn test_adv_hito_rechaza_payload_desmesurado() {
         objeto_alcance: texto_abusivo,
         rol_ejecutor: "Inspector".to_string(),
         rol_responsable: "Jefe de Calidad".to_string(),
+        origen_responsable: OrigenResponsable::Declarado,
         registro_codigo: Some("FOR-CAL-01".to_string()),
         registro_nombre: None,
         criterio_aceptacion: "Conforme".to_string(),

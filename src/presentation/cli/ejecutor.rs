@@ -131,6 +131,14 @@ async fn ejecutar_comando(
                 salida::ingesta_legible(&resultado),
             )
         }
+        ComandoCli::Reintentar { doc_id, centro } => {
+            let resultado = app.reintentar_documento(&doc_id, &centro).await?;
+            elegir(
+                formato,
+                salida::ingesta_json(&resultado),
+                salida::ingesta_legible(&resultado),
+            )
+        }
         ComandoCli::Ask {
             texto,
             centro,

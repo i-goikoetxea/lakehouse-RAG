@@ -223,5 +223,5 @@ async fn test_adv_inicializacion_concurrente_multithread_sin_condiciones_de_carr
     }
 
     let tablas = store.listar_tablas().await.unwrap();
-    assert_eq!(tablas.len(), 6, "Deben existir exactamente 6 tablas");
+    assert_eq!(tablas.len(), 7, "Deben existir exactamente 7 tablas");
 }

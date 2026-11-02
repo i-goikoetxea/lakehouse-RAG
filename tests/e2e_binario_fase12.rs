@@ -29,7 +29,7 @@ fn e2e_binario_fase12_ingesta_integridad_y_preguntas() {
     assert_eq!(codigo, 0, "{activado}");
     assert_eq!(
         activado["proyeccion"]["vistas"].as_array().unwrap().len(),
-        6
+        7
     );
 
     for (archivo, version) in [

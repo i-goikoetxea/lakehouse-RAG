@@ -8,6 +8,7 @@ use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt};
 
 use crate::application::dtos::tools::ToolCall;
 use crate::application::ports::tool_server::ToolServerPort;
+use crate::application::use_cases::lakehouse_app::LakehouseApp;
 use crate::domain::errors::DomainError;
 
 /// Petición JSON-RPC 2.0 estándar
@@ -42,7 +43,19 @@ pub struct JsonRpcError {
 /// Servidor MCP que expone las herramientas operativas del Lakehouse a clientes compatibles
 pub struct McpServer {
     tool_server: Arc<dyn ToolServerPort>,
+    /// Operación de escritura solo para clientes MCP: el agente de la app no la recibe
+    reintento: Option<Arc<LakehouseApp>>,
 }
+
+/// Argumentos de la herramienta administrativa `reintentar_destilacion`
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReintentoParams {
+    centro_id: String,
+    doc_id: String,
+}
+
+const HERRAMIENTA_REINTENTO: &str = "reintentar_destilacion";
 
 impl McpServer {
     pub const PROTOCOL_VERSION: &'static str = "2024-11-05";
@@ -50,7 +63,57 @@ impl McpServer {
     pub const SERVER_VERSION: &'static str = "0.1.0";
 
     pub fn new(tool_server: Arc<dyn ToolServerPort>) -> Self {
-        Self { tool_server }
+        Self {
+            tool_server,
+            reintento: None,
+        }
+    }
+
+    /// Expone además `reintentar_destilacion` sobre la fachada
+    pub fn con_reintento(mut self, app: Arc<LakehouseApp>) -> Self {
+        self.reintento = Some(app);
+        self
+    }
+
+    fn definicion_reintento() -> Value {
+        json!({
+            "name": HERRAMIENTA_REINTENTO,
+            "description": "Vuelve a destilar con Claude un documento provisional (PARCIAL_UNIVERSAL) a partir de su copia en raw_docs/. Escribe en el centro: si Claude falla, el provisional queda intacto; sobre un documento definitivo no hace nada (ya_ingerido).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "centro_id": { "type": "string", "description": "Identificador del centro." },
+                    "doc_id": { "type": "string", "description": "doc_id provisional del documento." }
+                },
+                "required": ["centro_id", "doc_id"],
+                "additionalProperties": false
+            }
+        })
+    }
+
+    async fn ejecutar_reintento(
+        app: &LakehouseApp,
+        argumentos: Value,
+    ) -> Result<Value, DomainError> {
+        let params: ReintentoParams = serde_json::from_value(argumentos).map_err(|e| {
+            DomainError::ToolExecutionError(format!(
+                "Argumentos inválidos para {HERRAMIENTA_REINTENTO}: {e}"
+            ))
+        })?;
+        let resultado = app
+            .reintentar_documento(&params.doc_id, &params.centro_id)
+            .await?;
+        let informe = resultado.informe;
+        Ok(json!({
+            "doc_id": informe.doc_id,
+            "version": informe.version,
+            "ya_ingerido": informe.ya_ingerido,
+            "estado_contenido": informe.estado_contenido,
+            "pendiente_destilacion": informe.pendiente_destilacion,
+            "avisos": informe.avisos,
+            "hitos_derivados_capa0": informe.hitos_derivados_capa0,
+            "aviso_proyeccion": resultado.aviso_proyeccion,
+        }))
     }
 
     /// Procesa una línea de texto JSON-RPC y retorna la respuesta serializada si aplica
@@ -144,6 +207,7 @@ impl McpServer {
                     "inputSchema": t.parameters
                 })
             })
+            .chain(self.reintento.iter().map(|_| Self::definicion_reintento()))
             .collect();
 
         JsonRpcResponse {
@@ -174,6 +238,22 @@ impl McpServer {
         };
 
         let arguments = params.get("arguments").cloned().unwrap_or(Value::Null);
+
+        if let (HERRAMIENTA_REINTENTO, Some(app)) = (tool_name, &self.reintento) {
+            let (texto, es_error) = match Self::ejecutar_reintento(app, arguments).await {
+                Ok(salida) => (salida.to_string(), false),
+                Err(e) => (json!({ "error": e.to_string() }).to_string(), true),
+            };
+            return JsonRpcResponse {
+                jsonrpc: "2.0".to_string(),
+                id,
+                result: Some(json!({
+                    "content": [{ "type": "text", "text": texto }],
+                    "isError": es_error
+                })),
+                error: None,
+            };
+        }
 
         let call = ToolCall {
             id: format!("mcp_call_{tool_name}"),
@@ -309,7 +389,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_mcp_tools_list_retorna_las_6_herramientas() {
+    async fn test_mcp_tools_list_retorna_las_8_herramientas() {
         let server = McpServer::new(Arc::new(DummyToolServer));
         let req = json!({
             "jsonrpc": "2.0",
@@ -321,7 +401,7 @@ mod tests {
         let resp: JsonRpcResponse = serde_json::from_str(&resp_str).unwrap();
 
         let tools = resp.result.unwrap()["tools"].as_array().unwrap().clone();
-        assert_eq!(tools.len(), 6);
+        assert_eq!(tools.len(), 8);
 
         let nombres: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
         assert!(nombres.contains(&"inspect_lakehouse_catalog"));
@@ -330,6 +410,8 @@ mod tests {
         assert!(nombres.contains(&"execute_athena_sql"));
         assert!(nombres.contains(&"traverse_normative_graph"));
         assert!(nombres.contains(&"search_normative_context"));
+        assert!(nombres.contains(&"stair_navigate_toc"));
+        assert!(nombres.contains(&"stair_get_subtree_context"));
         for tool in &tools {
             assert_eq!(tool["inputSchema"]["additionalProperties"], false);
             assert!(tool["inputSchema"]["properties"]["fecha_referencia"].is_object());

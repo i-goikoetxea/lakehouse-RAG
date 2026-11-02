@@ -3,12 +3,13 @@
 //! LanceDB no ofrece transacciones entre tablas, así que la atomicidad de una ingesta se
 //! construye con las columnas `ingest_id` y `estado_ingesta`:
 //! - las filas se escriben `STAGED` y no vigentes; las lecturas normales solo ven `COMMITTED`;
-//! - `confirmar_ingesta` activa primero las tablas 02-06, retira después la vigencia previa y
+//! - `confirmar_ingesta` activa primero las tablas 02-07, retira después la vigencia previa y
 //!   activa la fila de 01 en último lugar (01 `COMMITTED` es la marca de confirmación);
+//! - si la activación falla, lo activado vuelve a `STAGED` antes de devolver el error;
 //! - si la retirada falla, se compensa reactivando la revisión previa antes de devolver el error;
 //! - `revertir_ingesta` borra todo lo que lleve ese `ingest_id` mientras no esté confirmado.
 
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -20,21 +21,29 @@ use lancedb::Table;
 use lancedb::connection::Connection;
 use lancedb::query::{ExecutableQuery, QueryBase, Select};
 
-use crate::application::dtos::lakehouse_filas::{ClaveDocumental, LoteIngesta};
+use crate::application::dtos::lakehouse_filas::{
+    ClaveDocumental, LoteIngesta, validar_estructura_stair,
+};
 use crate::application::ports::lakehouse_store::{
     ConsultaTabla, EstadoIngesta, FilasHuerfanas, HuellaIngerida, InformeIntegridad,
-    LIMITE_MAXIMO_LECTURA, LakehouseStorePort, ResumenConfirmacion, TABLA_DOCUMENTOS_CATALOGO,
-    TABLAS_DEPENDIENTES, TODAS_LAS_TABLAS, VersionesVigentesMultiples,
+    LIMITE_MAXIMO_LECTURA, LakehouseStorePort, NodosHuerfanos, ResumenConfirmacion,
+    TABLA_CHUNKS_NORMATIVA, TABLA_DOCUMENTOS_CATALOGO, TABLA_INDICE_JERARQUICO,
+    TABLA_MATRIZ_OPERATIVA, TABLAS_DEPENDIENTES, TODAS_LAS_TABLAS, ValorInvalido,
+    VersionesVigentesMultiples,
 };
 use crate::domain::errors::DomainError;
 use crate::domain::models::center::CenterId;
 use crate::domain::models::document::DocId;
+use crate::domain::models::estructura_documental::{EstadoContenido, TipoBloque, TipoNodoIndice};
 use crate::domain::models::identificadores::IngestId;
+use crate::domain::models::operational_matrix::OrigenResponsable;
 use crate::domain::models::vigencia::VentanaVigencia;
 use crate::infrastructure::storage::lotes_arrow::{ColumnasTransaccionales, lote_a_record_batch};
 use crate::infrastructure::storage::schemas::{
-    COLUMNA_CENTRO_ID, COLUMNA_DOC_ID, COLUMNA_ESTADO_INGESTA, COLUMNA_INGEST_ID,
-    COLUMNA_VERSION_NUM, COLUMNA_VIGENTE, obtener_esquema_por_nombre,
+    COLUMNA_CENTRO_ID, COLUMNA_DOC_ID, COLUMNA_DOC_ID_PROVISIONAL, COLUMNA_ESTADO_CONTENIDO,
+    COLUMNA_ESTADO_INGESTA, COLUMNA_INGEST_ID, COLUMNA_NODO_ID, COLUMNA_NODO_PADRE_ID,
+    COLUMNA_TIPO_BLOQUE, COLUMNA_TIPO_NODO, COLUMNA_VERSION_NUM, COLUMNA_VIGENTE,
+    obtener_esquema_por_nombre,
 };
 
 /// Longitud de un SHA-256 en hexadecimal
@@ -55,7 +64,8 @@ struct RevisionCatalogo {
     ingest_id: String,
     estado: String,
     vigente: bool,
-    fecha_vigor: NaiveDate,
+    fecha_vigor: Option<NaiveDate>,
+    doc_id_provisional: Option<String>,
 }
 
 /// Columnas comunes leídas de una fila cualquiera (para el diagnóstico de integridad)
@@ -69,7 +79,14 @@ struct ColumnasLinaje {
     estado: String,
 }
 
-/// Adaptador que gestiona las 6 tablas columnares v2 en LanceDB
+/// Revisión a la que pertenece una fila: `(centro_id, doc_id, version_num)`
+type ClaveRevision = (String, String, i32);
+/// Revisión de una fila y valores de las columnas pedidas (`None` si son nulos)
+type FilaTextos = (ClaveRevision, Vec<Option<String>>);
+/// Tabla, columna y validador de su vocabulario
+type ComprobacionVocabulario = (&'static str, &'static str, fn(&str) -> bool);
+
+/// Adaptador que gestiona las 7 tablas columnares en LanceDB
 pub struct LanceDbStore {
     base_dir: PathBuf,
     connection: Arc<Connection>,
@@ -216,10 +233,18 @@ impl LanceDbStore {
         for lote in &lotes {
             let linaje = extraer_linaje(lote)?;
             let fechas = columna::<Date32Array>(lote, "fecha_vigor")?;
+            let provisionales = columna::<StringArray>(lote, COLUMNA_DOC_ID_PROVISIONAL)?;
             for (fila, columnas) in linaje.into_iter().enumerate() {
-                let fecha_vigor = fechas.value_as_date(fila).ok_or_else(|| {
-                    DomainError::StorageError("fecha_vigor fuera de rango en 01".to_string())
-                })?;
+                let fecha_vigor = fechas
+                    .is_valid(fila)
+                    .then(|| {
+                        fechas.value_as_date(fila).ok_or_else(|| {
+                            DomainError::StorageError(
+                                "fecha_vigor fuera de rango en 01".to_string(),
+                            )
+                        })
+                    })
+                    .transpose()?;
                 revisiones.push(RevisionCatalogo {
                     centro_id: columnas.centro_id,
                     doc_id: columnas.doc_id,
@@ -228,6 +253,9 @@ impl LanceDbStore {
                     estado: columnas.estado,
                     vigente: columnas.vigente,
                     fecha_vigor,
+                    doc_id_provisional: provisionales
+                        .is_valid(fila)
+                        .then(|| provisionales.value(fila).to_string()),
                 });
             }
         }
@@ -269,10 +297,12 @@ impl LanceDbStore {
         Ok(revision)
     }
 
-    /// Revisiones confirmadas del mismo documento y centro; valida orden de versiones y fechas
+    /// Revisiones confirmadas del mismo documento y centro; valida orden de versiones y fechas.
+    /// La revisión sustituida no cuenta: va a desaparecer en esta misma confirmación.
     async fn revisiones_previas_vigentes(
         &self,
         nueva: &RevisionCatalogo,
+        sustituida: Option<&RevisionCatalogo>,
     ) -> Result<Vec<RevisionCatalogo>, DomainError> {
         let filtro = format!(
             "{COLUMNA_CENTRO_ID} = {} AND {COLUMNA_DOC_ID} = {} AND {COLUMNA_ESTADO_INGESTA} = {}",
@@ -280,7 +310,8 @@ impl LanceDbStore {
             literal_sql(&nueva.doc_id),
             literal_sql(EstadoIngesta::Committed.as_str())
         );
-        let confirmadas = self.leer_catalogo(&filtro).await?;
+        let mut confirmadas = self.leer_catalogo(&filtro).await?;
+        confirmadas.retain(|r| sustituida.is_none_or(|s| s.ingest_id != r.ingest_id));
         if let Some(maxima) = confirmadas.iter().map(|r| r.version_num).max()
             && maxima >= nueva.version_num
         {
@@ -289,12 +320,14 @@ impl LanceDbStore {
                 nueva.doc_id, nueva.version_num
             )));
         }
-        let vigentes: Vec<RevisionCatalogo> =
-            confirmadas.into_iter().filter(|r| r.vigente).collect();
-        for previa in &vigentes {
-            VentanaVigencia::new(previa.fecha_vigor, Some(nueva.fecha_vigor))?;
+        // Una revisión sin fecha no se compara: el orden entre ellas lo da version_num. Se compara
+        // con todas las confirmadas para no saltarse una paradoja a través de una sin fecha.
+        if let Some(fecha_nueva) = nueva.fecha_vigor {
+            for fecha_previa in confirmadas.iter().filter_map(|r| r.fecha_vigor) {
+                VentanaVigencia::new(fecha_previa, Some(fecha_nueva))?;
+            }
         }
-        Ok(vigentes)
+        Ok(confirmadas.into_iter().filter(|r| r.vigente).collect())
     }
 
     async fn activar_ingesta(
@@ -317,6 +350,27 @@ impl LanceDbStore {
         Ok(activadas)
     }
 
+    /// Compensación de una activación a medias: las filas vuelven a `STAGED` y no vigentes para
+    /// que las lecturas no vean una revisión parcial. Sigue tras un fallo (la tabla rota nunca
+    /// llegó a activarse) y devuelve el primero.
+    async fn desactivar_ingesta(&self, ingest_id: &IngestId) -> Result<(), DomainError> {
+        let filtro = format!("{COLUMNA_INGEST_ID} = {}", literal_sql(ingest_id.as_str()));
+        let asignaciones = [
+            (COLUMNA_VIGENTE, "false".to_string()),
+            (
+                COLUMNA_ESTADO_INGESTA,
+                literal_sql(EstadoIngesta::Staged.as_str()),
+            ),
+        ];
+        let mut primer_error = None;
+        for tabla in TABLAS_DEPENDIENTES {
+            if let Err(error) = self.actualizar(tabla, &filtro, &asignaciones).await {
+                primer_error.get_or_insert(error);
+            }
+        }
+        primer_error.map_or(Ok(()), Err)
+    }
+
     async fn retirar_vigencia_previa(
         &self,
         nueva: &RevisionCatalogo,
@@ -334,7 +388,10 @@ impl LanceDbStore {
                 .actualizar(tabla, &filtro, &[(COLUMNA_VIGENTE, "false".to_string())])
                 .await?;
         }
-        let derogacion = format!("CAST('{}' AS DATE)", nueva.fecha_vigor.format("%Y-%m-%d"));
+        let derogacion = nueva.fecha_vigor.map_or_else(
+            || "CAST(NULL AS DATE)".to_string(),
+            |fecha| format!("CAST('{}' AS DATE)", fecha.format("%Y-%m-%d")),
+        );
         retiradas += self
             .actualizar(
                 TABLA_DOCUMENTOS_CATALOGO,
@@ -371,16 +428,105 @@ impl LanceDbStore {
         Ok(())
     }
 
+    /// Retira la vigencia de la revisión sustituida, que puede tener otro `doc_id`
+    async fn retirar_sustituida(&self, sustituida: &RevisionCatalogo) -> Result<u64, DomainError> {
+        let filtro = format!(
+            "{COLUMNA_INGEST_ID} = {}",
+            literal_sql(&sustituida.ingest_id)
+        );
+        let mut retiradas = 0;
+        for tabla in TODAS_LAS_TABLAS {
+            retiradas += self
+                .actualizar(tabla, &filtro, &[(COLUMNA_VIGENTE, "false".to_string())])
+                .await?;
+        }
+        Ok(retiradas)
+    }
+
     async fn retirar_y_marcar(
         &self,
         nueva: &RevisionCatalogo,
         ingest_id: &IngestId,
+        sustituida: Option<&RevisionCatalogo>,
     ) -> Result<(u64, u64), DomainError> {
-        let retiradas = self.retirar_vigencia_previa(nueva, ingest_id).await?;
+        let mut retiradas = self.retirar_vigencia_previa(nueva, ingest_id).await?;
+        if let Some(sustituida) = sustituida {
+            retiradas += self.retirar_sustituida(sustituida).await?;
+        }
         let marca = self
             .activar_ingesta(&[TABLA_DOCUMENTOS_CATALOGO], ingest_id)
             .await?;
         Ok((retiradas, marca))
+    }
+
+    /// Borra de todas las tablas las filas de una ingesta. Devuelve las filas borradas.
+    async fn borrar_filas_de_ingesta(&self, ingest_id: &str) -> Result<u64, DomainError> {
+        let filtro = format!("{COLUMNA_INGEST_ID} = {}", literal_sql(ingest_id));
+        let mut borradas = 0u64;
+        for nombre_tabla in TODAS_LAS_TABLAS {
+            let filas = self.contar(nombre_tabla, &filtro).await?;
+            if filas == 0 {
+                continue;
+            }
+            let tabla = self.abrir_tabla(nombre_tabla).await?;
+            tabla.delete(&filtro).await.map_err(|e| {
+                DomainError::StorageError(format!(
+                    "Error revirtiendo '{ingest_id}' en '{nombre_tabla}': {e}"
+                ))
+            })?;
+            borradas += filas as u64;
+        }
+        Ok(borradas)
+    }
+
+    /// Confirmación común; `sustituida` es la revisión provisional que desaparece con esta
+    async fn confirmar(
+        &self,
+        ingest_id: &IngestId,
+        doc_id: &DocId,
+        sustituida: Option<&RevisionCatalogo>,
+    ) -> Result<ResumenConfirmacion, DomainError> {
+        let nueva = self.revision_staged(ingest_id, doc_id).await?;
+        let previas = self.revisiones_previas_vigentes(&nueva, sustituida).await?;
+
+        let activadas = match self.activar_ingesta(&TABLAS_DEPENDIENTES, ingest_id).await {
+            Ok(activadas) => activadas,
+            Err(error) => {
+                let detalle = match self.desactivar_ingesta(ingest_id).await {
+                    Ok(()) => "filas devueltas a STAGED".to_string(),
+                    Err(e) => format!("la compensación no pudo completarse: {e}"),
+                };
+                return Err(DomainError::StorageError(format!(
+                    "Error activando la ingesta '{ingest_id}': {error} ({detalle})"
+                )));
+            }
+        };
+        let (retiradas, marca) = match self.retirar_y_marcar(&nueva, ingest_id, sustituida).await {
+            Ok(resultado) => resultado,
+            Err(error) => {
+                let a_restaurar: Vec<RevisionCatalogo> =
+                    previas.iter().chain(sustituida).cloned().collect();
+                let detalle = match self.restaurar_vigencia(&a_restaurar).await {
+                    Ok(()) => "vigencia previa restaurada".to_string(),
+                    Err(e) => format!("además falló la compensación: {e}"),
+                };
+                return Err(DomainError::StorageError(format!(
+                    "Error confirmando la ingesta '{ingest_id}': {error} ({detalle})"
+                )));
+            }
+        };
+
+        let mut versiones_derogadas: Vec<u32> = previas
+            .iter()
+            .filter_map(|r| u32::try_from(r.version_num).ok())
+            .collect();
+        versiones_derogadas.sort_unstable();
+        Ok(ResumenConfirmacion {
+            filas_activadas: activadas + marca,
+            filas_retiradas: retiradas,
+            versiones_derogadas,
+            aviso_limpieza: None,
+        })
     }
 
     async fn leer_linaje_tabla(
@@ -405,12 +551,189 @@ impl LanceDbStore {
         }
         Ok(filas)
     }
+
+    /// Revisión de cada fila y valores de las columnas de texto pedidas (`None` si son nulos)
+    async fn leer_columnas_texto(
+        &self,
+        nombre_tabla: &str,
+        columnas: &[&str],
+    ) -> Result<Vec<FilaTextos>, DomainError> {
+        let limite = self.contar_registros(nombre_tabla).await?.max(1);
+        let mut seleccion = vec![COLUMNA_CENTRO_ID, COLUMNA_DOC_ID, COLUMNA_VERSION_NUM];
+        seleccion.extend_from_slice(columnas);
+        let lotes = self
+            .leer_lotes(nombre_tabla, None, limite, Some(&seleccion))
+            .await?;
+        let mut filas = Vec::new();
+        for lote in &lotes {
+            let centros = columna::<StringArray>(lote, COLUMNA_CENTRO_ID)?;
+            let docs = columna::<StringArray>(lote, COLUMNA_DOC_ID)?;
+            let versiones = columna::<Int32Array>(lote, COLUMNA_VERSION_NUM)?;
+            let textos = columnas
+                .iter()
+                .map(|c| columna::<StringArray>(lote, c))
+                .collect::<Result<Vec<_>, _>>()?;
+            for fila in 0..lote.num_rows() {
+                let revision = (
+                    centros.value(fila).to_string(),
+                    docs.value(fila).to_string(),
+                    versiones.value(fila),
+                );
+                let valores = textos
+                    .iter()
+                    .map(|t| t.is_valid(fila).then(|| t.value(fila).to_string()))
+                    .collect();
+                filas.push((revision, valores));
+            }
+        }
+        Ok(filas)
+    }
+
+    /// Chunks cuyo `nodo_id` falta en 07 y nodos cuyo padre falta, dentro de la misma revisión.
+    /// Una revisión sin ninguna fila en 07 también se informa: toda ingesta escribe 07.
+    async fn diagnosticar_nodos_huerfanos(&self) -> Result<Vec<NodosHuerfanos>, DomainError> {
+        let nodos = self
+            .leer_columnas_texto(
+                TABLA_INDICE_JERARQUICO,
+                &[COLUMNA_NODO_ID, COLUMNA_NODO_PADRE_ID],
+            )
+            .await?;
+        let chunks = self
+            .leer_columnas_texto(TABLA_CHUNKS_NORMATIVA, &[COLUMNA_NODO_ID])
+            .await?;
+        let mut por_revision: HashMap<&ClaveRevision, HashSet<&str>> = HashMap::new();
+        for (revision, valores) in &nodos {
+            por_revision
+                .entry(revision)
+                .or_default()
+                .extend(valores[0].as_deref());
+        }
+        let referencias = chunks
+            .iter()
+            .map(|(r, v)| (TABLA_CHUNKS_NORMATIVA, r, v[0].as_deref()))
+            .chain(
+                nodos
+                    .iter()
+                    .map(|(r, v)| (TABLA_INDICE_JERARQUICO, r, v[1].as_deref())),
+            );
+        let mut ausentes: BTreeMap<(&str, &ClaveRevision, &str), usize> = BTreeMap::new();
+        for (tabla, revision, nodo) in referencias {
+            let Some(nodo) = nodo else { continue };
+            if !por_revision
+                .get(revision)
+                .is_some_and(|existentes| existentes.contains(nodo))
+            {
+                *ausentes.entry((tabla, revision, nodo)).or_default() += 1;
+            }
+        }
+        Ok(ausentes
+            .into_iter()
+            .map(|((tabla, revision, nodo), filas)| NodosHuerfanos {
+                tabla: tabla.to_string(),
+                centro_id: revision.0.clone(),
+                doc_id: revision.1.clone(),
+                version_num: revision.2,
+                nodo_id: nodo.to_string(),
+                filas,
+            })
+            .collect())
+    }
+
+    /// Valores fuera del vocabulario de su columna (un `.lance` manipulado o escrito a mano)
+    async fn diagnosticar_valores_invalidos(&self) -> Result<Vec<ValorInvalido>, DomainError> {
+        let mut comprobaciones: Vec<ComprobacionVocabulario> = TODAS_LAS_TABLAS
+            .iter()
+            .map(|t| {
+                (
+                    *t,
+                    COLUMNA_ESTADO_INGESTA,
+                    estado_ingesta_valido as fn(&str) -> bool,
+                )
+            })
+            .collect();
+        comprobaciones.extend([
+            (
+                TABLA_CHUNKS_NORMATIVA,
+                COLUMNA_ESTADO_CONTENIDO,
+                estado_contenido_valido as fn(&str) -> bool,
+            ),
+            (
+                TABLA_CHUNKS_NORMATIVA,
+                COLUMNA_TIPO_BLOQUE,
+                tipo_bloque_valido,
+            ),
+            (
+                TABLA_INDICE_JERARQUICO,
+                COLUMNA_ESTADO_CONTENIDO,
+                estado_contenido_valido,
+            ),
+            (TABLA_INDICE_JERARQUICO, COLUMNA_TIPO_NODO, tipo_nodo_valido),
+            (
+                TABLA_DOCUMENTOS_CATALOGO,
+                COLUMNA_DOC_ID_PROVISIONAL,
+                doc_id_valido,
+            ),
+            (
+                TABLA_MATRIZ_OPERATIVA,
+                "origen_responsable",
+                origen_responsable_valido,
+            ),
+        ]);
+        let mut invalidos = Vec::new();
+        for (tabla, nombre_columna, es_valido) in comprobaciones {
+            let filas = self.leer_columnas_texto(tabla, &[nombre_columna]).await?;
+            let mut cuentas: BTreeMap<String, usize> = BTreeMap::new();
+            for valor in filas.into_iter().filter_map(|(_, mut v)| v.remove(0)) {
+                if !es_valido(&valor) {
+                    *cuentas.entry(valor).or_default() += 1;
+                }
+            }
+            invalidos.extend(cuentas.into_iter().map(|(valor, filas)| ValorInvalido {
+                tabla: tabla.to_string(),
+                columna: nombre_columna.to_string(),
+                valor,
+                filas,
+            }));
+        }
+        Ok(invalidos)
+    }
+}
+
+fn origen_responsable_valido(valor: &str) -> bool {
+    [
+        OrigenResponsable::Declarado,
+        OrigenResponsable::Inferido,
+        OrigenResponsable::NoConsta,
+    ]
+    .iter()
+    .any(|origen| origen.as_str() == valor)
+}
+
+fn estado_ingesta_valido(valor: &str) -> bool {
+    valor == EstadoIngesta::Staged.as_str() || valor == EstadoIngesta::Committed.as_str()
+}
+
+fn tipo_nodo_valido(valor: &str) -> bool {
+    TipoNodoIndice::parse(valor).is_ok()
+}
+
+fn estado_contenido_valido(valor: &str) -> bool {
+    EstadoContenido::parse(valor).is_ok()
+}
+
+fn tipo_bloque_valido(valor: &str) -> bool {
+    TipoBloque::parse(valor).is_ok()
+}
+
+/// `DocId::new` recorta espacios: el valor guardado debe coincidir exactamente con el validado
+fn doc_id_valido(valor: &str) -> bool {
+    DocId::new(valor).is_ok_and(|d| d.as_str() == valor)
 }
 
 fn nombre_tabla_de(lote: &LoteIngesta) -> &'static str {
     use crate::application::ports::lakehouse_store::{
-        TABLA_CATALOGO_TABLAS, TABLA_CELDAS_DOBLE_ENTRADA, TABLA_CHUNKS_NORMATIVA,
-        TABLA_GRAFO_REFERENCIAS, TABLA_MATRIZ_OPERATIVA,
+        TABLA_CATALOGO_TABLAS, TABLA_CELDAS_DOBLE_ENTRADA, TABLA_GRAFO_REFERENCIAS,
+        TABLA_MATRIZ_OPERATIVA,
     };
     match lote {
         LoteIngesta::Catalogo(_) => TABLA_DOCUMENTOS_CATALOGO,
@@ -419,6 +742,7 @@ fn nombre_tabla_de(lote: &LoteIngesta) -> &'static str {
         LoteIngesta::Tablas(_) => TABLA_CATALOGO_TABLAS,
         LoteIngesta::Celdas(_) => TABLA_CELDAS_DOBLE_ENTRADA,
         LoteIngesta::Aristas(_) => TABLA_GRAFO_REFERENCIAS,
+        LoteIngesta::Indice(_) => TABLA_INDICE_JERARQUICO,
     }
 }
 
@@ -551,10 +875,16 @@ impl LakehouseStorePort for LanceDbStore {
             literal_sql(EstadoIngesta::Committed.as_str())
         );
         let revisiones = self.leer_catalogo(&filtro).await?;
-        let Some(revision) = revisiones.into_iter().max_by_key(|r| r.version_num) else {
+        // Una revisión sustituida cuya limpieza falló queda no vigente: gana la vigente
+        let Some(revision) = revisiones
+            .into_iter()
+            .max_by_key(|r| (r.vigente, r.version_num))
+        else {
             return Ok(None);
         };
+        let es_provisional = revision.doc_id_provisional.as_deref() == Some(&revision.doc_id);
         Ok(Some(HuellaIngerida {
+            es_provisional,
             doc_id: DocId::new(&revision.doc_id)?,
             version_num: u32::try_from(revision.version_num).map_err(|_| {
                 DomainError::StorageError(format!(
@@ -572,6 +902,7 @@ impl LakehouseStorePort for LanceDbStore {
         lotes: Vec<LoteIngesta>,
     ) -> Result<usize, DomainError> {
         clave_unica(&lotes)?;
+        validar_estructura_stair(&lotes)?;
         let _guard = self.transaccion_lock.lock().await;
         let ya_confirmada = self
             .contar(
@@ -602,35 +933,38 @@ impl LakehouseStorePort for LanceDbStore {
         doc_id: &DocId,
     ) -> Result<ResumenConfirmacion, DomainError> {
         let _guard = self.transaccion_lock.lock().await;
-        let nueva = self.revision_staged(ingest_id, doc_id).await?;
-        let previas = self.revisiones_previas_vigentes(&nueva).await?;
+        self.confirmar(ingest_id, doc_id, None).await
+    }
 
-        let activadas = self
-            .activar_ingesta(&TABLAS_DEPENDIENTES, ingest_id)
-            .await?;
-        let (retiradas, marca) = match self.retirar_y_marcar(&nueva, ingest_id).await {
-            Ok(resultado) => resultado,
-            Err(error) => {
-                let detalle = match self.restaurar_vigencia(&previas).await {
-                    Ok(()) => "vigencia previa restaurada".to_string(),
-                    Err(e) => format!("además falló la compensación: {e}"),
-                };
-                return Err(DomainError::StorageError(format!(
-                    "Error confirmando la ingesta '{ingest_id}': {error} ({detalle})"
-                )));
-            }
-        };
-
-        let mut versiones_derogadas: Vec<u32> = previas
-            .iter()
-            .filter_map(|r| u32::try_from(r.version_num).ok())
-            .collect();
-        versiones_derogadas.sort_unstable();
-        Ok(ResumenConfirmacion {
-            filas_activadas: activadas + marca,
-            filas_retiradas: retiradas,
-            versiones_derogadas,
-        })
+    async fn confirmar_sustitucion(
+        &self,
+        ingest_id: &IngestId,
+        doc_id: &DocId,
+        ingest_sustituida: &IngestId,
+    ) -> Result<ResumenConfirmacion, DomainError> {
+        let _guard = self.transaccion_lock.lock().await;
+        let filtro = format!(
+            "{COLUMNA_INGEST_ID} = {} AND {COLUMNA_ESTADO_INGESTA} = {}",
+            literal_sql(ingest_sustituida.as_str()),
+            literal_sql(EstadoIngesta::Committed.as_str())
+        );
+        let sustituida = self
+            .leer_catalogo(&filtro)
+            .await?
+            .into_iter()
+            .next()
+            .ok_or_else(|| {
+                DomainError::ValidationError(format!(
+                    "No existe una revisión confirmada con la ingesta '{ingest_sustituida}'"
+                ))
+            })?;
+        let mut resumen = self.confirmar(ingest_id, doc_id, Some(&sustituida)).await?;
+        if let Err(error) = self.borrar_filas_de_ingesta(&sustituida.ingest_id).await {
+            resumen.aviso_limpieza = Some(format!(
+                "Revisión confirmada, pero quedan filas no vigentes de '{ingest_sustituida}': {error}"
+            ));
+        }
+        Ok(resumen)
     }
 
     async fn revertir_ingesta(&self, ingest_id: &IngestId) -> Result<u64, DomainError> {
@@ -650,21 +984,7 @@ impl LakehouseStorePort for LanceDbStore {
                 "La ingesta '{ingest_id}' ya está confirmada y no puede revertirse"
             )));
         }
-        let mut borradas = 0u64;
-        for nombre_tabla in TODAS_LAS_TABLAS {
-            let filas = self.contar(nombre_tabla, &filtro).await?;
-            if filas == 0 {
-                continue;
-            }
-            let tabla = self.abrir_tabla(nombre_tabla).await?;
-            tabla.delete(&filtro).await.map_err(|e| {
-                DomainError::StorageError(format!(
-                    "Error revirtiendo '{ingest_id}' en '{nombre_tabla}': {e}"
-                ))
-            })?;
-            borradas += filas as u64;
-        }
-        Ok(borradas)
+        self.borrar_filas_de_ingesta(ingest_id.as_str()).await
     }
 
     async fn leer_tabla(
@@ -747,6 +1067,8 @@ impl LakehouseStorePort for LanceDbStore {
             );
         }
         informe.ingestas_staged = staged.into_iter().collect();
+        informe.nodos_huerfanos = self.diagnosticar_nodos_huerfanos().await?;
+        informe.valores_invalidos = self.diagnosticar_valores_invalidos().await?;
         Ok(informe)
     }
 
@@ -804,6 +1126,7 @@ mod tests {
                 )
                 .unwrap(),
                 hash_sha256: hash.repeat(64),
+                doc_id_provisional: None,
             };
             store
                 .escribir_staged(&id, vec![LoteIngesta::Catalogo(vec![fila])])

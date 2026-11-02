@@ -1,4 +1,8 @@
-//! Mapeo puro del paquete destilado v2 (más el documento parseado) a las filas de las 6 tablas.
+//! Mapeo puro del paquete destilado v2 (más el documento parseado) a las filas de las tablas 01-07.
+//!
+//! El corpus 02 y el índice 07 salen solo del documento parseado, sin depender del LLM: si la
+//! destilación falla, `mapear_revision_provisional` los indexa igual con un catálogo de respaldo
+//! (`docs/arquitectura/decisiones_stair.md`).
 //!
 //! Es la red de seguridad de la ingesta (problemas 1, 2 y 7):
 //! - vocabularios normalizados con los enums del dominio (fase, relación, tipo de documento);
@@ -11,23 +15,34 @@
 
 use std::collections::HashSet;
 
-use chrono::{NaiveDate, Utc};
+use chrono::Utc;
 
 use crate::application::dtos::ingestion::{
     AristaDestilada, CatalogoDestilado, CeldaDestilada, DistilledDocumentPackage, EjeDestilado,
-    HitoDestilado, LimitesDestilados, ParsedDocument, ParsedTableRaw, TablaDestilada,
+    HitoDestilado, LimitesDestilados, ParsedDocument, ParsedSection, ParsedTableRaw,
+    TablaDestilada,
 };
 use crate::application::dtos::lakehouse_filas::{
-    ClaveDocumental, EjeTabla, FilaArista, FilaCatalogo, FilaCelda, FilaChunk, FilaHito, FilaTabla,
-    LimitesEje, TipoEjeTabla, TipoNodoGrafo,
+    ClaveDocumental, EjeTabla, FilaArista, FilaCatalogo, FilaCelda, FilaChunk, FilaHito,
+    FilaIndice, FilaTabla, LimitesEje, TipoEjeTabla, TipoNodoGrafo,
 };
 use crate::domain::errors::DomainError;
 use crate::domain::models::center::CenterId;
 use crate::domain::models::document::{DocId, NivelPrelacion, TipoDocumento};
+use crate::domain::models::estructura_documental::{
+    EstadoContenido, NivelJerarquico, NodoId, TipoBloque, TipoNodoIndice, codigo_real_de,
+};
 use crate::domain::models::identificadores::{TipoEntidad, id_versionado};
-use crate::domain::models::operational_matrix::{BorradorHito, FaseOperativa, HitoOperativo};
+use crate::domain::models::operational_matrix::{
+    BorradorHito, FaseOperativa, HitoOperativo, OrigenResponsable,
+};
 use crate::domain::models::reference_graph::TipoRelacionNormativa;
-use crate::domain::models::vigencia::VentanaVigencia;
+use crate::domain::models::vigencia::{VentanaVigencia, validar_fecha_vigor};
+use crate::domain::services::arbol_secciones::{
+    CODIGO_PREAMBULO, SeccionDelArbol, TITULO_PREAMBULO, clasificar_bloque, construir_arbol,
+    resumen_extractivo,
+};
+use crate::domain::services::fragmentacion::fragmentar_con_posiciones;
 use crate::domain::services::normalizacion::{
     codigo_canonico, normalizar_token, plegar_mayusculas, separar_revision,
 };
@@ -46,15 +61,39 @@ const PREFIJO_ETIQUETA_TABLA: &str = "TABLA-";
 const CONTEXTO_ARISTA_SINTETIZADA: &str =
     "Arista añadida por la ingesta: el hito rellena este registro";
 
+/// Tipo de un documento sin destilar: `FORMATO_REGISTRO` tiene la prelación más baja (5), de modo
+/// que un documento sin validar nunca se imponga a uno destilado
+const TIPO_DOCUMENTO_PROVISIONAL: TipoDocumento = TipoDocumento::FormatoRegistro;
+/// Versión de un documento sin destilar
+const VERSION_PROVISIONAL: u32 = 1;
+/// Revisión de un documento sin destilar
+const REVISION_PROVISIONAL: &str = "Provisional";
+/// Título de un encabezado sin texto
+const TITULO_SIN_NOMBRE: &str = "(sin título)";
+/// Longitud máxima del slug del `doc_id` provisional
+const MAX_LONGITUD_SLUG: usize = 64;
+/// Slug de un archivo cuyo nombre no contiene ningún alfanumérico
+const SLUG_POR_DEFECTO: &str = "DOC";
+/// Caracteres del SHA-256 en el `doc_id` provisional
+const HEX_HASH_PROVISIONAL: usize = 6;
+
 /// Filas de una revisión sin vectores, con los textos que hay que vectorizar
 #[derive(Debug, Clone, PartialEq)]
 pub struct RevisionMapeada {
+    /// Datos del extractor que se rechazaron o rebajaron al mapear
+    pub avisos: Vec<String>,
+    /// Hitos sin rol ni registro: no entran en 03 y su texto sigue en la Capa 0
+    pub hitos_derivados_capa0: usize,
     pub catalogo: FilaCatalogo,
     pub chunks: Vec<FilaChunk>,
     pub hitos: Vec<FilaHito>,
     pub tablas: Vec<FilaTabla>,
     pub celdas: Vec<FilaCelda>,
     pub aristas: Vec<FilaArista>,
+    /// Índice 07 sin `vector_seccion`, una fila por sección
+    pub nodos: Vec<FilaIndice>,
+    /// `titulo + " " + resumen` de cada nodo (mismo orden que `nodos`)
+    pub textos_nodos: Vec<String>,
     /// `breadcrumb + condición + texto` de cada chunk (mismo orden que `chunks`)
     pub textos_chunks: Vec<String>,
     /// `HitoOperativo::texto_vectorizable` de cada hito
@@ -63,13 +102,17 @@ pub struct RevisionMapeada {
     pub textos_tablas: Vec<String>,
 }
 
-/// Apartado del documento que se convierte en chunk
+/// Fragmento de una sección que se convierte en chunk (los de una sección comparten `nodo_id`)
 #[derive(Debug, Clone, PartialEq)]
 struct SeccionIndexable {
+    nodo_id: NodoId,
+    tipo_bloque: TipoBloque,
     codigo: String,
     breadcrumb: String,
     condicion: Option<String>,
     texto: String,
+    pagina_inicio: Option<u32>,
+    pagina_fin: Option<u32>,
 }
 
 /// Clave de la revisión: `doc_id` canónico sin revisión y versión resuelta
@@ -114,6 +157,65 @@ fn numero_de_revision(revision: &str) -> Option<u32> {
     digitos.parse().ok()
 }
 
+/// `doc_id` provisional: slug del archivo en mayúsculas, `_` y 6 hex del SHA-256
+pub fn doc_id_provisional(nombre_archivo: &str, hash_sha256: &str) -> Result<DocId, DomainError> {
+    let sin_extension = nombre_archivo
+        .rsplit_once('.')
+        .map_or(nombre_archivo, |(base, _)| base);
+    let slug = codigo_canonico(&sin_extension.replace('.', "-"));
+    let slug: String = slug.chars().take(MAX_LONGITUD_SLUG).collect();
+    let slug = slug.trim_end_matches('-');
+    let slug = if slug.is_empty() {
+        SLUG_POR_DEFECTO
+    } else {
+        slug
+    };
+    let hex: String = hash_sha256.chars().take(HEX_HASH_PROVISIONAL).collect();
+    DocId::new(format!("{slug}_{hex}"))
+}
+
+/// Revisión de un documento sin destilar: corpus 02 e índice 07 en `PARCIAL_UNIVERSAL` (o
+/// `REQUIERE_OCR` si el PDF no tiene texto), sin Capa 2 y con metadatos de respaldo
+/// (`decisiones_stair.md`, D4)
+pub fn mapear_revision_provisional(
+    centro_id: &CenterId,
+    parsed: &ParsedDocument,
+    hash_sha256: &str,
+) -> Result<(ClaveDocumental, RevisionMapeada), DomainError> {
+    let clave = ClaveDocumental {
+        centro_id: centro_id.clone(),
+        doc_id: doc_id_provisional(&parsed.nombre_archivo, hash_sha256)?,
+        version_num: VERSION_PROVISIONAL,
+    };
+    let paquete = DistilledDocumentPackage {
+        catalogo: CatalogoDestilado {
+            doc_id: clave.doc_id.to_string(),
+            titulo: parsed.titulo.clone(),
+            tipo_documento: TIPO_DOCUMENTO_PROVISIONAL.as_str().to_string(),
+            revision: REVISION_PROVISIONAL.to_string(),
+            version_num: i64::from(VERSION_PROVISIONAL),
+            fecha_vigor: None,
+            emisor: String::new(),
+        },
+        hitos: Vec::new(),
+        tablas: Vec::new(),
+        aristas: Vec::new(),
+    };
+    let mut revision = mapear_con_estado(
+        &clave,
+        parsed,
+        &paquete,
+        hash_sha256,
+        if parsed.requiere_ocr {
+            EstadoContenido::RequiereOcr
+        } else {
+            EstadoContenido::ParcialUniversal
+        },
+    )?;
+    revision.catalogo.doc_id_provisional = Some(clave.doc_id.clone());
+    Ok((clave, revision))
+}
+
 /// Mapea el paquete destilado y el documento parseado a las filas de la revisión
 pub fn mapear_revision(
     clave: &ClaveDocumental,
@@ -121,24 +223,51 @@ pub fn mapear_revision(
     paquete: &DistilledDocumentPackage,
     hash_sha256: &str,
 ) -> Result<RevisionMapeada, DomainError> {
+    mapear_con_estado(
+        clave,
+        parsed,
+        paquete,
+        hash_sha256,
+        EstadoContenido::Completo,
+    )
+}
+
+fn mapear_con_estado(
+    clave: &ClaveDocumental,
+    parsed: &ParsedDocument,
+    paquete: &DistilledDocumentPackage,
+    hash_sha256: &str,
+    estado: EstadoContenido,
+) -> Result<RevisionMapeada, DomainError> {
     let tipo_documento = TipoDocumento::parse(&paquete.catalogo.tipo_documento)
         .unwrap_or(TIPO_DOCUMENTO_POR_DEFECTO);
     let nivel = tipo_documento.nivel_prelacion();
-    let catalogo = fila_catalogo(clave, &paquete.catalogo, tipo_documento, hash_sha256)?;
+    let (catalogo, aviso_fecha) = fila_catalogo(
+        clave,
+        &paquete.catalogo,
+        tipo_documento,
+        hash_sha256,
+        &parsed.contenido_completo,
+    );
 
-    let secciones = secciones_indexables(parsed);
+    let (nodos, textos_nodos, secciones) = estructura_universal(clave, parsed, estado);
     let chunk_ids: Vec<String> = (0..secciones.len())
         .map(|idx| id_versionado(&clave.doc_id, clave.version_num, TipoEntidad::Chunk, idx))
         .collect();
 
-    let (hitos, textos_hitos, seccion_de_hito) =
-        filas_hitos(clave, nivel, &paquete.hitos, &secciones, &chunk_ids)?;
+    let HitosMapeados {
+        filas: hitos,
+        textos: textos_hitos,
+        secciones: seccion_de_hito,
+        derivados_capa0,
+        origenes_rebajados,
+    } = filas_hitos(clave, nivel, &paquete.hitos, &secciones, &chunk_ids)?;
     let (tablas, textos_tablas, celdas) =
         filas_tablas_y_celdas(clave, nivel, &paquete.tablas, &parsed.tablas);
     let etiquetas = etiquetas_de_tabla(&paquete.tablas, &tablas);
     let aristas = filas_aristas(clave, &paquete.aristas, &hitos, &etiquetas);
 
-    let mut chunks = filas_chunks_sin_vector(clave, nivel, &secciones, &chunk_ids);
+    let mut chunks = filas_chunks_sin_vector(clave, nivel, estado, &secciones, &chunk_ids);
     vincular_hitos(&mut chunks, &hitos, &seccion_de_hito);
     vincular_tablas(
         &mut chunks,
@@ -148,24 +277,45 @@ pub fn mapear_revision(
         &parsed.tablas,
     );
     let textos_chunks = secciones.iter().map(texto_vectorizable_chunk).collect();
+    let avisos = aviso_fecha
+        .into_iter()
+        .chain(aviso_de_origenes_rebajados(origenes_rebajados))
+        .chain(aviso_de_hitos_derivados(derivados_capa0))
+        .collect();
 
     Ok(RevisionMapeada {
+        avisos,
+        hitos_derivados_capa0: derivados_capa0,
         catalogo,
         chunks,
         hitos,
         tablas,
         celdas,
         aristas,
+        nodos,
+        textos_nodos,
         textos_chunks,
         textos_hitos,
         textos_tablas,
     })
 }
 
-/// `fecha_vigor` en ISO (`AAAA-MM-DD…`); si no se interpreta, la fecha de la ingesta
-pub fn interpretar_fecha_vigor(fecha: &str) -> NaiveDate {
-    let prefijo: String = fecha.trim().chars().take(10).collect();
-    NaiveDate::parse_from_str(&prefijo, "%Y-%m-%d").unwrap_or_else(|_| Utc::now().date_naive())
+/// Aviso si la red de seguridad rebajó algún responsable que el extractor dio por declarado
+fn aviso_de_origenes_rebajados(rebajados: usize) -> Option<String> {
+    (rebajados > 0).then(|| {
+        format!(
+            "{rebajados} responsable(s) dados por declarados no aparecen en el texto de su sección: quedan como INFERIDO o NO_CONSTA."
+        )
+    })
+}
+
+/// Aviso si algún hito no entró en la matriz por no tener rol ni registro
+fn aviso_de_hitos_derivados(derivados: usize) -> Option<String> {
+    (derivados > 0).then(|| {
+        format!(
+            "{derivados} hito(s) sin rol ni registro no entran en la matriz: su texto sigue en la Capa 0."
+        )
+    })
 }
 
 fn fila_catalogo(
@@ -173,58 +323,205 @@ fn fila_catalogo(
     catalogo: &CatalogoDestilado,
     tipo_documento: TipoDocumento,
     hash_sha256: &str,
-) -> Result<FilaCatalogo, DomainError> {
+    texto_documento: &str,
+) -> (FilaCatalogo, Option<String>) {
     let revision = texto_opcional(&catalogo.revision)
         .unwrap_or_else(|| format!("Rev. {:02}", clave.version_num));
-    Ok(FilaCatalogo {
-        clave: clave.clone(),
-        titulo: catalogo.titulo.trim().to_string(),
-        tipo_documento,
-        revision,
-        vigencia: VentanaVigencia::new(interpretar_fecha_vigor(&catalogo.fecha_vigor), None)?,
-        hash_sha256: hash_sha256.to_string(),
-    })
+    let validada = validar_fecha_vigor(
+        catalogo.fecha_vigor.as_deref(),
+        Utc::now().date_naive(),
+        texto_documento,
+    );
+    let vigencia = match validada.fecha {
+        Some(fecha) => VentanaVigencia::desde_fecha_declarada(fecha),
+        None => VentanaVigencia::sin_fecha_declarada(None),
+    };
+    (
+        FilaCatalogo {
+            clave: clave.clone(),
+            titulo: catalogo.titulo.trim().to_string(),
+            tipo_documento,
+            revision,
+            vigencia,
+            hash_sha256: hash_sha256.to_string(),
+            doc_id_provisional: None,
+        },
+        validada.aviso,
+    )
 }
 
-/// Secciones no vacías del documento; si no hay ninguna, el documento entero
-fn secciones_indexables(parsed: &ParsedDocument) -> Vec<SeccionIndexable> {
-    let secciones: Vec<SeccionIndexable> = parsed
-        .secciones
+type EstructuraUniversal = (Vec<FilaIndice>, Vec<String>, Vec<SeccionIndexable>);
+
+/// Sección única con todo el contenido, para un extractor que no detecte ninguna
+fn seccion_unica(parsed: &ParsedDocument) -> ParsedSection {
+    ParsedSection {
+        codigo: CODIGO_PREAMBULO.to_string(),
+        titulo: TITULO_PREAMBULO.to_string(),
+        nivel: 0,
+        contenido: parsed.contenido_completo.trim().to_string(),
+        breadcrumb: parsed.titulo.clone(),
+        ..ParsedSection::default()
+    }
+}
+
+/// Nivel del nodo: solo la primera sección puede ser preámbulo; el resto se acota a H1-H6
+fn nivel_de_seccion(indice: usize, seccion: &ParsedSection) -> NivelJerarquico {
+    let minimo = u8::from(indice > 0);
+    let nivel = seccion.nivel.clamp(minimo, NivelJerarquico::MAXIMO as u8);
+    NivelJerarquico::new(nivel as i8).unwrap_or(NivelJerarquico::PREAMBULO)
+}
+
+/// Índice 07 (una fila por sección, tenga o no texto) y fragmentos para el corpus 02. Un título
+/// hoja sin texto se indexa como chunk para que ninguna palabra quede fuera de 02; los demás
+/// títulos ya viajan en el breadcrumb de sus descendientes.
+fn estructura_universal(
+    clave: &ClaveDocumental,
+    parsed: &ParsedDocument,
+    estado: EstadoContenido,
+) -> EstructuraUniversal {
+    let unica;
+    let secciones: &[ParsedSection] = if parsed.secciones.is_empty() {
+        unica = [seccion_unica(parsed)];
+        &unica
+    } else {
+        &parsed.secciones
+    };
+    let niveles: Vec<NivelJerarquico> = secciones
         .iter()
-        .filter(|sec| !sec.contenido.trim().is_empty())
-        .map(|sec| SeccionIndexable {
-            codigo: sec.codigo.clone(),
-            breadcrumb: sec.breadcrumb.clone(),
-            condicion: sec.condicion_aplicacion.clone(),
-            texto: sec.contenido.trim().to_string(),
+        .enumerate()
+        .map(|(indice, seccion)| nivel_de_seccion(indice, seccion))
+        .collect();
+    let entradas: Vec<SeccionDelArbol<'_>> = secciones
+        .iter()
+        .zip(&niveles)
+        .map(|(seccion, nivel)| SeccionDelArbol {
+            nivel: *nivel,
+            codigo: seccion.clave_nodo.as_deref().unwrap_or(&seccion.codigo),
+            // Una parte que agrupa un tramo sin título es de nivel 1: solo los sub-nodos cuelgan
+            sintetica: seccion.tipo_nodo == TipoNodoIndice::Sintetico
+                && codigo_real_de(&seccion.codigo) != seccion.codigo,
         })
         .collect();
-    if secciones.is_empty() {
-        vec![SeccionIndexable {
-            codigo: String::new(),
-            breadcrumb: parsed.titulo.clone(),
-            condicion: None,
-            texto: parsed.contenido_completo.trim().to_string(),
-        }]
-    } else {
-        secciones
+    let arbol = construir_arbol(&clave.doc_id, &entradas);
+
+    let mut nodos = Vec::with_capacity(secciones.len());
+    let mut textos_nodos = Vec::with_capacity(secciones.len());
+    let mut fragmentos = Vec::with_capacity(secciones.len());
+    let mut tipo_de_la_real = TipoBloque::Narrativa;
+    for (indice, (seccion, nodo)) in secciones.iter().zip(arbol).enumerate() {
+        let nivel = niveles[indice];
+        let titulo = texto_opcional(&seccion.titulo).unwrap_or_else(|| TITULO_SIN_NOMBRE.into());
+        let resumen = resumen_extractivo(&titulo, &seccion.contenido);
+        textos_nodos.push(componer_texto_nodo(&titulo, &resumen));
+
+        let es_hoja = niveles
+            .get(indice + 1)
+            .is_none_or(|siguiente| *siguiente <= nivel);
+        let solo_titulo = seccion.contenido.trim().is_empty() && es_hoja;
+        let origen = if solo_titulo {
+            seccion.titulo.as_str()
+        } else {
+            seccion.contenido.as_str()
+        };
+        let sintetica = codigo_real_de(&seccion.codigo) != seccion.codigo;
+        if !sintetica {
+            tipo_de_la_real = clasificar_bloque(nivel, &titulo);
+        }
+        let tipo_bloque = tipo_de_la_real;
+        fragmentos.extend(
+            fragmentar_con_posiciones(origen)
+                .into_iter()
+                .map(|fragmento| {
+                    let (pagina_inicio, pagina_fin) = if solo_titulo {
+                        (seccion.pagina_inicio, seccion.pagina_fin)
+                    } else {
+                        paginas_del_fragmento(seccion, fragmento.inicio, fragmento.fin)
+                    };
+                    SeccionIndexable {
+                        nodo_id: nodo.nodo_id.clone(),
+                        tipo_bloque,
+                        codigo: codigo_real_de(&seccion.codigo).to_string(),
+                        breadcrumb: seccion.breadcrumb.clone(),
+                        condicion: seccion.condicion_aplicacion.clone(),
+                        texto: fragmento.texto,
+                        pagina_inicio,
+                        pagina_fin,
+                    }
+                }),
+        );
+        nodos.push(FilaIndice {
+            nodo_id: nodo.nodo_id,
+            clave: clave.clone(),
+            estado_contenido: estado,
+            tipo_nodo: seccion.tipo_nodo,
+            nivel_jerarquico: nivel,
+            codigo_seccion: seccion.codigo.clone(),
+            titulo_seccion: titulo,
+            nodo_padre_id: nodo.nodo_padre_id,
+            ruta_linaje: nodo.ruta_linaje,
+            condiciones_alcance: seccion.condicion_aplicacion.clone(),
+            resumen_seccion: resumen,
+            vector_seccion: Vec::new(),
+        });
     }
+    (nodos, textos_nodos, fragmentos)
+}
+
+/// Páginas reales del tramo `inicio..fin` del contenido. Sin saltos (formatos sin páginas o texto
+/// de respaldo) vale el rango de la sección.
+fn paginas_del_fragmento(
+    seccion: &ParsedSection,
+    inicio: usize,
+    fin: usize,
+) -> (Option<u32>, Option<u32>) {
+    if seccion.saltos_pagina.is_empty() {
+        return (seccion.pagina_inicio, seccion.pagina_fin);
+    }
+    let pagina_en = |posicion: usize| {
+        let siguientes = seccion
+            .saltos_pagina
+            .partition_point(|salto| salto.desplazamiento <= posicion);
+        seccion.saltos_pagina[siguientes.saturating_sub(1)].pagina
+    };
+    (
+        Some(pagina_en(inicio)),
+        Some(pagina_en(fin.saturating_sub(1).max(inicio))),
+    )
 }
 
 /// Texto que se vectoriza para un chunk: `breadcrumb + condición + texto` (problema 7)
 fn texto_vectorizable_chunk(seccion: &SeccionIndexable) -> String {
-    let mut partes = vec![seccion.breadcrumb.clone()];
-    if let Some(condicion) = &seccion.condicion {
+    componer_texto_vectorizable(
+        &seccion.breadcrumb,
+        seccion.condicion.as_deref(),
+        &seccion.texto,
+    )
+}
+
+/// Composición del texto vectorizable de un chunk a partir de sus columnas guardadas en 02
+pub fn componer_texto_vectorizable(
+    breadcrumb: &str,
+    condicion: Option<&str>,
+    texto: &str,
+) -> String {
+    let mut partes = vec![breadcrumb.to_string()];
+    if let Some(condicion) = condicion {
         partes.push(format!("Condición: {condicion}"));
     }
-    partes.push(seccion.texto.clone());
+    partes.push(texto.to_string());
     partes.retain(|p| !p.trim().is_empty());
     partes.join("\n")
+}
+
+/// Texto que se vectoriza para un nodo de 07: título y resumen
+pub fn componer_texto_nodo(titulo: &str, resumen: &str) -> String {
+    format!("{titulo} {resumen}")
 }
 
 fn filas_chunks_sin_vector(
     clave: &ClaveDocumental,
     nivel: NivelPrelacion,
+    estado: EstadoContenido,
     secciones: &[SeccionIndexable],
     chunk_ids: &[String],
 ) -> Vec<FilaChunk> {
@@ -234,10 +531,15 @@ fn filas_chunks_sin_vector(
         .map(|(seccion, chunk_id)| FilaChunk {
             chunk_id: chunk_id.clone(),
             clave: clave.clone(),
+            nodo_id: seccion.nodo_id.clone(),
+            tipo_bloque: seccion.tipo_bloque,
+            estado_contenido: estado,
             nivel_prelacion: nivel,
             breadcrumb_jerarquia: seccion.breadcrumb.clone(),
             condicion_aplicacion: seccion.condicion.clone(),
             texto_contenido: seccion.texto.clone(),
+            pagina_inicio: seccion.pagina_inicio,
+            pagina_fin: seccion.pagina_fin,
             tablas_vinculadas: Vec::new(),
             hitos_vinculados: Vec::new(),
             vector: Vec::new(),
@@ -307,7 +609,14 @@ fn registro_canonico(registro: Option<&str>) -> Option<String> {
         .map(|codigo| acotar(&codigo, HitoOperativo::MAX_LONGITUD_CAMPO))
 }
 
-type HitosMapeados = (Vec<FilaHito>, Vec<String>, Vec<Option<usize>>);
+/// Filas de la matriz, con su texto y sección de origen, y lo que no llegó a ella
+struct HitosMapeados {
+    filas: Vec<FilaHito>,
+    textos: Vec<String>,
+    secciones: Vec<Option<usize>>,
+    derivados_capa0: usize,
+    origenes_rebajados: usize,
+}
 
 fn filas_hitos(
     clave: &ClaveDocumental,
@@ -319,10 +628,31 @@ fn filas_hitos(
     let mut filas = Vec::with_capacity(hitos.len());
     let mut textos = Vec::with_capacity(hitos.len());
     let mut secciones_de_hito = Vec::with_capacity(hitos.len());
+    let mut derivados_capa0 = 0;
+    let mut origenes_rebajados = 0;
     for (idx, destilado) in hitos.iter().enumerate() {
         let seccion = buscar_seccion(&destilado.seccion_origen, secciones);
         let condicion_heredada = seccion.and_then(|i| secciones[i].condicion.clone());
-        let hito = hito_de_dominio(clave, idx, destilado, condicion_heredada)?;
+        let origen = OrigenResponsable::verificar(
+            &destilado.origen_responsable,
+            &destilado.rol_responsable,
+            &seccion.map_or_else(String::new, |i| texto_de_seccion(&secciones[i], secciones)),
+        );
+        let hito = match hito_de_dominio(clave, idx, destilado, condicion_heredada, origen) {
+            Ok(hito) => hito,
+            Err(DomainError::HitoSinTitular(hito_id)) => {
+                tracing::debug!(%hito_id, "hito sin rol ni registro: se deriva a la Capa 0");
+                derivados_capa0 += 1;
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
+        if OrigenResponsable::parse(&destilado.origen_responsable)
+            == Some(OrigenResponsable::Declarado)
+            && hito.origen_responsable != OrigenResponsable::Declarado
+        {
+            origenes_rebajados += 1;
+        }
         textos.push(hito.texto_vectorizable());
         filas.push(FilaHito {
             hito_id: hito.hito_id.clone(),
@@ -332,6 +662,7 @@ fn filas_hitos(
             objeto_alcance: hito.objeto_alcance.clone(),
             rol_ejecutor: hito.rol_ejecutor.clone(),
             rol_responsable: hito.rol_responsable.clone(),
+            origen_responsable: hito.origen_responsable,
             registro_codigo: hito.registro_codigo.clone(),
             registro_nombre: hito.registro_nombre.clone(),
             criterio_aceptacion: hito.criterio_aceptacion.clone(),
@@ -343,7 +674,26 @@ fn filas_hitos(
         });
         secciones_de_hito.push(seccion);
     }
-    Ok((filas, textos, secciones_de_hito))
+    Ok(HitosMapeados {
+        filas,
+        textos,
+        secciones: secciones_de_hito,
+        derivados_capa0,
+        origenes_rebajados,
+    })
+}
+
+/// Títulos ancestros y texto íntegro de la sección, reuniendo todas sus ventanas
+fn texto_de_seccion(seccion: &SeccionIndexable, secciones: &[SeccionIndexable]) -> String {
+    let ventanas = secciones
+        .iter()
+        .filter(|otra| {
+            codigo_real_de(otra.nodo_id.as_str()) == codigo_real_de(seccion.nodo_id.as_str())
+        })
+        .map(|otra| otra.texto.as_str())
+        .collect::<Vec<_>>()
+        .join(" ");
+    format!("{} {ventanas}", seccion.breadcrumb)
 }
 
 /// Construye el `HitoOperativo` validado; la condición explícita prevalece sobre la heredada
@@ -352,6 +702,7 @@ fn hito_de_dominio(
     idx: usize,
     destilado: &HitoDestilado,
     condicion_heredada: Option<String>,
+    origen_responsable: OrigenResponsable,
 ) -> Result<HitoOperativo, DomainError> {
     let max = HitoOperativo::MAX_LONGITUD_CAMPO;
     let orden_secuencia = u32::try_from(destilado.orden_secuencia)
@@ -368,6 +719,7 @@ fn hito_de_dominio(
         objeto_alcance: acotar(&objeto, max),
         rol_ejecutor: acotar(&destilado.rol_ejecutor, max),
         rol_responsable: acotar(&destilado.rol_responsable, max),
+        origen_responsable,
         registro_codigo: registro_canonico(destilado.registro_codigo.as_deref()),
         registro_nombre: acotar_opcional(destilado.registro_nombre.as_deref()),
         criterio_aceptacion: acotar(&destilado.criterio_aceptacion, max),
@@ -890,7 +1242,6 @@ fn vincular_tablas(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::application::dtos::ingestion::ParsedSection;
     use crate::domain::models::operational_matrix::CalidadExtraccion;
 
     fn clave() -> ClaveDocumental {
@@ -908,7 +1259,7 @@ mod tests {
             tipo_documento: "PROCEDIMIENTO_OBRA".to_string(),
             revision: revision.to_string(),
             version_num,
-            fecha_vigor: "2026-09-15".to_string(),
+            fecha_vigor: Some("2026-09-15".to_string()),
             emisor: "Calidad".to_string(),
         }
     }
@@ -926,6 +1277,7 @@ mod tests {
             contenido: texto.to_string(),
             breadcrumb: breadcrumb.to_string(),
             condicion_aplicacion: condicion.map(str::to_string),
+            ..ParsedSection::default()
         }
     }
 
@@ -942,12 +1294,238 @@ mod tests {
             objeto_alcance: "Tubería de acero".to_string(),
             rol_ejecutor: ejecutor.to_string(),
             rol_responsable: responsable.to_string(),
+            origen_responsable: "DECLARADO".to_string(),
             registro_codigo: registro.map(str::to_string),
             registro_nombre: registro.map(|_| "Parte".to_string()),
             criterio_aceptacion: "Cumple".to_string(),
             condicion_aplicacion: None,
             seccion_origen: seccion.to_string(),
         }
+    }
+
+    #[test]
+    fn test_hito_sin_titular_se_deriva_a_capa_0_y_se_cuenta() {
+        let parsed = ParsedDocument {
+            secciones: vec![seccion(
+                "2.1",
+                "2.1 Acopio",
+                None,
+                "Texto del acopio con su detalle",
+            )],
+            ..ParsedDocument::default()
+        };
+        let mut paquete = DistilledDocumentPackage {
+            catalogo: catalogo("PO-ALM-03", 4, "Rev. 04"),
+            hitos: vec![
+                hito("CUSTODIA", "", "", None, "2.1"),
+                hito("CUSTODIA", "N/A", "-", None, "2.1"),
+                hito("CUSTODIA", "Almacenero", "", None, "2.1"),
+            ],
+            tablas: Vec::new(),
+            aristas: Vec::new(),
+        };
+        paquete.hitos[2].origen_responsable = "NO_CONSTA".to_string();
+        let revision = mapear_revision(&clave(), &parsed, &paquete, "hash").unwrap();
+        assert_eq!(revision.hitos.len(), 1);
+        assert_eq!(revision.textos_hitos.len(), 1);
+        assert_eq!(revision.hitos[0].rol_ejecutor, "Almacenero");
+        assert_eq!(revision.hitos_derivados_capa0, 2);
+        assert!(
+            revision.avisos.iter().any(|a| a.contains("2 hito(s)")),
+            "{:?}",
+            revision.avisos
+        );
+        assert!(
+            revision
+                .chunks
+                .iter()
+                .any(|c| c.texto_contenido.contains("Texto del acopio"))
+        );
+        assert_eq!(
+            revision.chunks[0].hitos_vinculados,
+            vec![revision.hitos[0].hito_id.clone()]
+        );
+    }
+
+    #[test]
+    fn test_aviso_de_origen_rebajado_no_se_desalinea_con_descartes() {
+        let parsed = ParsedDocument {
+            secciones: vec![seccion(
+                "2.1",
+                "2.1 Acopio",
+                None,
+                "El Inspector firma el parte",
+            )],
+            ..ParsedDocument::default()
+        };
+        let paquete = DistilledDocumentPackage {
+            catalogo: catalogo("PO-ALM-03", 4, "Rev. 04"),
+            hitos: vec![
+                hito("CUSTODIA", "", "", None, "2.1"),
+                hito("CUSTODIA", "", "Inspector", None, "2.1"),
+            ],
+            tablas: Vec::new(),
+            aristas: Vec::new(),
+        };
+        let revision = mapear_revision(&clave(), &parsed, &paquete, "hash").unwrap();
+        assert_eq!(
+            revision.hitos[0].origen_responsable,
+            OrigenResponsable::Declarado
+        );
+        assert!(
+            !revision
+                .avisos
+                .iter()
+                .any(|a| a.contains("dados por declarados")),
+            "{:?}",
+            revision.avisos
+        );
+    }
+
+    fn paquete_vacio() -> DistilledDocumentPackage {
+        DistilledDocumentPackage {
+            catalogo: catalogo("PO-ALM-03", 4, "Rev. 04"),
+            hitos: Vec::new(),
+            tablas: Vec::new(),
+            aristas: Vec::new(),
+        }
+    }
+
+    fn con_paginas(paginas: &[(u32, usize)]) -> ParsedSection {
+        let mut contenido = String::new();
+        let mut saltos = Vec::new();
+        for (pagina, palabras) in paginas {
+            if !contenido.is_empty() {
+                contenido.push('\n');
+            }
+            saltos.push(crate::application::dtos::ingestion::SaltoPagina {
+                desplazamiento: contenido.len(),
+                pagina: *pagina,
+            });
+            contenido.push_str(&vec![format!("pag{pagina}"); *palabras].join(" "));
+        }
+        ParsedSection {
+            pagina_inicio: paginas.first().map(|p| p.0),
+            pagina_fin: paginas.last().map(|p| p.0),
+            saltos_pagina: saltos,
+            ..seccion("2.1", "2.1 Largo", None, &contenido)
+        }
+    }
+
+    #[test]
+    fn test_paginas_de_cada_chunk_salen_de_los_saltos_y_no_de_la_seccion() {
+        let parsed = ParsedDocument {
+            secciones: vec![con_paginas(&[(7, 400), (8, 400), (9, 400)])],
+            ..ParsedDocument::default()
+        };
+        let revision = mapear_revision(&clave(), &parsed, &paquete_vacio(), "h").unwrap();
+        assert!(revision.chunks.len() >= 2, "{}", revision.chunks.len());
+        let primero = &revision.chunks[0];
+        let ultimo = revision.chunks.last().unwrap();
+        assert_eq!(primero.pagina_inicio, Some(7));
+        assert!(primero.pagina_fin < Some(9), "{:?}", primero.pagina_fin);
+        assert_eq!(ultimo.pagina_fin, Some(9));
+        assert!(ultimo.pagina_inicio > Some(7), "{:?}", ultimo.pagina_inicio);
+        for chunk in &revision.chunks {
+            for pagina in 7..=9 {
+                let la_contiene = chunk.texto_contenido.contains(&format!("pag{pagina}"));
+                let en_rango =
+                    (chunk.pagina_inicio.unwrap()..=chunk.pagina_fin.unwrap()).contains(&pagina);
+                assert_eq!(
+                    la_contiene, en_rango,
+                    "pag{pagina} en {:?}-{:?}",
+                    chunk.pagina_inicio, chunk.pagina_fin
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_chunk_a_caballo_de_dos_paginas_y_sin_paginas_en_markdown() {
+        let parsed = ParsedDocument {
+            secciones: vec![con_paginas(&[(3, 10), (4, 10)])],
+            ..ParsedDocument::default()
+        };
+        let revision = mapear_revision(&clave(), &parsed, &paquete_vacio(), "h").unwrap();
+        assert_eq!(revision.chunks.len(), 1);
+        assert_eq!(
+            (
+                revision.chunks[0].pagina_inicio,
+                revision.chunks[0].pagina_fin
+            ),
+            (Some(3), Some(4))
+        );
+
+        let markdown = ParsedDocument {
+            secciones: vec![seccion("2.1", "2.1 Texto", None, &"palabra ".repeat(900))],
+            ..ParsedDocument::default()
+        };
+        let revision = mapear_revision(&clave(), &markdown, &paquete_vacio(), "h").unwrap();
+        assert!(revision.chunks.len() > 1);
+        assert!(
+            revision
+                .chunks
+                .iter()
+                .all(|c| c.pagina_inicio.is_none() && c.pagina_fin.is_none())
+        );
+    }
+
+    #[test]
+    fn test_sub_nodo_sintetico_en_07_y_02_sin_romper_el_enlace_del_hito() {
+        let real = ParsedSection {
+            nivel: 2,
+            ..seccion("2.9", "2.9 Largo", Some("con lluvia"), "")
+        };
+        let sub = |codigo: &str, texto: &str, pagina| ParsedSection {
+            codigo: codigo.to_string(),
+            titulo: format!("Páginas de {codigo}"),
+            nivel: 3,
+            contenido: texto.to_string(),
+            breadcrumb: "2.9 Largo".to_string(),
+            condicion_aplicacion: Some("con lluvia".to_string()),
+            pagina_inicio: Some(pagina),
+            pagina_fin: Some(pagina),
+            tipo_nodo: TipoNodoIndice::Sintetico,
+            ..ParsedSection::default()
+        };
+        let parsed = ParsedDocument {
+            secciones: vec![
+                real,
+                sub("2.9.PAG1-10", "primer bloque de texto", 1),
+                sub("2.9.PAG11-20", "El Inspector firma el parte", 11),
+                ParsedSection {
+                    nivel: 2,
+                    ..seccion("2.10", "2.10 Otro", None, "texto")
+                },
+            ],
+            ..ParsedDocument::default()
+        };
+        let mut paquete = paquete_vacio();
+        paquete.hitos = vec![hito("CUSTODIA", "", "Inspector", None, "2.9")];
+        let revision = mapear_revision(&clave(), &parsed, &paquete, "h").unwrap();
+        let tipos: Vec<(&str, TipoNodoIndice)> = revision
+            .nodos
+            .iter()
+            .map(|n| (n.codigo_seccion.as_str(), n.tipo_nodo))
+            .collect();
+        assert_eq!(tipos[0], ("2.9", TipoNodoIndice::Real));
+        assert_eq!(tipos[1], ("2.9.PAG1-10", TipoNodoIndice::Sintetico));
+        assert_eq!(
+            revision.nodos[1].nodo_padre_id.as_ref(),
+            Some(&revision.nodos[0].nodo_id)
+        );
+        assert_eq!(revision.nodos[3].nodo_padre_id, None);
+        assert_eq!(
+            revision.nodos[1].condiciones_alcance.as_deref(),
+            Some("con lluvia")
+        );
+        // El hito apunta a «2.9», cuyo texto está repartido entre sus sub-nodos
+        assert_eq!(
+            revision.hitos[0].origen_responsable,
+            OrigenResponsable::Declarado
+        );
+        assert!(revision.hitos[0].chunk_origen_id.is_some());
+        assert_eq!(revision.chunks[0].breadcrumb_jerarquia, "2.9 Largo");
     }
 
     fn eje(nombre: &str, tipo: &str, unidad: Option<&str>) -> EjeDestilado {
@@ -977,7 +1555,7 @@ mod tests {
                     "2.2",
                     "PO > 2. Secuencia > 2.2 Fase 2 — CUSTODIA",
                     None,
-                    "Custodia.",
+                    "Custodia. Firma el Jefe de Producción.",
                 ),
                 seccion(
                     "4.2.1",
@@ -1003,6 +1581,8 @@ mod tests {
                 seccion_codigo: Some("3.1".to_string()),
             }],
             contenido_completo: String::new(),
+            avisos_extraccion: Vec::new(),
+            requiere_ocr: false,
         }
     }
 
@@ -1043,6 +1623,79 @@ mod tests {
                 contexto: None,
             }],
         }
+    }
+
+    #[test]
+    fn test_doc_id_provisional_es_slug_en_mayusculas_con_seis_hex() {
+        let hash = "a4f2b9".to_string() + &"0".repeat(58);
+        let id = |nombre: &str| doc_id_provisional(nombre, &hash).unwrap().to_string();
+        assert_eq!(id("manual válvulas.md"), "MANUAL-VALVULAS_a4f2b9");
+        assert_eq!(id("!!!.md"), "DOC_a4f2b9");
+        assert_eq!(id("..\\..\\a'; DROP.md"), "A-DROP_a4f2b9");
+        assert!(id(&"x".repeat(5000)).len() <= MAX_LONGITUD_SLUG + 7);
+    }
+
+    #[test]
+    fn test_revision_provisional_lleva_respaldo_parcial_y_sin_capa_2() {
+        let centro = CenterId::new("planta").unwrap();
+        let hash = "a".repeat(64);
+        let (clave, revision) = mapear_revision_provisional(&centro, &documento(), &hash).unwrap();
+        assert_eq!(clave.doc_id.as_str(), "PO_aaaaaa");
+        assert_eq!(
+            revision.catalogo.doc_id_provisional,
+            Some(clave.doc_id.clone())
+        );
+        assert_eq!(
+            revision.catalogo.tipo_documento.nivel_prelacion().valor(),
+            5
+        );
+        assert_eq!(revision.catalogo.revision, "Provisional");
+        assert!(revision.hitos.is_empty() && revision.tablas.is_empty());
+        assert!(
+            revision
+                .chunks
+                .iter()
+                .all(|c| c.estado_contenido == EstadoContenido::ParcialUniversal)
+        );
+        assert!(
+            revision
+                .nodos
+                .iter()
+                .all(|n| n.estado_contenido == EstadoContenido::ParcialUniversal)
+        );
+    }
+
+    #[test]
+    fn test_seccion_larga_comparte_nodo_y_hito_apunta_al_primer_fragmento() {
+        let mut doc = documento();
+        doc.secciones[0].contenido = "palabra ".repeat(1500);
+        let revision = mapear_revision(&clave(), &doc, &paquete(), "hash").unwrap();
+        let fragmentos: Vec<&FilaChunk> = revision
+            .chunks
+            .iter()
+            .filter(|c| c.nodo_id == revision.nodos[0].nodo_id)
+            .collect();
+        assert!(fragmentos.len() > 1);
+        assert!(
+            fragmentos
+                .iter()
+                .all(|c| { c.breadcrumb_jerarquia == doc.secciones[0].breadcrumb })
+        );
+        assert_eq!(
+            revision.hitos[0].chunk_origen_id.as_deref(),
+            Some(fragmentos[0].chunk_id.as_str())
+        );
+        assert_eq!(revision.textos_chunks.len(), revision.chunks.len());
+    }
+
+    #[test]
+    fn test_provisional_no_toma_la_fecha_de_la_ingesta() {
+        let centro = CenterId::new("planta").unwrap();
+        let mut parsed = documento();
+        parsed.nombre_archivo = "sin_destilar.md".to_string();
+        let (_, revision) = mapear_revision_provisional(&centro, &parsed, "abcdef0123").unwrap();
+        assert_eq!(revision.catalogo.vigencia.fecha_vigor(), None);
+        assert!(revision.avisos.is_empty());
     }
 
     #[test]
@@ -1231,14 +1884,6 @@ mod tests {
         assert_eq!(interpretar_valor_numerico(" 1,5 h"), Some(1.5));
         assert_eq!(interpretar_valor_numerico("-10 °C"), Some(-10.0));
         assert_eq!(interpretar_valor_numerico("No admisible"), None);
-        assert_eq!(
-            interpretar_fecha_vigor("2026-09-15T00:00:00Z"),
-            NaiveDate::from_ymd_opt(2026, 9, 15).unwrap()
-        );
-        assert_eq!(
-            interpretar_fecha_vigor("sin fecha"),
-            Utc::now().date_naive()
-        );
         assert_eq!(acotar("ñandú\0", 3), "ña");
         assert_eq!(acotar("ñandú", 2), "ñ");
         assert_eq!(acotar("x\0y", 9), "xy");

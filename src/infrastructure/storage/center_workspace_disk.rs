@@ -2,10 +2,10 @@
 //!
 //! ```text
 //! <ruta_disco>/
-//! ├── center_manifest.json   (schema_version = 2, modelo y dimensión de embeddings)
+//! ├── center_manifest.json   (schema_version = 4, modelo y dimensión de embeddings)
 //! ├── raw_docs/              (<sha256>_<nombre> + <sha256>_<nombre>.sha256)
 //! ├── glue_catalog/          (inventario de tablas exportado por la proyección)
-//! └── lakehouse_data/        (las 6 tablas .lance)
+//! └── lakehouse_data/        (las 7 tablas .lance)
 //! ```
 
 use std::path::{Path, PathBuf};
@@ -16,7 +16,7 @@ use sha2::{Digest, Sha256};
 
 use crate::application::dtos::centros::{
     ARCHIVO_MANIFIESTO, DIRECTORIO_GLUE_CATALOG, DIRECTORIO_LAKEHOUSE_DATA, DIRECTORIO_RAW_DOCS,
-    DocumentoOriginal, ManifiestoCentroDisco, ModeloEmbeddingsActivo,
+    DocumentoOriginal, ManifiestoCentroDisco, ModeloEmbeddingsActivo, es_ruta_pdf,
 };
 use crate::application::ports::center_workspace::{CenterWorkspacePort, CentroAbierto};
 use crate::application::ports::lakehouse_store::LakehouseStorePort;
@@ -197,6 +197,43 @@ impl CenterWorkspacePort for DiskCenterWorkspace {
         })
     }
 
+    async fn localizar_original(
+        &self,
+        ruta_centro: &Path,
+        sha256: &str,
+    ) -> Result<Option<DocumentoOriginal>, DomainError> {
+        let raw_docs = ruta_centro.join(DIRECTORIO_RAW_DOCS);
+        let prefijo = format!("{sha256}_");
+        let Ok(entradas) = std::fs::read_dir(&raw_docs) else {
+            return Ok(None);
+        };
+        for entrada in entradas.flatten() {
+            let nombre = entrada.file_name().to_string_lossy().to_string();
+            let Some(original) = nombre.strip_prefix(&prefijo) else {
+                continue;
+            };
+            if original.ends_with(".sha256") {
+                continue;
+            }
+            let ruta_copia = entrada.path();
+            let contenido = std::fs::read(&ruta_copia)
+                .map_err(|e| error_io("No se pudo leer la copia", &ruta_copia, e))?;
+            if sha256_hex(&contenido) != sha256 {
+                return Err(DomainError::IngestionError(format!(
+                    "La copia '{}' no coincide con su SHA-256: está dañada",
+                    ruta_copia.display()
+                )));
+            }
+            return Ok(Some(DocumentoOriginal {
+                nombre_archivo: original.to_string(),
+                contenido,
+                sha256: sha256.to_string(),
+                ruta_copia,
+            }));
+        }
+        Ok(None)
+    }
+
     async fn guardar_original(
         &self,
         ruta_centro: &Path,
@@ -218,14 +255,14 @@ impl CenterWorkspacePort for DiskCenterWorkspace {
         }
         let bytes = std::fs::read(ruta_archivo)
             .map_err(|e| error_io("No se pudo leer el documento", ruta_archivo, e))?;
-        let contenido = String::from_utf8(bytes).map_err(|_| {
-            DomainError::IngestionError(format!(
-                "'{}' no es texto UTF-8 (por ahora solo se ingiere Markdown)",
+        if !es_ruta_pdf(ruta_archivo) && std::str::from_utf8(&bytes).is_err() {
+            return Err(DomainError::IngestionError(format!(
+                "'{}' no es texto UTF-8",
                 ruta_archivo.display()
-            ))
-        })?;
+            )));
+        }
 
-        let sha256 = sha256_hex(contenido.as_bytes());
+        let sha256 = sha256_hex(&bytes);
         let nombre_archivo = ruta_archivo
             .file_name()
             .map(|n| n.to_string_lossy().to_string())
@@ -238,7 +275,7 @@ impl CenterWorkspacePort for DiskCenterWorkspace {
 
         // Copia inmutable: si ya existe con ese hash, no se reescribe
         if !ruta_copia.exists() {
-            escribir_atomico(&ruta_copia, contenido.as_bytes())?;
+            escribir_atomico(&ruta_copia, &bytes)?;
             let huella = format!("{sha256}  {nombre_archivo}\n");
             escribir_atomico(
                 &raw_docs.join(format!("{nombre_copia}.sha256")),
@@ -248,7 +285,7 @@ impl CenterWorkspacePort for DiskCenterWorkspace {
 
         Ok(DocumentoOriginal {
             nombre_archivo,
-            contenido,
+            contenido: bytes,
             sha256,
             ruta_copia,
         })

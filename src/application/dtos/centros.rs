@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use crate::domain::errors::DomainError;
 
 /// Versión del esquema de tablas que escribe esta build (`center_manifest.json`)
-pub const VERSION_ESQUEMA_CENTRO: u32 = 2;
+pub const VERSION_ESQUEMA_CENTRO: u32 = 5;
 
 /// Nombre del manifiesto en la raíz de cada centro
 pub const ARCHIVO_MANIFIESTO: &str = "center_manifest.json";
@@ -70,7 +70,9 @@ impl ManifiestoCentroDisco {
     ) -> Result<(), DomainError> {
         if self.schema_version != VERSION_ESQUEMA_CENTRO {
             return Err(DomainError::ValidationError(format!(
-                "El centro '{}' usa schema_version = {} y esta aplicación solo abre la versión {}",
+                "El centro '{}' usa schema_version = {} y esta aplicación solo abre la versión {}: \
+                 no hay migración. Crea un centro nuevo y reingiere sus documentos; los datos del \
+                 centro anterior no se han modificado.",
                 self.centro_id, self.schema_version, VERSION_ESQUEMA_CENTRO
             )));
         }
@@ -96,13 +98,20 @@ impl ManifiestoCentroDisco {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DocumentoOriginal {
     pub nombre_archivo: String,
-    pub contenido: String,
+    /// Bytes exactos del original: de ellos sale el hash, también en formatos binarios
+    pub contenido: Vec<u8>,
     pub sha256: String,
     pub ruta_copia: PathBuf,
 }
 
-/// Extensiones que la ingesta acepta (el parser es de Markdown; PDF/DOCX quedan fuera, plan §4)
-pub const EXTENSIONES_INGERIBLES: [&str; 3] = ["md", "markdown", "txt"];
+/// Extensiones que la ingesta acepta (DOCX y otros formatos quedan fuera, plan §4)
+pub const EXTENSIONES_INGERIBLES: [&str; 4] = ["md", "markdown", "txt", "pdf"];
+
+/// `true` si el nombre de archivo tiene extensión `.pdf`, sin distinguir mayúsculas
+pub fn es_ruta_pdf(ruta: &Path) -> bool {
+    ruta.extension()
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("pdf"))
+}
 
 /// Valida léxicamente la ruta de un centro: no vacía, sin componentes `..` y sin `\0`
 pub fn validar_ruta_centro(ruta: &str) -> Result<PathBuf, DomainError> {
@@ -110,7 +119,7 @@ pub fn validar_ruta_centro(ruta: &str) -> Result<PathBuf, DomainError> {
 }
 
 /// Valida la ruta de un documento a ingerir: las reglas de `validar_ruta_centro` más una
-/// extensión de texto admitida (`EXTENSIONES_INGERIBLES`)
+/// extensión admitida (`EXTENSIONES_INGERIBLES`)
 pub fn validar_ruta_documento(ruta: &str) -> Result<PathBuf, DomainError> {
     let camino = validar_ruta_lexica(ruta, "del documento")?;
     let extension = camino
@@ -119,7 +128,7 @@ pub fn validar_ruta_documento(ruta: &str) -> Result<PathBuf, DomainError> {
         .unwrap_or_default();
     if !EXTENSIONES_INGERIBLES.contains(&extension.as_str()) {
         return Err(DomainError::ValidationError(format!(
-            "Extensión no soportada en '{}': solo se ingieren {} (convierte antes los PDF a Markdown)",
+            "Extensión no soportada en '{}': solo se ingieren {}",
             camino.display(),
             EXTENSIONES_INGERIBLES.map(|e| format!(".{e}")).join(", ")
         )));
@@ -160,9 +169,9 @@ mod tests {
     }
 
     #[test]
-    fn test_manifiesto_nuevo_usa_schema_version_2() {
+    fn test_manifiesto_nuevo_usa_schema_version_5() {
         let m = ManifiestoCentroDisco::nuevo("obra-a", "Obra A", &e5(), "2026-10-17".into());
-        assert_eq!(m.schema_version, 2);
+        assert_eq!(m.schema_version, 5);
         assert_eq!(m.modelo_embeddings, "MultilingualE5Large");
         assert_eq!(m.dimension_embeddings, 1024);
         assert!(m.validar_compatibilidad(&e5()).is_ok());
@@ -181,9 +190,10 @@ mod tests {
     #[test]
     fn test_manifiesto_de_otra_version_de_esquema_se_rechaza() {
         let mut m = ManifiestoCentroDisco::nuevo("obra-a", "Obra A", &e5(), "x".into());
-        m.schema_version = 1;
+        m.schema_version = 2;
         let error = m.validar_compatibilidad(&e5()).unwrap_err().to_string();
-        assert!(error.contains("schema_version = 1"), "{error}");
+        assert!(error.contains("schema_version = 2"), "{error}");
+        assert!(error.contains("no hay migración"), "{error}");
     }
 
     #[test]
@@ -201,7 +211,7 @@ mod tests {
             "../fuera.md",
             "docs/../../secreto.md",
             "",
-            "plano.pdf",
+            "plano.docx",
             "imagen.png",
             "sin_extension",
             "doc.md\0.exe",

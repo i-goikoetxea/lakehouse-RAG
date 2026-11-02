@@ -10,6 +10,13 @@
 (function () {
   'use strict';
 
+  /** El origen acompaña siempre al responsable: solo DECLARADO es dato del documento. */
+  function textoResponsable(fila) {
+    if (fila.origen_responsable === 'NO_CONSTA' || !fila.rol_responsable) return 'no consta';
+    if (fila.origen_responsable === 'DECLARADO') return `${fila.rol_responsable} (declarado)`;
+    return `${fila.rol_responsable} (inferido, no declarado)`;
+  }
+
   // 1. Puente con Tauri
   const tauri = window.__TAURI__;
   const invoke = tauri && tauri.core ? tauri.core.invoke : null;
@@ -363,7 +370,7 @@
     destino.appendChild(tarjeta);
 
     const integridad = el('div', 'tarjeta');
-    integridad.appendChild(el('h4', null, 'Integridad de las 6 tablas'));
+    integridad.appendChild(el('h4', null, 'Integridad de las tablas'));
     const resultado = el('div', 'texto-sutil', 'Comprueba filas huérfanas, ingestas STAGED y versiones vigentes duplicadas.');
     const boton = el('button', 'btn', 'Verificar integridad');
     boton.addEventListener('click', async () => {
@@ -377,6 +384,7 @@
           ['Tablas ausentes', String(i.tablasAusentes.length)],
           ['Ingestas STAGED', String(i.ingestasStaged.length)],
           ['Filas huérfanas', String(i.huerfanos)],
+          ['Valores inválidos', String(i.valoresInvalidos)],
           ['Vigentes múltiples', String(i.versionesVigentesMultiples)],
         ]));
       } catch (err) {
@@ -414,12 +422,47 @@
     const cabecera = el('div', 'source-item-cabecera');
     cabecera.appendChild(el('span', 'source-name', `${doc.docId} · ${doc.revision}`));
     cabecera.appendChild(el('span', `chip ${doc.vigente ? 'chip-ok' : 'chip-error'}`, doc.vigente ? 'Vigente' : 'Derogada'));
+    const estado = ESTADOS_CONTENIDO[doc.estadoContenido];
+    if (estado) {
+      const chipEstado = el('span', 'chip chip-aviso', estado.etiqueta);
+      chipEstado.title = estado.detalle;
+      cabecera.appendChild(chipEstado);
+    }
     li.appendChild(cabecera);
     li.appendChild(el('div', 'source-title', doc.titulo));
-    const vigencia = doc.vigente ? `en vigor desde ${doc.fechaVigor || '—'}` : `${doc.fechaVigor || '—'} → ${doc.fechaDerogacion || '—'}`;
+    const fechaVigor = doc.fechaVigor || 'no declarada';
+    const vigencia = doc.vigente ? `en vigor · fecha de vigor ${fechaVigor}` : `${fechaVigor} → ${doc.fechaDerogacion || 'no declarada'}`;
     const prelacion = doc.nivelPrelacion === null || doc.nivelPrelacion === undefined ? '' : ` · prelación ${doc.nivelPrelacion}`;
     li.appendChild(el('div', 'source-item-meta', `${doc.tipoDocumento.replace(/_/g, ' ').toLowerCase()}${prelacion} · ${vigencia}`));
+    if (doc.pendienteDestilacion) {
+      const boton = el('button', 'btn btn-reintentar', 'Reintentar destilación');
+      boton.type = 'button';
+      boton.addEventListener('click', () => reintentarDestilacion(doc, boton));
+      li.appendChild(boton);
+    }
     return li;
+  }
+
+  const ESTADOS_CONTENIDO = {
+    PARCIAL_UNIVERSAL: { etiqueta: 'Sin destilar', detalle: 'Su texto es consultable, pero sin matriz, tablas ni grafo, y sus metadatos son provisionales.' },
+    REQUIERE_OCR: { etiqueta: 'Requiere OCR', detalle: 'No tiene texto extraíble: pásalo por OCR e ingiérelo de nuevo.' },
+  };
+
+  async function reintentarDestilacion(doc, boton) {
+    const centro = centroSeleccionado();
+    if (!centro) return;
+    boton.disabled = true;
+    boton.textContent = 'Destilando…';
+    try {
+      const r = await invoke('reintentar_destilacion', { docId: doc.docId, centroId: centro.id });
+      registrar(`${doc.docId} → ${r.docId} v${r.version}: ${r.estadoContenido}.`, 'ok');
+      if (r.aviso) registrar(r.aviso, 'error');
+      await refrescarCatalogo();
+    } catch (err) {
+      boton.disabled = false;
+      boton.textContent = 'Reintentar destilación';
+      registrar(`No se pudo destilar ${doc.docId}; el documento sigue disponible como provisional: ${mensajeError(err)}`, 'error');
+    }
   }
 
   $('btn-refresh-sources').addEventListener('click', refrescarCatalogo);
@@ -450,8 +493,8 @@
       const r = await invoke('ingestar_documento', { ruta, centroId });
       mostrarProgreso(100, `${r.archivo}: ${r.yaIngerido ? 'ya estaba ingerido' : 'ingerido'}`);
       registrar(r.yaIngerido
-        ? `${r.archivo}: ya estaba ingerido (${r.docId} v${r.version}); no se ha vuelto a destilar.`
-        : `${r.archivo} → ${r.docId} v${r.version}: ${plural(r.totalChunks, 'chunk', 'chunks')}, ${plural(r.totalHitos, 'hito', 'hitos')}, ${plural(r.totalTablas, 'tabla', 'tablas')}, ${plural(r.totalCeldas, 'celda', 'celdas')}, ${plural(r.totalAristas, 'arista', 'aristas')}${r.versionesDerogadas.length ? `; deroga v${r.versionesDerogadas.join(', v')}` : ''}.`, 'ok');
+        ? `${r.archivo}: ya estaba ingerido (${r.docId} v${r.version}, ${r.estadoContenido}); no se ha vuelto a destilar.`
+        : `${r.archivo} → ${r.docId} v${r.version} (${r.estadoContenido}): ${plural(r.totalChunks, 'chunk', 'chunks')}, ${plural(r.totalHitos, 'hito', 'hitos')}, ${plural(r.totalTablas, 'tabla', 'tablas')}, ${plural(r.totalCeldas, 'celda', 'celdas')}, ${plural(r.totalAristas, 'arista', 'aristas')}${r.versionesDerogadas.length ? `; deroga v${r.versionesDerogadas.join(', v')}` : ''}.`, 'ok');
       if (r.aviso) registrar(r.aviso, 'error');
       if (centroId === selectCentro.value) await refrescarCatalogo();
     } catch (err) {
@@ -798,6 +841,7 @@
           ['Tools', a.tools.join(', ')],
           ['Condición', a.condiciones.join(' · ')],
           ['Nota al pie', a.notas.join(' · ')],
+          ['Páginas', a.paginas.join(', ')],
           ['Fragmentos', a.fragmentos.length > 3 ? `${a.fragmentos.slice(0, 3).join(', ')} y ${a.fragmentos.length - 3} más` : a.fragmentos.join(', ')],
         ]));
         lista.appendChild(li);
@@ -814,11 +858,12 @@
     const anadir = (lista, valor) => { if (valor && !lista.includes(valor)) lista.push(valor); };
     citas.forEach((c) => {
       const clave = c.breadcrumb || '';
-      if (!apartados.has(clave)) apartados.set(clave, { breadcrumb: c.breadcrumb, tools: [], condiciones: [], notas: [], fragmentos: [] });
+      if (!apartados.has(clave)) apartados.set(clave, { breadcrumb: c.breadcrumb, tools: [], condiciones: [], notas: [], paginas: [], fragmentos: [] });
       const a = apartados.get(clave);
       anadir(a.tools, c.herramienta);
       anadir(a.condiciones, c.condicionAplicacion);
       anadir(a.notas, c.notaPie);
+      anadir(a.paginas, c.paginas);
       anadir(a.fragmentos, c.fragmentoId);
     });
     return Array.from(apartados.values());
@@ -834,6 +879,8 @@
       cabeceraMatriz.appendChild(el('span', 'chip chip-info chip-mono', '03_matriz_operativa'));
       cabeceraMatriz.appendChild(el('span', 'chip chip-lila', plural(r.total ?? (r.filas || []).length, 'fila', 'filas')));
       if (r.fechaReferencia) cabeceraMatriz.appendChild(el('span', 'chip chip-aviso', `a ${r.fechaReferencia}`));
+      if (r.excluidosNoDeclarados > 0) cabeceraMatriz.appendChild(el('span', 'chip chip-aviso', `${plural(r.excluidosNoDeclarados, 'hito', 'hitos')} sin responsable declarado, fuera`));
+      if (r.sinResponsableDeclarado) cabeceraMatriz.appendChild(el('span', 'chip chip-aviso', 'No consta responsable declarado'));
       destino.appendChild(cabeceraMatriz);
       const rejilla = el('div', 'rejilla-fichas');
       (r.filas || []).forEach((f) => {
@@ -842,7 +889,7 @@
         if (f.registro_codigo) titulo.appendChild(el('span', 'chip chip-mono', f.registro_codigo));
         tarjeta.appendChild(titulo);
         tarjeta.appendChild(ficha([
-          ['Responsable', f.rol_responsable],
+          ['Responsable', textoResponsable(f)],
           ['Ejecutor', f.rol_ejecutor],
           ['Registro', [f.registro_codigo, f.registro_nombre].filter(Boolean).join(' · ')],
           ['Objeto', f.objeto_alcance],

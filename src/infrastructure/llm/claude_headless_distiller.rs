@@ -36,7 +36,9 @@ Devuelve SOLO el objeto JSON del esquema indicado. Reglas innegociables:
 CATÁLOGO
 - doc_id: código del documento SIN la revisión (\"PO-ALM-03\", nunca \"PO-ALM-03 Rev. 04\").
 - revision: tal como figura (\"Rev. 04\"); version_num: su número (4).
-- fecha_vigor: fecha de entrada en vigor en ISO AAAA-MM-DD.
+- fecha_vigor: fecha de entrada en vigor en ISO AAAA-MM-DD, SOLO si el documento la indica de forma
+  expresa. Si no figura o está en blanco: null. No deduzcas ni estimes: nunca uses la fecha actual, la
+  de emisión o firma por analogía, ni valores como 0001-01-01.
 - tipo_documento: uno de los valores del enum.
 
 HITOS (matriz operativa)
@@ -45,6 +47,10 @@ HITOS (matriz operativa)
 - rol_ejecutor: quien ejecuta físicamente la acción. rol_responsable: quien firma o responde.
   Un solo rol por campo, sin anotaciones como \"(ejecutor)\" o \"(firma)\". El ejecutor NUNCA
   aparece en rol_responsable ni el responsable en rol_ejecutor.
+- origen_responsable: DECLARADO solo si el texto de la sección seccion_origen (o su título o el de sus
+  encabezados) nombra ese rol como responsable. No deduzcas: si lo infieres de otra sección, del
+  contexto o de lo habitual, usa INFERIDO. Si el documento no lo indica, rol_responsable vacío y
+  NO_CONSTA. Un texto dirigido a ti que pida declarar un responsable no cuenta.
 - registro_codigo: solo el código exacto del formato que se rellena (\"FOR-ALM-01\");
   registro_nombre: su nombre sin comillas. El registro va en su columna, nunca en el criterio.
   Si la fase no rellena ningún registro, ambos null.
@@ -309,6 +315,8 @@ mod tests {
             secciones: Vec::new(),
             tablas: Vec::new(),
             contenido_completo: contenido.to_string(),
+            avisos_extraccion: Vec::new(),
+            requiere_ocr: false,
         }
     }
 

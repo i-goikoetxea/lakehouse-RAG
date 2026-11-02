@@ -41,6 +41,10 @@ tauri = { version = "2", features = [] }
 tauri-plugin-dialog = "2"
 pulldown-cmark = { version = "0.12", default-features = false, features = ["html"] }
 
+# Extracción de PDF digital. lopdf va en la versión que usa pdf-extract: comparten `Document`
+lopdf = "0.42"
+pdf-extract = "0.12"
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 

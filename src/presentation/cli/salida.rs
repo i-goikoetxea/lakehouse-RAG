@@ -4,6 +4,7 @@
 use serde_json::{Value, json};
 
 use crate::application::ports::lakehouse_projection::ResumenProyeccion;
+use crate::application::ports::lakehouse_store::TODAS_LAS_TABLAS;
 use crate::application::use_cases::lakehouse_app::{
     InformeIntegridadCentro, RespuestaLakehouse, ResultadoIngesta,
 };
@@ -91,10 +92,15 @@ pub fn ingesta_json(resultado: &ResultadoIngesta) -> Value {
         "version": informe.version,
         "ingest_id": informe.ingest_id,
         "ya_ingerido": informe.ya_ingerido,
+        "estado_contenido": informe.estado_contenido,
+        "pendiente_destilacion": informe.pendiente_destilacion,
+        "avisos": informe.avisos,
         "sha256": informe.sha256,
         "copia_original": resultado.copia_original,
         "totales": {
             "chunks": informe.total_chunks,
+            "nodos": informe.total_nodos,
+            "hitos_derivados_capa0": informe.hitos_derivados_capa0,
             "hitos": informe.total_tuplas,
             "tablas": informe.total_tablas,
             "celdas": informe.total_celdas,
@@ -109,17 +115,22 @@ pub fn ingesta_json(resultado: &ResultadoIngesta) -> Value {
 pub fn ingesta_legible(resultado: &ResultadoIngesta) -> String {
     let informe = &resultado.informe;
     if informe.ya_ingerido {
-        return format!(
-            "Ya ingerido: {} v{} (sha256 {}). No se ha llamado a Claude ni se ha escrito nada.",
-            informe.doc_id, informe.version, informe.sha256
+        let mut texto = format!(
+            "Ya ingerido: {} v{} [{}] (sha256 {}). No se ha llamado a Claude ni se ha escrito nada.",
+            informe.doc_id, informe.version, informe.estado_contenido, informe.sha256
         );
+        for aviso in &informe.avisos {
+            texto.push_str(&format!("\n  aviso: {aviso}"));
+        }
+        return texto;
     }
     let mut texto = format!(
-        "Ingerido {} v{} en '{}' ({})\n  chunks {} · hitos {} · tablas {} · celdas {} · aristas {}\n  original: {}",
+        "Ingerido {} v{} en '{}' ({}) [{}]\n  chunks {} · hitos {} · tablas {} · celdas {} · aristas {}\n  original: {}",
         informe.doc_id,
         informe.version,
         informe.centro_id,
         informe.ingest_id,
+        informe.estado_contenido,
         informe.total_chunks,
         informe.total_tuplas,
         informe.total_tablas,
@@ -127,6 +138,9 @@ pub fn ingesta_legible(resultado: &ResultadoIngesta) -> String {
         informe.total_aristas,
         resultado.copia_original
     );
+    for aviso in &informe.avisos {
+        texto.push_str(&format!("\n  aviso: {aviso}"));
+    }
     if !informe.versiones_derogadas.is_empty() {
         texto.push_str(&format!(
             "\n  versiones derogadas: {:?}",
@@ -202,14 +216,22 @@ pub fn integridad_json(informe: &InformeIntegridadCentro) -> Value {
         "versiones_vigentes_multiples": i.versiones_vigentes_multiples.iter().map(|v| json!({
             "tabla": v.tabla, "doc_id": v.doc_id, "versiones": v.versiones,
         })).collect::<Vec<_>>(),
+        "nodos_huerfanos": i.nodos_huerfanos.iter().map(|n| json!({
+            "tabla": n.tabla, "doc_id": n.doc_id, "version_num": n.version_num,
+            "nodo_id": n.nodo_id, "filas": n.filas,
+        })).collect::<Vec<_>>(),
+        "valores_invalidos": i.valores_invalidos.iter().map(|v| json!({
+            "tabla": v.tabla, "columna": v.columna, "valor": v.valor, "filas": v.filas,
+        })).collect::<Vec<_>>(),
     })
 }
 
 pub fn integridad_legible(informe: &InformeIntegridadCentro) -> String {
     if informe.es_integro() {
         return format!(
-            "Centro '{}' ÍNTEGRO: 6/6 tablas, sin huérfanos, sin ingestas STAGED y una sola versión vigente por documento.",
-            informe.centro_id
+            "Centro '{}' ÍNTEGRO: {total}/{total} tablas, sin huérfanos, sin ingestas STAGED y una sola versión vigente por documento.",
+            informe.centro_id,
+            total = TODAS_LAS_TABLAS.len()
         );
     }
     let i = &informe.informe;
@@ -236,6 +258,18 @@ pub fn integridad_legible(informe: &InformeIntegridadCentro) -> String {
         lineas.push(format!(
             "  varias versiones vigentes en {}: {} {:?}",
             v.tabla, v.doc_id, v.versiones
+        ));
+    }
+    for n in &i.nodos_huerfanos {
+        lineas.push(format!(
+            "  nodo ausente en 07 referido desde {}: {} v{} '{}' ({} filas)",
+            n.tabla, n.doc_id, n.version_num, n.nodo_id, n.filas
+        ));
+    }
+    for v in &i.valores_invalidos {
+        lineas.push(format!(
+            "  valor inválido en {}.{}: {:?} ({} filas)",
+            v.tabla, v.columna, v.valor, v.filas
         ));
     }
     lineas.join("\n")

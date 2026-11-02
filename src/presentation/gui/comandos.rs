@@ -8,6 +8,7 @@
 //! * El catálogo se lee con la misma tool de solo lectura que usa el agente
 //!   (`execute_athena_sql` sobre `01_documentos_catalogo`): exige el centro activo.
 
+use std::collections::HashMap;
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
@@ -15,8 +16,11 @@ use serde_json::{Value, json};
 
 use crate::application::dtos::ingestion::{EtapaIngesta, ObservadorIngesta};
 use crate::application::dtos::tools::{LakehouseToolName, ToolCall};
-use crate::application::use_cases::lakehouse_app::{InformeIntegridadCentro, LakehouseApp};
+use crate::application::use_cases::lakehouse_app::{
+    InformeIntegridadCentro, LakehouseApp, ResultadoIngesta,
+};
 use crate::domain::models::center::CentroConocimiento;
+use crate::domain::models::estructura_documental::EstadoContenido;
 
 /// Evento de Tauri con el avance de una ingesta
 pub const EVENTO_PROGRESO_INGESTA: &str = "ingesta-progreso";
@@ -85,6 +89,8 @@ pub struct IngestaDto {
     pub archivo: String,
     pub doc_id: String,
     pub version: i32,
+    pub estado_contenido: String,
+    pub pendiente_destilacion: bool,
     pub ya_ingerido: bool,
     pub total_chunks: usize,
     pub total_hitos: usize,
@@ -110,6 +116,10 @@ pub struct DocumentoCatalogoDto {
     pub fecha_vigor: Option<String>,
     pub fecha_derogacion: Option<String>,
     pub vigente: bool,
+    /// `None` si la revisión no tiene índice 07 (no debería ocurrir en un centro íntegro)
+    pub estado_contenido: Option<String>,
+    /// Sigue siendo provisional y aún puede destilarse
+    pub pendiente_destilacion: bool,
 }
 
 /// Diagnóstico de integridad para la ventana
@@ -121,6 +131,7 @@ pub struct IntegridadDto {
     pub tablas_ausentes: Vec<String>,
     pub ingestas_staged: Vec<String>,
     pub huerfanos: usize,
+    pub valores_invalidos: usize,
     pub versiones_vigentes_multiples: usize,
 }
 
@@ -131,13 +142,32 @@ impl From<&InformeIntegridadCentro> for IntegridadDto {
             integro: informe.es_integro(),
             tablas_ausentes: informe.tablas_ausentes.clone(),
             ingestas_staged: informe.informe.ingestas_staged.clone(),
-            huerfanos: informe.informe.huerfanos.iter().map(|h| h.filas).sum(),
+            huerfanos: informe
+                .informe
+                .huerfanos
+                .iter()
+                .map(|h| h.filas)
+                .sum::<usize>()
+                + informe
+                    .informe
+                    .nodos_huerfanos
+                    .iter()
+                    .map(|n| n.filas)
+                    .sum::<usize>(),
+            valores_invalidos: informe
+                .informe
+                .valores_invalidos
+                .iter()
+                .map(|v| v.filas)
+                .sum(),
             versiones_vigentes_multiples: informe.informe.versiones_vigentes_multiples.len(),
         }
     }
 }
 
-const SQL_CATALOGO: &str = "SELECT doc_id, titulo, tipo_documento, nivel_prelacion, revision, version_num, fecha_vigor, fecha_derogacion, vigente FROM 01_documentos_catalogo ORDER BY nivel_prelacion ASC, doc_id ASC, version_num DESC";
+const SQL_CATALOGO: &str = "SELECT doc_id, titulo, tipo_documento, nivel_prelacion, revision, version_num, fecha_vigor, fecha_derogacion, vigente, doc_id_provisional FROM 01_documentos_catalogo ORDER BY nivel_prelacion ASC, doc_id ASC, version_num DESC";
+const SQL_ESTADOS: &str =
+    "SELECT DISTINCT doc_id, version_num, estado_contenido FROM 07_indice_jerarquico";
 
 pub async fn listar_centros(app: &LakehouseApp) -> Result<Vec<CentroDto>, String> {
     let centros = app.listar_centros().await.map_err(|e| e.to_string())?;
@@ -195,19 +225,40 @@ pub async fn ingestar_documento(
         .ingestar_con_progreso(Path::new(ruta), centro_id, observador)
         .await
         .map_err(|e| e.to_string())?;
+    Ok(ingesta_dto(&resultado, nombre_archivo(ruta), centro_id))
+}
+
+/// Reintenta la destilación de un documento provisional desde su copia en `raw_docs/`
+pub async fn reintentar_destilacion(
+    app: &LakehouseApp,
+    doc_id: &str,
+    centro_id: &str,
+) -> Result<IngestaDto, String> {
+    let resultado = app
+        .reintentar_documento(doc_id, centro_id)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(ingesta_dto(&resultado, doc_id.to_string(), centro_id))
+}
+
+fn ingesta_dto(resultado: &ResultadoIngesta, archivo: String, centro_id: &str) -> IngestaDto {
     let informe = &resultado.informe;
     let proyectado = resultado.proyeccion.is_some();
-    let aviso = resultado.aviso_proyeccion.clone().or_else(|| {
+    let aviso_estado = resultado.aviso_proyeccion.clone().or_else(|| {
         (!proyectado && !informe.ya_ingerido).then(|| {
             format!(
                 "El centro '{centro_id}' está inactivo: el documento quedó guardado y será consultable al activarlo"
             )
         })
     });
-    Ok(IngestaDto {
-        archivo: nombre_archivo(ruta),
+    let avisos: Vec<String> = informe.avisos.iter().cloned().chain(aviso_estado).collect();
+    let aviso = (!avisos.is_empty()).then(|| avisos.join(" "));
+    IngestaDto {
+        archivo,
         doc_id: informe.doc_id.clone(),
         version: informe.version,
+        estado_contenido: informe.estado_contenido.clone(),
+        pendiente_destilacion: informe.pendiente_destilacion,
         ya_ingerido: informe.ya_ingerido,
         total_chunks: informe.total_chunks,
         total_hitos: informe.total_tuplas,
@@ -217,18 +268,19 @@ pub async fn ingestar_documento(
         versiones_derogadas: informe.versiones_derogadas.clone(),
         proyectado,
         aviso,
-    })
+    }
 }
 
-/// Todas las revisiones confirmadas del centro activo (vigentes y derogadas)
-pub async fn catalogo_centro(
+/// Filas de una consulta de lectura hecha por la ventana con la tool del agente
+async fn filas_sql(
     app: &LakehouseApp,
     centro_id: &str,
-) -> Result<Vec<DocumentoCatalogoDto>, String> {
+    consulta: &str,
+) -> Result<Vec<Value>, String> {
     let llamada = ToolCall {
         id: "gui-catalogo".to_string(),
         name: LakehouseToolName::ExecuteAthenaSql.as_str().to_string(),
-        arguments: json!({ "centro_id": centro_id, "sql_query": SQL_CATALOGO }),
+        arguments: json!({ "centro_id": centro_id, "sql_query": consulta }),
     };
     let resultado = app
         .servidor_herramientas()
@@ -240,8 +292,43 @@ pub async fn catalogo_centro(
     }
     Ok(resultado.output["resultado"]
         .as_array()
-        .map(|filas| filas.iter().map(documento_catalogo).collect())
+        .cloned()
         .unwrap_or_default())
+}
+
+/// Todas las revisiones confirmadas del centro activo (vigentes y derogadas)
+pub async fn catalogo_centro(
+    app: &LakehouseApp,
+    centro_id: &str,
+) -> Result<Vec<DocumentoCatalogoDto>, String> {
+    let estados: HashMap<(String, i64), String> = filas_sql(app, centro_id, SQL_ESTADOS)
+        .await?
+        .iter()
+        .filter_map(|fila| {
+            Some((
+                (
+                    fila["doc_id"].as_str()?.to_string(),
+                    fila["version_num"].as_i64()?,
+                ),
+                fila["estado_contenido"].as_str()?.to_string(),
+            ))
+        })
+        .collect();
+    let filas = filas_sql(app, centro_id, SQL_CATALOGO).await?;
+    Ok(filas
+        .iter()
+        .map(|fila| {
+            let mut documento = documento_catalogo(fila);
+            documento.estado_contenido = documento
+                .version_num
+                .and_then(|v| estados.get(&(documento.doc_id.clone(), v)).cloned());
+            documento.pendiente_destilacion = fila["doc_id_provisional"].as_str()
+                == Some(documento.doc_id.as_str())
+                && documento.estado_contenido.as_deref()
+                    == Some(EstadoContenido::ParcialUniversal.as_str());
+            documento
+        })
+        .collect())
 }
 
 pub async fn integridad(app: &LakehouseApp, centro_id: &str) -> Result<IntegridadDto, String> {
@@ -262,6 +349,8 @@ fn documento_catalogo(fila: &Value) -> DocumentoCatalogoDto {
         fecha_vigor: opcional("fecha_vigor"),
         fecha_derogacion: opcional("fecha_derogacion"),
         vigente: fila["vigente"].as_bool().unwrap_or(false),
+        estado_contenido: None,
+        pendiente_destilacion: false,
     }
 }
 

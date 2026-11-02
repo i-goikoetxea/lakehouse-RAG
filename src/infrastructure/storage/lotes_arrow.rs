@@ -12,8 +12,8 @@ use arrow_schema::{DataType, Field, SchemaRef};
 use chrono::NaiveDate;
 
 use crate::application::dtos::lakehouse_filas::{
-    ClaveDocumental, FilaArista, FilaCatalogo, FilaCelda, FilaChunk, FilaHito, FilaTabla,
-    LimitesEje, LoteIngesta,
+    ClaveDocumental, FilaArista, FilaCatalogo, FilaCelda, FilaChunk, FilaHito, FilaIndice,
+    FilaTabla, LimitesEje, LoteIngesta,
 };
 use crate::application::ports::lakehouse_store::EstadoIngesta;
 use crate::domain::errors::DomainError;
@@ -21,7 +21,7 @@ use crate::domain::models::identificadores::IngestId;
 use crate::infrastructure::storage::schemas::{
     DIMENSION_EMBEDDINGS, schema_catalogo_tablas, schema_celdas_doble_entrada,
     schema_chunks_normativa, schema_documentos_catalogo, schema_grafo_referencias,
-    schema_matriz_operativa,
+    schema_indice_jerarquico, schema_matriz_operativa,
 };
 
 /// Valores de las columnas transaccionales que fija el almacén (nunca el llamador)
@@ -61,6 +61,7 @@ pub fn lote_a_record_batch(
         LoteIngesta::Tablas(filas) => lote_tablas(filas, transaccion),
         LoteIngesta::Celdas(filas) => lote_celdas(filas, transaccion),
         LoteIngesta::Aristas(filas) => lote_aristas(filas, transaccion),
+        LoteIngesta::Indice(filas) => lote_indice(filas, transaccion),
     }
 }
 
@@ -70,6 +71,15 @@ fn texto<'a>(valores: impl Iterator<Item = &'a str>) -> ArrayRef {
 
 fn texto_nulable<'a>(valores: impl Iterator<Item = Option<&'a str>>) -> ArrayRef {
     Arc::new(valores.collect::<StringArray>())
+}
+
+/// Páginas de citas; un valor fuera de rango de `Int32` queda nulo en lugar de corromperse
+fn paginas(valores: impl Iterator<Item = Option<u32>>) -> ArrayRef {
+    Arc::new(
+        valores
+            .map(|pagina| pagina.and_then(|p| i32::try_from(p).ok()))
+            .collect::<Int32Array>(),
+    )
 }
 
 fn flotante_nulable(valores: impl Iterator<Item = Option<f64>>) -> ArrayRef {
@@ -164,11 +174,12 @@ fn lote_catalogo(
                 .map(|f| f.tipo_documento.nivel_prelacion().valor()),
         ),
         texto(filas.iter().map(|f| f.revision.as_str())),
-        Arc::new(Date32Array::from_iter_values(
+        Arc::new(
             filas
                 .iter()
-                .map(|f| fecha_a_date32(f.vigencia.fecha_vigor())),
-        )),
+                .map(|f| f.vigencia.fecha_vigor().map(fecha_a_date32))
+                .collect::<Date32Array>(),
+        ),
         Arc::new(
             filas
                 .iter()
@@ -176,6 +187,11 @@ fn lote_catalogo(
                 .collect::<Date32Array>(),
         ),
         texto(filas.iter().map(|f| f.hash_sha256.as_str())),
+        texto_nulable(
+            filas
+                .iter()
+                .map(|f| f.doc_id_provisional.as_ref().map(|d| d.as_str())),
+        ),
     ];
     ensamblar(
         schema_documentos_catalogo(),
@@ -194,10 +210,15 @@ fn lote_chunks(
     let vectores_chunk: Vec<Option<&[f32]>> =
         filas.iter().map(|f| Some(f.vector.as_slice())).collect();
     let especificas = vec![
+        texto(filas.iter().map(|f| f.nodo_id.as_str())),
+        texto(filas.iter().map(|f| f.tipo_bloque.as_str())),
+        texto(filas.iter().map(|f| f.estado_contenido.as_str())),
         nivel(filas.iter().map(|f| f.nivel_prelacion.valor())),
         texto(filas.iter().map(|f| f.breadcrumb_jerarquia.as_str())),
         texto_nulable(filas.iter().map(|f| f.condicion_aplicacion.as_deref())),
         texto(filas.iter().map(|f| f.texto_contenido.as_str())),
+        paginas(filas.iter().map(|f| f.pagina_inicio)),
+        paginas(filas.iter().map(|f| f.pagina_fin)),
         listas_texto(filas.iter().map(|f| f.tablas_vinculadas.as_slice())),
         listas_texto(filas.iter().map(|f| f.hitos_vinculados.as_slice())),
         vectores(&vectores_chunk)?,
@@ -226,6 +247,7 @@ fn lote_hitos(
         texto(filas.iter().map(|f| f.objeto_alcance.as_str())),
         texto(filas.iter().map(|f| f.rol_ejecutor.as_str())),
         texto(filas.iter().map(|f| f.rol_responsable.as_str())),
+        texto(filas.iter().map(|f| f.origen_responsable.as_str())),
         texto_nulable(filas.iter().map(|f| f.registro_codigo.as_deref())),
         texto_nulable(filas.iter().map(|f| f.registro_nombre.as_deref())),
         texto(filas.iter().map(|f| f.criterio_aceptacion.as_str())),
@@ -306,6 +328,40 @@ fn lote_celdas(
         columnas_comunes(&claves, tx),
         especificas,
         "05",
+    )
+}
+
+fn lote_indice(
+    filas: &[FilaIndice],
+    tx: &ColumnasTransaccionales,
+) -> Result<RecordBatch, DomainError> {
+    let claves: Vec<&ClaveDocumental> = filas.iter().map(|f| &f.clave).collect();
+    let vectores_seccion: Vec<Option<&[f32]>> = filas
+        .iter()
+        .map(|f| Some(f.vector_seccion.as_slice()))
+        .collect();
+    let especificas = vec![
+        texto(filas.iter().map(|f| f.estado_contenido.as_str())),
+        texto(filas.iter().map(|f| f.tipo_nodo.as_str())),
+        nivel(filas.iter().map(|f| f.nivel_jerarquico.valor())),
+        texto(filas.iter().map(|f| f.codigo_seccion.as_str())),
+        texto(filas.iter().map(|f| f.titulo_seccion.as_str())),
+        texto_nulable(
+            filas
+                .iter()
+                .map(|f| f.nodo_padre_id.as_ref().map(|n| n.as_str())),
+        ),
+        texto(filas.iter().map(|f| f.ruta_linaje.as_str())),
+        texto_nulable(filas.iter().map(|f| f.condiciones_alcance.as_deref())),
+        texto(filas.iter().map(|f| f.resumen_seccion.as_str())),
+        vectores(&vectores_seccion)?,
+    ];
+    ensamblar(
+        schema_indice_jerarquico(),
+        Some(texto(filas.iter().map(|f| f.nodo_id.as_str()))),
+        columnas_comunes(&claves, tx),
+        especificas,
+        "07",
     )
 }
 

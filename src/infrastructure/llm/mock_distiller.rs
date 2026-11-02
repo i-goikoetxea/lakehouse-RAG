@@ -59,7 +59,7 @@ impl MockDistiller {
             tipo_documento: "INSTRUCTIVO_TECNICO".to_string(),
             revision: "Rev. 01".to_string(),
             version_num: 1,
-            fecha_vigor: "2026-01-15".to_string(),
+            fecha_vigor: Some("2026-01-15".to_string()),
             emisor: "INGENIERIA_PLANTA".to_string(),
         };
 
@@ -79,6 +79,7 @@ impl MockDistiller {
                 objeto_alcance: sec.titulo.clone(),
                 rol_ejecutor: "Operador Técnico".to_string(),
                 rol_responsable: "Supervisor de Calidad".to_string(),
+                origen_responsable: "INFERIDO".to_string(),
                 registro_codigo: None,
                 registro_nombre: None,
                 criterio_aceptacion: "Verificación de parámetro operativo +/- 5%".to_string(),
@@ -209,10 +210,13 @@ mod tests {
                 contenido: "Se debe verificar la presión y temperatura en cada turno.".to_string(),
                 breadcrumb: "Procedimiento > 1.1 Control Operativo".to_string(),
                 condicion_aplicacion: None,
+                ..ParsedSection::default()
             }],
             tablas: Vec::new(),
             contenido_completo: "Texto con referencia a NOM-STPS-001 para cumplimiento."
                 .to_string(),
+            avisos_extraccion: Vec::new(),
+            requiere_ocr: false,
         };
 
         let distiller = MockDistiller::new();
@@ -240,6 +244,8 @@ mod tests {
             secciones: Vec::new(),
             tablas: Vec::new(),
             contenido_completo: "Test".to_string(),
+            avisos_extraccion: Vec::new(),
+            requiere_ocr: false,
         };
 
         let err = distiller.distill(&parsed).await.unwrap_err();

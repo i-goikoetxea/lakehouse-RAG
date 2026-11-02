@@ -68,7 +68,7 @@ async fn test_inyeccion_sql_en_filtros_no_altera_la_consulta() {
     let matriz = ok(
         h,
         "query_operational_matrix",
-        args(json!({ "fase": "CUSTODIA" })),
+        args(json!({ "fase": "CUSTODIA", "solo_declarados": false })),
     )
     .await;
     assert_eq!(matriz["total"], 1);
@@ -141,7 +141,12 @@ async fn test_sql_rechaza_ddl_dml_copy_y_varias_sentencias() {
     )
     .await;
     assert_eq!(con_punto_y_coma_final["filas"], 1);
-    let matriz = ok(h, "query_operational_matrix", args(json!({}))).await;
+    let matriz = ok(
+        h,
+        "query_operational_matrix",
+        args(json!({ "solo_declarados": false })),
+    )
+    .await;
     assert_eq!(matriz["total"], 3, "las vistas siguen intactas");
 }
 

@@ -1,4 +1,4 @@
-//! DTOs de las 6 herramientas v2 del Lakehouse (plan v2 §2.4): nombres, definiciones con
+//! DTOs de las 8 herramientas del Lakehouse (plan v2 §2.4 y STAIR): nombres, definiciones con
 //! JSON Schema estricto, parámetros tipados (`deny_unknown_fields`) y resultados.
 
 use chrono::NaiveDate;
@@ -22,16 +22,22 @@ pub enum LakehouseToolName {
     TraverseNormativeGraph,
     #[serde(rename = "search_normative_context")]
     SearchNormativeContext,
+    #[serde(rename = "stair_navigate_toc")]
+    StairNavigateToc,
+    #[serde(rename = "stair_get_subtree_context")]
+    StairGetSubtreeContext,
 }
 
 impl LakehouseToolName {
-    pub const TODAS: [Self; 6] = [
+    pub const TODAS: [Self; 8] = [
         Self::InspectLakehouseCatalog,
         Self::QueryOperationalMatrix,
         Self::LookupDoubleEntryTable,
         Self::ExecuteAthenaSql,
         Self::TraverseNormativeGraph,
         Self::SearchNormativeContext,
+        Self::StairNavigateToc,
+        Self::StairGetSubtreeContext,
     ];
 
     pub fn as_str(&self) -> &'static str {
@@ -42,6 +48,8 @@ impl LakehouseToolName {
             Self::ExecuteAthenaSql => "execute_athena_sql",
             Self::TraverseNormativeGraph => "traverse_normative_graph",
             Self::SearchNormativeContext => "search_normative_context",
+            Self::StairNavigateToc => "stair_navigate_toc",
+            Self::StairGetSubtreeContext => "stair_get_subtree_context",
         }
     }
 
@@ -114,6 +122,13 @@ pub struct QueryOperationalMatrixParams {
     pub doc_id: Option<String>,
     pub objeto: Option<String>,
     pub fecha_referencia: Option<String>,
+    /// Por defecto solo los hitos con responsable declarado; el resto se cuenta aparte
+    #[serde(default = "solo_declarados_por_defecto")]
+    pub solo_declarados: bool,
+}
+
+fn solo_declarados_por_defecto() -> bool {
+    true
 }
 
 /// Valor de un eje en `lookup_double_entry_table`: número o categoría textual
@@ -158,6 +173,29 @@ pub struct TraverseNormativeGraphParams {
     pub fecha_referencia: Option<String>,
 }
 
+/// Motor de `search_normative_context`
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+pub enum ModoBusqueda {
+    /// Coseno + BM25 fusionados con RRF
+    #[default]
+    #[serde(rename = "HYBRID")]
+    Hibrido,
+    #[serde(rename = "SEMANTIC_ONLY")]
+    SoloSemantico,
+    #[serde(rename = "EXACT_BM25")]
+    SoloBm25,
+}
+
+impl ModoBusqueda {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Hibrido => "HYBRID",
+            Self::SoloSemantico => "SEMANTIC_ONLY",
+            Self::SoloBm25 => "EXACT_BM25",
+        }
+    }
+}
+
 /// `search_normative_context`
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -167,6 +205,32 @@ pub struct SearchNormativeContextParams {
     pub top_k: Option<u16>,
     pub nivel_prelacion_max: Option<i8>,
     pub doc_id: Option<String>,
+    #[serde(default)]
+    pub modo: ModoBusqueda,
+    pub nodo_id: Option<String>,
+    pub ruta_linaje_prefijo: Option<String>,
+    pub fecha_referencia: Option<String>,
+}
+
+/// `stair_navigate_toc`
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StairNavigateTocParams {
+    pub centro_id: String,
+    pub doc_id: String,
+    pub nodo_padre_id: Option<String>,
+    pub desplazamiento: Option<u32>,
+    pub fecha_referencia: Option<String>,
+}
+
+/// `stair_get_subtree_context`
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StairGetSubtreeContextParams {
+    pub centro_id: String,
+    pub doc_id: String,
+    pub nodo_id: String,
+    pub desde_caracter: Option<u32>,
     pub fecha_referencia: Option<String>,
 }
 
@@ -230,7 +294,7 @@ fn propiedad_fecha() -> serde_json::Value {
     json!({
         "type": "string",
         "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$",
-        "description": "Opcional (ISO AAAA-MM-DD). Sin ella → solo lo vigente hoy. Con ella → las revisiones vigentes en esa fecha (fecha_vigor <= D < fecha_derogacion)."
+        "description": "Opcional (ISO AAAA-MM-DD). Sin ella → solo lo vigente hoy. Con ella → las revisiones vigentes en esa fecha (fecha_vigor <= D < fecha_derogacion); las que no declaran su vigencia vuelven aparte en vigencia_no_declarada."
     })
 }
 
@@ -244,13 +308,14 @@ fn esquema_objeto(propiedades: serde_json::Value, requeridos: &[&str]) -> serde_
 }
 
 /// Vistas SQL y columnas que `execute_athena_sql` admite (nombres canónicos)
-pub const DESCRIPCION_VISTAS_SQL: &str = "Vistas (usa el nombre canónico; la herramienta lo traduce a la vista del centro activo y rechaza cualquier otra tabla). Contienen TODAS las revisiones confirmadas: filtra vigente = true para lo vigente, o usa la ventana de 01 (fecha_vigor <= D AND (fecha_derogacion IS NULL OR fecha_derogacion > D)) para otra fecha.
-- 01_documentos_catalogo(doc_id, version_num, vigente, titulo, tipo_documento, nivel_prelacion, revision, fecha_vigor DATE, fecha_derogacion DATE, hash_sha256)
-- 02_chunks_normativa(chunk_id, doc_id, version_num, vigente, nivel_prelacion, breadcrumb_jerarquia, condicion_aplicacion, texto_contenido, tablas_vinculadas, hitos_vinculados)
-- 03_matriz_operativa(hito_id, doc_id, version_num, vigente, orden_secuencia, fase_operativa, objeto_alcance, rol_ejecutor, rol_responsable, registro_codigo, registro_nombre, criterio_aceptacion, condicion_aplicacion, nivel_prelacion, calidad_extraccion, chunk_origen_id)
+pub const DESCRIPCION_VISTAS_SQL: &str = "Vistas (usa el nombre canónico; la herramienta lo traduce a la vista del centro activo y rechaza cualquier otra tabla). Contienen TODAS las revisiones confirmadas: filtra vigente = true para lo vigente, o pasa fecha_referencia para otra fecha. fecha_vigor es NULL si el documento no la declara: nunca la presentes como dato.
+- 01_documentos_catalogo(doc_id, version_num, vigente, titulo, tipo_documento, nivel_prelacion, revision, fecha_vigor DATE, fecha_derogacion DATE, hash_sha256, doc_id_provisional)
+- 02_chunks_normativa(chunk_id, doc_id, version_num, vigente, nodo_id, tipo_bloque, estado_contenido, nivel_prelacion, breadcrumb_jerarquia, condicion_aplicacion, texto_contenido, pagina_inicio, pagina_fin, tablas_vinculadas, hitos_vinculados)
+- 03_matriz_operativa(hito_id, doc_id, version_num, vigente, orden_secuencia, fase_operativa, objeto_alcance, rol_ejecutor, rol_responsable, origen_responsable (DECLARADO, INFERIDO o NO_CONSTA), registro_codigo, registro_nombre, criterio_aceptacion, condicion_aplicacion, nivel_prelacion, calidad_extraccion, chunk_origen_id)
 - 04_catalogo_tablas(tabla_id, doc_id, version_num, vigente, titulo_tabla, eje_x_nombre, eje_x_tipo, eje_x_unidad, eje_y_nombre, eje_y_tipo, eje_y_unidad, valor_salida_nombre, instrucciones_uso_sql)
 - 05_celdas_doble_entrada(celda_id, tabla_id, doc_id, version_num, vigente, eje_x_categoria, eje_x_min, eje_x_min_inclusivo, eje_x_max, eje_x_max_inclusivo, eje_y_categoria, eje_y_min, eje_y_min_inclusivo, eje_y_max, eje_y_max_inclusivo, eje_z_filtro_adicional, valor_resultado_texto, valor_resultado_num, unidad_medida, nota_pie_condicion, nivel_prelacion)
 - 06_grafo_referencias(edge_id, doc_id, version_num, vigente, origen_id, origen_tipo, tipo_relacion, destino_id, destino_tipo, contexto_relacion)
+- 07_indice_jerarquico(nodo_id, doc_id, version_num, vigente, estado_contenido, nivel_jerarquico, codigo_seccion, titulo_seccion, nodo_padre_id, ruta_linaje, condiciones_alcance, resumen_seccion)
 Todas llevan además centro_id, ingest_id y estado_ingesta. fase_operativa va en MAYÚSCULAS sin tildes (RECEPCION, CUSTODIA, INSPECCION…).";
 
 impl ToolDefinition {
@@ -262,7 +327,7 @@ impl ToolDefinition {
         }
     }
 
-    /// Las 6 definiciones oficiales de herramientas del Lakehouse (plan v2 §2.4)
+    /// Las 8 definiciones oficiales de herramientas del Lakehouse (plan v2 §2.4 y STAIR)
     pub fn lakehouse_tools() -> Vec<Self> {
         vec![
             Self::nueva(
@@ -282,6 +347,7 @@ impl ToolDefinition {
                         "fase": { "type": "string", "description": "Fase operativa (p. ej. CUSTODIA, Recepción, Inspección)." },
                         "rol": { "type": "string", "description": "Rol exacto, p. ej. 'Jefe de Producción'." },
                         "rol_en": { "type": "string", "enum": ["ejecutor", "responsable", "cualquiera"], "description": "Columna donde se busca el rol (por defecto cualquiera)." },
+                        "solo_declarados": { "type": "boolean", "description": "Por defecto true: solo hitos con origen_responsable DECLARADO; excluidos_no_declarados cuenta el resto. Con false devuelve todos, cada uno marcado con su origen." },
                         "registro": { "type": "string", "description": "Código exacto del registro, p. ej. FOR-ALM-05." },
                         "doc_id": { "type": "string", "description": "Código del documento, p. ej. PO-ALM-03." },
                         "objeto": { "type": "string", "description": "Texto contenido en el objeto/alcance del hito." },
@@ -337,17 +403,48 @@ impl ToolDefinition {
             ),
             Self::nueva(
                 LakehouseToolName::SearchNormativeContext,
-                "Búsqueda híbrida (semántica + léxica) en los fragmentos normativos y en los hitos del centro activo. Cada resultado trae breadcrumb_jerarquia, condicion_aplicacion (la condición heredada del apartado: menciónala siempre), nivel de prelación y cita. Los resultados se agrupan por tema; cuando documentos de distinta prelación tratan el mismo tema, prevalece: true marca el de menor nivel y supletorio: true los demás. Úsala para contexto, alcance y condiciones.",
+                "Búsqueda en TODO el texto del centro activo (corpus sin pérdidas 02 e hitos), también en documentos sin destilar. Es la herramienta para preguntas generales o narrativas. modo: HYBRID (por defecto, semántica + léxica), SEMANTIC_ONLY o EXACT_BM25 (términos exactos). Se puede restringir a un doc_id, a una sección real con nodo_id (incluye sus descendientes) o a ruta_linaje_prefijo con doc_id; una sección inexistente es un error. Cada resultado trae condicion_aplicacion (menciónala siempre), nivel de prelación, estado_contenido, tiene_capa_2 y cita (doc_id, revisión, breadcrumb, nodo_id y páginas si existen). Los resultados se agrupan por tema; cuando documentos de distinta prelación tratan el mismo tema, prevalece: true marca el de menor nivel y supletorio: true los demás. Un documento provisional nunca prevalece. documentos_no_definitivos lista los documentos sin destilar o sin texto (REQUIERE_OCR) del centro.",
                 esquema_objeto(
                     json!({
                         "centro_id": propiedad_centro(),
                         "consulta": { "type": "string", "description": "Pregunta o términos a buscar." },
+                        "modo": { "type": "string", "enum": ["HYBRID", "SEMANTIC_ONLY", "EXACT_BM25"], "description": "Motor de búsqueda (por defecto HYBRID)." },
                         "top_k": { "type": "integer", "minimum": 1, "maximum": 20, "description": "Resultados (por defecto 8)." },
                         "nivel_prelacion_max": { "type": "integer", "minimum": 1, "maximum": 5, "description": "Solo documentos con nivel de prelación <= este valor." },
-                        "doc_id": { "type": "string", "description": "Limitar a un documento." },
+                        "doc_id": { "type": "string", "description": "Limitar a un documento (admite su doc_id provisional anterior)." },
+                        "nodo_id": { "type": "string", "description": "Limitar a una sección y sus descendientes; obtenlo de stair_navigate_toc." },
+                        "ruta_linaje_prefijo": { "type": "string", "description": "Limitar a una rama por su ruta_linaje exacta (p. ej. /4/4.2; no captura /4/4.20). Requiere doc_id." },
                         "fecha_referencia": propiedad_fecha()
                     }),
                     &["centro_id", "consulta"],
+                ),
+            ),
+            Self::nueva(
+                LakehouseToolName::StairNavigateToc,
+                "Índice (ToC) de un documento: sin nodo_padre_id devuelve las secciones raíz y con él sus hijos directos, en orden de documento, con nodo_id, código, título, resumen, condiciones de alcance y si tiene hijos. Úsala para preguntas de estructura («qué apartados tiene…»). Si la única raíz es el título del documento, baja a sus hijos. Respuesta acotada: si truncado es true, repite con siguiente_desplazamiento. Admite el doc_id provisional anterior de un documento ya destilado.",
+                esquema_objeto(
+                    json!({
+                        "centro_id": propiedad_centro(),
+                        "doc_id": { "type": "string", "description": "Código del documento." },
+                        "nodo_padre_id": { "type": "string", "description": "Sección cuyos hijos se piden; omítelo para las raíces." },
+                        "desplazamiento": { "type": "integer", "minimum": 0, "description": "Nodos a saltar para continuar una respuesta truncada." },
+                        "fecha_referencia": propiedad_fecha()
+                    }),
+                    &["centro_id", "doc_id"],
+                ),
+            ),
+            Self::nueva(
+                LakehouseToolName::StairGetSubtreeContext,
+                "Texto íntegro de una sección y sus descendientes, en orden de documento, sin repetir el solape entre fragmentos, con las condiciones heredadas de sus ancestros y la cita (revisión, breadcrumb, páginas). Úsala tras stair_navigate_toc para leer una sección completa. Tiene un límite de tamaño: si truncado es true, como_continuar indica cómo seguir (por sus hijos o con desde_caracter). Una sección inexistente es un error: nunca inventa contenido.",
+                esquema_objeto(
+                    json!({
+                        "centro_id": propiedad_centro(),
+                        "doc_id": { "type": "string", "description": "Código del documento." },
+                        "nodo_id": { "type": "string", "description": "Sección, tal como la devuelve stair_navigate_toc o la cita de una búsqueda." },
+                        "desde_caracter": { "type": "integer", "minimum": 0, "description": "Caracteres de texto a saltar para continuar una respuesta truncada." },
+                        "fecha_referencia": propiedad_fecha()
+                    }),
+                    &["centro_id", "doc_id", "nodo_id"],
                 ),
             ),
         ]
@@ -371,9 +468,9 @@ mod tests {
     }
 
     #[test]
-    fn test_las_6_tools_tienen_esquema_estricto_con_centro_y_fecha() {
+    fn test_las_8_tools_tienen_esquema_estricto_con_centro_y_fecha() {
         let tools = ToolDefinition::lakehouse_tools();
-        assert_eq!(tools.len(), 6);
+        assert_eq!(tools.len(), 8);
         for tool in tools {
             let esquema = &tool.parameters;
             assert_eq!(esquema["additionalProperties"], false, "{}", tool.name);

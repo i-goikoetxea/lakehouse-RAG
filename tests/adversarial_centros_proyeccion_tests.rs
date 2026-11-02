@@ -138,7 +138,7 @@ async fn test_activacion_doble_es_idempotente_y_no_duplica_vistas_ni_grafo() {
         vigentes("06_grafo_referencias") > 0 && vigentes("05_celdas_doble_entrada") > 0,
         "{primera:?}"
     );
-    assert_eq!(primera.vistas.len(), 6, "{primera:?}");
+    assert_eq!(primera.vistas.len(), 7, "{primera:?}");
     assert_eq!(
         escalar(
             &sql(
@@ -249,7 +249,7 @@ async fn test_manifiesto_de_otro_modelo_impide_abrir_e_ingerir() {
             "\"dimension_embeddings\": 1024",
             "\"dimension_embeddings\": 384",
         ),
-        ("\"schema_version\": 2", "\"schema_version\": 1"),
+        ("\"schema_version\": 5", "\"schema_version\": 4"),
     ] {
         std::fs::write(&ruta_manifiesto, original.replace(de, a)).unwrap();
         assert!(entorno.app.activar_centro(CENTRO).await.is_err(), "{a}");

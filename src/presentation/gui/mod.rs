@@ -48,6 +48,7 @@ pub fn iniciar_app_tauri(app: Arc<LakehouseApp>) -> Result<(), tauri::Error> {
             seleccionar_documentos,
             seleccionar_directorio,
             ingestar_documento,
+            reintentar_destilacion,
             catalogo_centro,
             integridad_centro
         ])
@@ -128,7 +129,7 @@ async fn seleccionar_documentos(app_handle: tauri::AppHandle) -> Result<Vec<Stri
         .dialog()
         .file()
         .set_title("Documentos a ingerir")
-        .add_filter("Markdown o texto", &EXTENSIONES_INGERIBLES)
+        .add_filter("Markdown, texto o PDF", &EXTENSIONES_INGERIBLES)
         .blocking_pick_files()
         .unwrap_or_default();
     elegidos
@@ -173,6 +174,16 @@ async fn ingestar_documento(
         }
     });
     comandos::ingestar_documento(&app, &ruta, &centro_id, Some(observador)).await
+}
+
+/// Vuelve a destilar un documento provisional desde su copia en `raw_docs/`
+#[tauri::command]
+async fn reintentar_destilacion(
+    app: tauri::State<'_, Arc<LakehouseApp>>,
+    doc_id: String,
+    centro_id: String,
+) -> Result<IngestaDto, String> {
+    comandos::reintentar_destilacion(&app, &doc_id, &centro_id).await
 }
 
 /// Revisiones del catálogo del centro activo (vigentes y derogadas)

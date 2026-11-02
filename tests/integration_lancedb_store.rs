@@ -30,7 +30,7 @@ async fn test_inicializar_tablas_crea_las_6_tablas_en_lancedb() {
         .expect("Inicializar tablas");
 
     let tablas = store.listar_tablas().await.expect("Listar tablas");
-    assert_eq!(tablas.len(), 6);
+    assert_eq!(tablas.len(), 7);
 
     for tabla_esperada in TODAS_LAS_TABLAS {
         assert!(
@@ -49,7 +49,7 @@ async fn test_inicializar_tablas_crea_las_6_tablas_en_lancedb() {
         .inicializar_tablas()
         .await
         .expect("Segunda inicialización idempotente debe ser exitosa");
-    assert_eq!(store.listar_tablas().await.unwrap().len(), 6);
+    assert_eq!(store.listar_tablas().await.unwrap().len(), 7);
 }
 
 #[tokio::test]

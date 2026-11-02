@@ -18,7 +18,7 @@ use lakehouse_rag::domain::errors::DomainError;
 use lakehouse_rag::infrastructure::bootstrap::motores_consulta;
 use lakehouse_rag::infrastructure::embeddings::mock_engine::MockEmbeddingEngine;
 use lakehouse_rag::infrastructure::llm::MockAgentRunner;
-use lakehouse_rag::infrastructure::parsers::markdown_parser::MarkdownParser;
+use lakehouse_rag::infrastructure::parsers::ParserPorFormato;
 use lakehouse_rag::infrastructure::storage::center_registry_json::JsonCenterRegistry;
 use lakehouse_rag::infrastructure::storage::center_workspace_disk::DiskCenterWorkspace;
 use serde_json::json;
@@ -96,7 +96,7 @@ pub fn construir_app(
         registro: Arc::new(JsonCenterRegistry::new(config)),
         espacio: Arc::new(DiskCenterWorkspace::new()),
         proyeccion: motores.proyeccion,
-        parser: Arc::new(MarkdownParser::new()),
+        parser: Arc::new(ParserPorFormato::new()),
         destilador,
         embeddings,
         modelo_embeddings: modelo,

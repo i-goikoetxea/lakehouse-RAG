@@ -8,10 +8,13 @@ use crate::application::dtos::tools::{
 };
 use crate::application::ports::lakehouse_store::{TABLA_CHUNKS_NORMATIVA, TABLA_MATRIZ_OPERATIVA};
 use crate::domain::errors::DomainError;
-use crate::domain::models::operational_matrix::FaseOperativa;
+use crate::domain::models::operational_matrix::{FaseOperativa, OrigenResponsable};
 use crate::domain::services::normalizacion::{
     codigo_canonico, normalizar_token, plegar_mayusculas,
 };
+
+/// Acción sugerida cuando ningún hito de la consulta tiene responsable declarado
+const ACCION_SIN_RESPONSABLE: &str = "Ningún hito de esta consulta tiene responsable declarado. Busca con search_normative_context, cita el párrafo literal y di que no consta responsable. Si la pregunta no trata del responsable, repite con solo_declarados=false.";
 
 /// Filtros ya normalizados (comparación exacta sobre la forma canónica)
 #[derive(Debug, Default)]
@@ -85,6 +88,8 @@ fn fila_salida(fila: &Map<String, Value>) -> Value {
         "objeto_alcance": texto(fila, "objeto_alcance"),
         "rol_ejecutor": texto(fila, "rol_ejecutor"),
         "rol_responsable": texto(fila, "rol_responsable"),
+        "origen_responsable": texto(fila, "origen_responsable"),
+        "vigencia_no_declarada": fila.get("vigencia_no_declarada").and_then(Value::as_bool).unwrap_or(false),
         "registro_codigo": texto_opcional(fila, "registro_codigo"),
         "registro_nombre": texto_opcional(fila, "registro_nombre"),
         "criterio_aceptacion": texto(fila, "criterio_aceptacion"),
@@ -95,10 +100,52 @@ fn fila_salida(fila: &Map<String, Value>) -> Value {
             "doc_id": texto(fila, "doc_id"),
             "revision": texto(fila, "revision"),
             "version_num": entero(fila, "version_num"),
+            "origen_responsable": texto(fila, "origen_responsable"),
             "chunk_origen_id": texto_opcional(fila, "chunk_origen_id"),
             "breadcrumb": texto_opcional(fila, "breadcrumb_jerarquia"),
         },
     })
+}
+
+/// Filas que pasan el filtro de origen y los hitos que deja fuera
+fn separar_por_origen(filas: Vec<Value>, solo_declarados: bool) -> (Vec<Value>, usize) {
+    if !solo_declarados {
+        return (filas, 0);
+    }
+    let total = filas.len();
+    let declaradas: Vec<Value> = filas
+        .into_iter()
+        .filter(tiene_responsable_declarado)
+        .collect();
+    let excluidos = total - declaradas.len();
+    (declaradas, excluidos)
+}
+
+fn tiene_responsable_declarado(fila: &Value) -> bool {
+    fila["origen_responsable"] == OrigenResponsable::Declarado.as_str()
+}
+
+/// Campos que dejan a la vista lo filtrado y qué hacer si no queda ningún responsable declarado
+fn senales_de_origen(filas: &[Value], excluidos: usize, solo_declarados: bool) -> Value {
+    let sin_responsable = !filas.iter().any(tiene_responsable_declarado);
+    let mut senales = json!({
+        "solo_declarados": solo_declarados,
+        "excluidos_no_declarados": excluidos,
+        "sin_responsable_declarado": sin_responsable,
+    });
+    let accion = if sin_responsable {
+        Some(ACCION_SIN_RESPONSABLE.to_string())
+    } else if excluidos > 0 {
+        Some(format!(
+            "{excluidos} hito(s) con responsable INFERIDO o NO_CONSTA quedan fuera. Si la pregunta no trata del responsable, repite con solo_declarados=false: cada fila lleva su origen."
+        ))
+    } else {
+        None
+    };
+    if let Some(accion) = accion {
+        senales["accion_sugerida"] = Value::String(accion);
+    }
+    senales
 }
 
 impl LakehouseToolService {
@@ -111,7 +158,8 @@ impl LakehouseToolService {
         let filtros = FiltrosMatriz::desde(&params)?;
 
         let sql = format!(
-            "SELECT m.hito_id, m.doc_id, m.version_num, m.orden_secuencia, m.fase_operativa, m.objeto_alcance, m.rol_ejecutor, m.rol_responsable, m.registro_codigo, m.registro_nombre, m.criterio_aceptacion, m.condicion_aplicacion, m.nivel_prelacion, m.calidad_extraccion, m.chunk_origen_id, d.revision, c.breadcrumb_jerarquia FROM {} m {} LEFT JOIN {} c ON c.chunk_id = m.chunk_origen_id WHERE {} ORDER BY m.nivel_prelacion ASC, m.doc_id ASC, m.orden_secuencia ASC, m.hito_id ASC",
+            "SELECT m.hito_id, m.doc_id, m.version_num, m.orden_secuencia, m.fase_operativa, m.objeto_alcance, m.rol_ejecutor, m.rol_responsable, m.origen_responsable, m.registro_codigo, m.registro_nombre, m.criterio_aceptacion, m.condicion_aplicacion, m.nivel_prelacion, m.calidad_extraccion, m.chunk_origen_id, d.revision, c.breadcrumb_jerarquia, {} AS vigencia_no_declarada FROM {} m {} LEFT JOIN {} c ON c.chunk_id = m.chunk_origen_id WHERE {} ORDER BY m.nivel_prelacion ASC, m.doc_id ASC, m.orden_secuencia ASC, m.hito_id ASC",
+            contexto.marca_no_declarada("d"),
             contexto.vista(TABLA_MATRIZ_OPERATIVA),
             contexto.union_catalogo("m", "d"),
             contexto.vista(TABLA_CHUNKS_NORMATIVA),
@@ -124,8 +172,10 @@ impl LakehouseToolService {
             .filter(|f| filtros.admite(f))
             .map(fila_salida)
             .collect();
+        let (filas, excluidos) = separar_por_origen(filas, params.solo_declarados);
+        let senales = senales_de_origen(&filas, excluidos, params.solo_declarados);
 
-        Ok(json!({
+        let mut salida = json!({
             "centro_id": contexto.centro.as_str(),
             "fecha_referencia": contexto.fecha_json(),
             "filtros": {
@@ -138,8 +188,12 @@ impl LakehouseToolService {
             },
             "total": filas.len(),
             "filas": filas,
-            "nota": "Cada fila es un hito independiente: no combines el responsable de una fila con el registro de otra. Cita doc_id + revisión e incluye la condicion_aplicacion.",
-        }))
+            "nota": "Cada fila es un hito independiente: no combines el responsable de una fila con el registro de otra. Cita doc_id + revisión e incluye la condicion_aplicacion. origen_responsable: solo DECLARADO es dato del documento; INFERIDO es una deducción y NO_CONSTA significa que no figura, y hay que decirlo.",
+        });
+        if let (Some(destino), Value::Object(campos)) = (salida.as_object_mut(), senales) {
+            destino.extend(campos);
+        }
+        Ok(salida)
     }
 }
 
@@ -163,6 +217,74 @@ mod tests {
             .unwrap()
             .extend(json_params.as_object().unwrap().clone());
         FiltrosMatriz::desde(&serde_json::from_value(base).unwrap()).unwrap()
+    }
+
+    fn salida(origen: &str, responsable: &str) -> Value {
+        json!({ "origen_responsable": origen, "rol_responsable": responsable, "fase_operativa": "CUSTODIA" })
+    }
+
+    #[test]
+    fn test_solo_declarados_excluye_y_cuenta_el_resto() {
+        let filas = vec![
+            salida("DECLARADO", "Jefe"),
+            salida("INFERIDO", "Inspector"),
+            salida("NO_CONSTA", ""),
+        ];
+        let (declaradas, excluidos) = separar_por_origen(filas.clone(), true);
+        assert_eq!(declaradas.len(), 1);
+        assert_eq!(excluidos, 2);
+        let senales = senales_de_origen(&declaradas, excluidos, true);
+        assert_eq!(senales["excluidos_no_declarados"], 2);
+        assert_eq!(senales["sin_responsable_declarado"], false);
+        assert!(
+            senales["accion_sugerida"]
+                .as_str()
+                .unwrap()
+                .contains("solo_declarados")
+        );
+
+        let (todas, excluidos) = separar_por_origen(filas, false);
+        assert_eq!((todas.len(), excluidos), (3, 0));
+        assert_eq!(todas[1]["origen_responsable"], "INFERIDO");
+    }
+
+    #[test]
+    fn test_sin_responsable_declarado_sugiere_buscar_en_la_capa_0() {
+        let (filas, excluidos) = separar_por_origen(vec![salida("INFERIDO", "Inspector")], true);
+        assert!(filas.is_empty());
+        let senales = senales_de_origen(&filas, excluidos, true);
+        assert_eq!(senales["sin_responsable_declarado"], true);
+        assert_eq!(senales["excluidos_no_declarados"], 1);
+        assert!(
+            senales["accion_sugerida"]
+                .as_str()
+                .unwrap()
+                .contains("search_normative_context")
+        );
+
+        let todas = vec![salida("INFERIDO", "Inspector")];
+        assert_eq!(
+            senales_de_origen(&todas, 0, false)["sin_responsable_declarado"],
+            true
+        );
+    }
+
+    #[test]
+    fn test_con_responsable_declarado_y_sin_excluidos_no_hay_accion() {
+        let filas = vec![salida("DECLARADO", "Jefe")];
+        let senales = senales_de_origen(&filas, 0, true);
+        assert_eq!(senales["sin_responsable_declarado"], false);
+        assert!(senales.get("accion_sugerida").is_none());
+    }
+
+    #[test]
+    fn test_solo_declarados_es_el_valor_por_defecto() {
+        let params: QueryOperationalMatrixParams =
+            serde_json::from_value(json!({ "centro_id": "c" })).unwrap();
+        assert!(params.solo_declarados);
+        let params: QueryOperationalMatrixParams =
+            serde_json::from_value(json!({ "centro_id": "c", "solo_declarados": false })).unwrap();
+        assert!(!params.solo_declarados);
     }
 
     #[test]

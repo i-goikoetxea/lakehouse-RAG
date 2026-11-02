@@ -4,13 +4,16 @@
 //!   heredada de sus encabezados ancestros (`PilaEncabezados`, H7 y problema 7).
 //! - Las tablas capturan su título aunque haya una línea en blanco entre ambos y las notas al
 //!   pie multilínea con llamadas `(*)`, `(1)`, `(a)`, `*` o `Nota:` (H8).
+//! - No pierde texto: lo previo al primer encabezado es el preámbulo (nivel 0, código `0.0`), las
+//!   secciones sin texto propio siguen en la lista y el texto de las tablas queda en su sección.
 
 use async_trait::async_trait;
 
 use crate::application::dtos::ingestion::{ParsedDocument, ParsedSection, ParsedTableRaw};
 use crate::application::ports::document_parser::DocumentParserPort;
 use crate::domain::errors::DomainError;
-use crate::domain::models::alcance::PilaEncabezados;
+use crate::domain::models::alcance::{MAX_CARACTERES_TITULO, PilaEncabezados};
+use crate::domain::services::arbol_secciones::{CODIGO_PREAMBULO, TITULO_PREAMBULO};
 
 /// Líneas en blanco que pueden separar una tabla de su título o de sus notas
 const MAX_LINEAS_EN_BLANCO_TOLERADAS: usize = 2;
@@ -39,6 +42,7 @@ impl SeccionAbierta {
             contenido: self.lineas.join("\n").trim().to_string(),
             breadcrumb: self.breadcrumb,
             condicion_aplicacion: self.condicion_aplicacion,
+            ..ParsedSection::default()
         }
     }
 }
@@ -78,13 +82,14 @@ impl MarkdownParser {
         Some((nivel as u8, resto.trim()))
     }
 
-    /// Secciones con breadcrumb y condición heredada; devuelve también el código de la
-    /// sección abierta en cada línea (para ubicar las tablas)
-    fn extraer_secciones(&self, lineas: &[&str]) -> (Vec<ParsedSection>, Vec<Option<String>>) {
+    /// Secciones con breadcrumb y condición heredada, con el preámbulo delante si lo hay;
+    /// devuelve también el código de la sección abierta en cada línea (para ubicar las tablas)
+    fn extraer_secciones(&self, lineas: &[&str]) -> (Vec<ParsedSection>, Vec<String>) {
         let mut secciones = Vec::new();
         let mut seccion_por_linea = Vec::with_capacity(lineas.len());
         let mut pila = PilaEncabezados::default();
         let mut abierta: Option<SeccionAbierta> = None;
+        let mut preambulo: Vec<String> = Vec::new();
 
         for linea in lineas {
             if let Some((nivel, texto)) = Self::interpretar_encabezado(linea) {
@@ -93,23 +98,51 @@ impl MarkdownParser {
                 }
                 pila.apilar(nivel, texto);
                 let (codigo, titulo) = Self::separar_codigo_y_titulo(texto, secciones.len() + 1);
+                // La pila recorta los títulos enormes: el texto íntegro se conserva en la sección
+                let lineas = if texto.chars().count() > MAX_CARACTERES_TITULO {
+                    vec![texto.to_string()]
+                } else {
+                    Vec::new()
+                };
                 abierta = Some(SeccionAbierta {
                     codigo,
                     titulo,
                     nivel,
                     breadcrumb: pila.breadcrumb(),
                     condicion_aplicacion: pila.condicion_heredada(),
-                    lineas: Vec::new(),
+                    lineas,
                 });
             } else if let Some(seccion) = abierta.as_mut() {
                 seccion.lineas.push(linea.to_string());
+            } else {
+                preambulo.push(linea.to_string());
             }
-            seccion_por_linea.push(abierta.as_ref().map(|s| s.codigo.clone()));
+            seccion_por_linea.push(
+                abierta
+                    .as_ref()
+                    .map_or(CODIGO_PREAMBULO, |s| s.codigo.as_str())
+                    .to_string(),
+            );
         }
         if let Some(ultima) = abierta {
             secciones.push(ultima.cerrar());
         }
+        let contenido_preambulo = preambulo.join("\n").trim().to_string();
+        if !contenido_preambulo.is_empty() {
+            secciones.insert(0, Self::seccion_preambulo(contenido_preambulo));
+        }
         (secciones, seccion_por_linea)
+    }
+
+    fn seccion_preambulo(contenido: String) -> ParsedSection {
+        ParsedSection {
+            codigo: CODIGO_PREAMBULO.to_string(),
+            titulo: TITULO_PREAMBULO.to_string(),
+            nivel: 0,
+            contenido,
+            breadcrumb: TITULO_PREAMBULO.to_string(),
+            ..ParsedSection::default()
+        }
     }
 
     fn separar_codigo_y_titulo(texto: &str, indice_fallback: usize) -> (String, String) {
@@ -230,11 +263,7 @@ impl MarkdownParser {
     }
 
     /// Extrae tablas crudas en formato Markdown (| col1 | col2 |)
-    fn extraer_tablas(
-        &self,
-        lineas: &[&str],
-        seccion_por_linea: &[Option<String>],
-    ) -> Vec<ParsedTableRaw> {
+    fn extraer_tablas(&self, lineas: &[&str], seccion_por_linea: &[String]) -> Vec<ParsedTableRaw> {
         let mut tablas = Vec::new();
         let mut i = 0;
 
@@ -267,7 +296,7 @@ impl MarkdownParser {
                 encabezados: Self::parse_fila_tabla(bloque[0]),
                 filas,
                 notas,
-                seccion_codigo: seccion_por_linea.get(inicio).cloned().flatten(),
+                seccion_codigo: seccion_por_linea.get(inicio).cloned(),
             });
         }
         tablas
@@ -308,7 +337,9 @@ impl DocumentParserPort for MarkdownParser {
             ));
         }
 
-        let normalizado = contenido.replace("\r\n", "\n");
+        let normalizado = contenido
+            .trim_start_matches('\u{feff}')
+            .replace("\r\n", "\n");
         let lineas: Vec<&str> = normalizado.lines().collect();
 
         let titulo = self.extraer_titulo_principal(&lineas, nombre_archivo);
@@ -321,6 +352,8 @@ impl DocumentParserPort for MarkdownParser {
             secciones,
             tablas,
             contenido_completo: normalizado,
+            avisos_extraccion: Vec::new(),
+            requiere_ocr: false,
         })
     }
 }
@@ -458,6 +491,36 @@ Verificar presión manométrica en línea troncal.
         let parsed = parsear(doc_md).await;
         assert_eq!(parsed.tablas[0].titulo, "Tabla 1");
         assert_eq!(parsed.tablas[0].notas, None);
+    }
+
+    #[tokio::test]
+    async fn test_texto_previo_al_primer_encabezado_es_el_preambulo() {
+        let parsed =
+            parsear("Texto inicial.\n\n| A | B |\n| --- | --- |\n| 1 | 2 |\n\n# Título\nCuerpo.\n")
+                .await;
+        let preambulo = &parsed.secciones[0];
+        assert_eq!(preambulo.codigo, "0.0");
+        assert_eq!(preambulo.nivel, 0);
+        assert_eq!(preambulo.titulo, "Preámbulo / Introducción");
+        assert!(preambulo.contenido.contains("Texto inicial."));
+        assert!(preambulo.contenido.contains("| 1 | 2 |"));
+        assert_eq!(parsed.tablas[0].seccion_codigo.as_deref(), Some("0.0"));
+        assert_eq!(parsed.secciones.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_secciones_sin_texto_siguen_y_el_bom_no_crea_preambulo() {
+        let parsed = parsear("\u{feff}# Uno\n## Dos\n").await;
+        assert_eq!(parsed.titulo, "Uno");
+        assert_eq!(parsed.secciones.len(), 2);
+        assert!(parsed.secciones.iter().all(|s| s.contenido.is_empty()));
+    }
+
+    #[tokio::test]
+    async fn test_titulo_enorme_conserva_su_texto_en_la_seccion() {
+        let titulo = format!("{} fin", "palabra ".repeat(200));
+        let parsed = parsear(&format!("# {titulo}\n")).await;
+        assert!(parsed.secciones[0].contenido.ends_with("fin"));
     }
 
     #[tokio::test]

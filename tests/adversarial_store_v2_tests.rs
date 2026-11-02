@@ -76,17 +76,18 @@ async fn adv_doc_id_sin_alfanumericos_se_rechaza_antes_de_escribir() {
     let (_dir, store) = store_temporal().await;
     let distiller = MockDistiller::new();
     let mut paquete = distiller_paquete_v3();
-    // Fase 11: el doc_id libre se canonicaliza (`PO-ALM-03'B` → `PO-ALM-03-B`); solo uno sin
-    // ningún alfanumérico queda vacío y se rechaza.
+    // El doc_id libre se canonicaliza (`PO-ALM-03'B` → `PO-ALM-03-B`); uno sin ningún alfanumérico
+    // no sirve como código y el documento se indexa con identidad provisional (STAIR Fase 2).
     paquete.catalogo.doc_id = "' ; -- '".to_string();
     distiller.registrar_respuesta(ARCHIVO_V3, paquete);
 
-    let error = servicio(Arc::new(distiller), store.clone())
+    let informe = servicio(Arc::new(distiller), store.clone())
         .ingestar_documento(&centro(), ARCHIVO_V3, CONTENIDO_V3)
         .await
-        .unwrap_err();
-    assert!(matches!(error, DomainError::InvalidDocId(_)), "{error:?}");
-    assert_eq!(total_fisico(&store).await, 0, "no debe quedar ninguna fila");
+        .unwrap();
+    assert_eq!(informe.estado_contenido, "PARCIAL_UNIVERSAL");
+    assert_eq!(informe.total_tuplas, 0);
+    lakehouse_rag::domain::models::document::DocId::new(&informe.doc_id).unwrap();
 
     // Filtros hostiles en hash: se rechazan antes de llegar a LanceDB
     let hostil = format!("{}' OR '1'='1", &HASH_A[..50]);

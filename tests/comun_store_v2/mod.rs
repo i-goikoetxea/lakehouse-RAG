@@ -10,14 +10,17 @@ use lakehouse_rag::application::dtos::ingestion::{
     HitoDestilado, LimitesDestilados, TablaDestilada,
 };
 use lakehouse_rag::application::dtos::lakehouse_filas::{
-    ClaveDocumental, EjeTabla, FilaArista, FilaCatalogo, FilaCelda, FilaChunk, FilaHito, FilaTabla,
-    LimitesEje, LoteIngesta, TipoEjeTabla, TipoNodoGrafo,
+    ClaveDocumental, EjeTabla, FilaArista, FilaCatalogo, FilaCelda, FilaChunk, FilaHito,
+    FilaIndice, FilaTabla, LimitesEje, LoteIngesta, TipoEjeTabla, TipoNodoGrafo,
 };
 use lakehouse_rag::application::ports::lakehouse_store::{LakehouseStorePort, ResumenConfirmacion};
 use lakehouse_rag::application::ports::llm_distiller::LlmDistillerPort;
 use lakehouse_rag::application::use_cases::document_ingestion_service::DocumentIngestionService;
 use lakehouse_rag::domain::models::center::CenterId;
 use lakehouse_rag::domain::models::document::{DocId, TipoDocumento};
+use lakehouse_rag::domain::models::estructura_documental::{
+    EstadoContenido, NivelJerarquico, NodoId, TipoBloque,
+};
 use lakehouse_rag::domain::models::identificadores::{IngestId, TipoEntidad, id_versionado};
 use lakehouse_rag::domain::models::operational_matrix::{CalidadExtraccion, FaseOperativa};
 use lakehouse_rag::domain::models::reference_graph::TipoRelacionNormativa;
@@ -35,7 +38,7 @@ pub const HASH_B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 pub const HASH_C: &str = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
 
 /// Filas que `revision` escribe en cada tabla, en el orden de `TODAS_LAS_TABLAS`
-pub const FILAS_POR_REVISION: [usize; 6] = [1, 2, 2, 1, 2, 2];
+pub const FILAS_POR_REVISION: [usize; 7] = [1, 2, 2, 1, 2, 2, 2];
 
 pub const ARCHIVO_V3: &str = "po_alm_03_rev03.md";
 pub const ARCHIVO_V4: &str = "po_alm_03_rev04.md";
@@ -83,14 +86,25 @@ pub fn fila_catalogo(doc_id: &str, version: u32, vigor: NaiveDate, hash: &str) -
         revision: format!("Rev. {version:02}"),
         vigencia: VentanaVigencia::new(vigor, None).unwrap(),
         hash_sha256: hash.to_string(),
+        doc_id_provisional: None,
     }
+}
+
+/// `nodo_id` de la sección `idx` de un documento
+pub fn nodo_de(doc_id: &str, idx: usize) -> String {
+    format!("{doc_id}#sec-{idx}")
 }
 
 pub fn fila_chunk(doc_id: &str, version: u32, idx: usize) -> FilaChunk {
     let c = clave(doc_id, version);
     FilaChunk {
+        pagina_inicio: None,
+        pagina_fin: None,
         chunk_id: id_versionado(&c.doc_id, version, TipoEntidad::Chunk, idx),
         nivel_prelacion: TipoDocumento::ProcedimientoObra.nivel_prelacion(),
+        nodo_id: NodoId::new(nodo_de(doc_id, idx)).unwrap(),
+        tipo_bloque: TipoBloque::Narrativa,
+        estado_contenido: EstadoContenido::Completo,
         breadcrumb_jerarquia: format!("{doc_id} > Apartado {idx}"),
         condicion_aplicacion: (idx % 2 == 1).then(|| "T ambiente < 0 °C".to_string()),
         texto_contenido: format!("Texto del apartado {idx} de la versión {version}"),
@@ -101,7 +115,25 @@ pub fn fila_chunk(doc_id: &str, version: u32, idx: usize) -> FilaChunk {
     }
 }
 
-fn fila_hito(doc_id: &str, version: u32, idx: usize, fase: FaseOperativa) -> FilaHito {
+/// Nodo raíz de nivel 1 de la tabla 07, que corresponde a los chunks de la sección `idx`
+pub fn fila_indice(doc_id: &str, version: u32, idx: usize) -> FilaIndice {
+    FilaIndice {
+        nodo_id: NodoId::new(nodo_de(doc_id, idx)).unwrap(),
+        clave: clave(doc_id, version),
+        estado_contenido: EstadoContenido::Completo,
+        tipo_nodo: Default::default(),
+        nivel_jerarquico: NivelJerarquico::new(1).unwrap(),
+        codigo_seccion: idx.to_string(),
+        titulo_seccion: format!("Apartado {idx}"),
+        nodo_padre_id: None,
+        ruta_linaje: format!("/{idx}"),
+        condiciones_alcance: None,
+        resumen_seccion: format!("Apartado {idx}. Resumen extractivo."),
+        vector_seccion: vector(idx),
+    }
+}
+
+pub fn fila_hito(doc_id: &str, version: u32, idx: usize, fase: FaseOperativa) -> FilaHito {
     let c = clave(doc_id, version);
     FilaHito {
         hito_id: id_versionado(&c.doc_id, version, TipoEntidad::Hito, idx),
@@ -110,6 +142,8 @@ fn fila_hito(doc_id: &str, version: u32, idx: usize, fase: FaseOperativa) -> Fil
         objeto_alcance: "Tubería de acero al carbono".to_string(),
         rol_ejecutor: "Auxiliar de Almacén".to_string(),
         rol_responsable: "Jefe de Producción".to_string(),
+        origen_responsable:
+            lakehouse_rag::domain::models::operational_matrix::OrigenResponsable::Declarado,
         registro_codigo: Some(format!("FOR-ALM-0{}", idx + 1)),
         registro_nombre: None,
         criterio_aceptacion: "Sin daños visibles".to_string(),
@@ -189,7 +223,7 @@ fn fila_arista(
     }
 }
 
-/// Revisión completa: 1 / 2 / 2 / 1 / 2 / 2 filas (ver `FILAS_POR_REVISION`)
+/// Revisión completa: 1 / 2 / 2 / 1 / 2 / 2 / 2 filas (ver `FILAS_POR_REVISION`)
 pub fn revision(doc_id: &str, version: u32, vigor: NaiveDate, hash: &str) -> Vec<LoteIngesta> {
     vec![
         LoteIngesta::Catalogo(vec![fila_catalogo(doc_id, version, vigor, hash)]),
@@ -221,6 +255,10 @@ pub fn revision(doc_id: &str, version: u32, vigor: NaiveDate, hash: &str) -> Vec
                 TipoRelacionNormativa::ExigeLlenarRegistro,
                 "FOR-ALM-02",
             ),
+        ]),
+        LoteIngesta::Indice(vec![
+            fila_indice(doc_id, version, 0),
+            fila_indice(doc_id, version, 1),
         ]),
     ]
 }
@@ -269,6 +307,7 @@ pub fn hito_destilado(
         objeto_alcance: "Tubería de acero al carbono".to_string(),
         rol_ejecutor: ejecutor.to_string(),
         rol_responsable: responsable.to_string(),
+        origen_responsable: "INFERIDO".to_string(),
         registro_codigo: registro.map(str::to_string),
         registro_nombre: registro.map(|_| "Registro de la fase".to_string()),
         criterio_aceptacion: "Sin daños".to_string(),
@@ -317,7 +356,7 @@ pub fn catalogo_destilado(version: i64, fecha_vigor: &str) -> CatalogoDestilado 
         tipo_documento: "PROCEDIMIENTO_OBRA".to_string(),
         revision: format!("Rev. {version:02}"),
         version_num: version,
-        fecha_vigor: fecha_vigor.to_string(),
+        fecha_vigor: Some(fecha_vigor.to_string()),
         emisor: "Calidad".to_string(),
     }
 }
