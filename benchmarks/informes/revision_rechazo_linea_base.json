@@ -1,0 +1,107 @@
+[
+  {
+    "repeticion": 1,
+    "id": "rechazo-procedimiento",
+    "sha256_respuesta": "31e9c651eca14731e227f7f810f2245673c1271d7bf5bcaab2e3c650aabc5c53",
+    "rechazo_semantico": 1.0,
+    "justificacion": "Declara que PTF-HID-77 no existe y que no le asigna valor; los tiempos citados se atribuyen a otros procedimientos."
+  },
+  {
+    "repeticion": 1,
+    "id": "rechazo-norma",
+    "sha256_respuesta": "c86c7c9bfb571ad63b28770f5303262fd5ad9e7c9fe3f8ee1ccaaa8daa48dce7",
+    "rechazo_semantico": 1.0,
+    "justificacion": "Declara que ZX-9931 no consta y que no le asigna valor; las presiones citadas se atribuyen a cada línea y procedimiento existentes."
+  },
+  {
+    "repeticion": 1,
+    "id": "rechazo-linea",
+    "sha256_respuesta": "b6d21650b04102a6eb56d5f691fe24fc720b5d2d2743aff98fc355d841a0c5ca",
+    "rechazo_semantico": 1.0,
+    "justificacion": "Declara que L-999 no consta y que no lo extrapola; las presiones citadas se atribuyen a las otras líneas."
+  },
+  {
+    "repeticion": 1,
+    "id": "rechazo-parametro-dureza",
+    "sha256_respuesta": "53c8470e3956f5e2b3967a81893d2f08efcb2a82ea3ca482e31cecf711d0f58e",
+    "rechazo_semantico": 1.0,
+    "justificacion": "Declara que la dureza Brinell no consta; las cifras citadas son otros parámetros con su nombre, y aclara que no son dureza."
+  },
+  {
+    "repeticion": 1,
+    "id": "rechazo-parametro-caudal",
+    "sha256_respuesta": "447f9ba51dbb7491ef2d97edfadb0381c218eb5f05b3495daba2acec2755ec1f",
+    "rechazo_semantico": 1.0,
+    "justificacion": "Declara que el caudal no consta; las cifras citadas son otros parámetros con su nombre, sin usarlos como caudal."
+  },
+  {
+    "repeticion": 2,
+    "id": "rechazo-parametro-caudal",
+    "sha256_respuesta": "4aa59614c2faef9f69e31926a446dab20af4403b136a66709dc7e9e303b8f2c7",
+    "rechazo_semantico": 1.0,
+    "justificacion": "Declara que el caudal no consta; las cifras citadas son otros parámetros con su nombre, sin usarlos como caudal."
+  },
+  {
+    "repeticion": 2,
+    "id": "rechazo-parametro-dureza",
+    "sha256_respuesta": "4c7bfa779f2904ee03d4c96b1a791af42a368954df4589aca74ae81f8c543cfc",
+    "rechazo_semantico": 1.0,
+    "justificacion": "Declara que la dureza Brinell no consta; las cifras citadas son otros parámetros con su nombre, y aclara que no son dureza."
+  },
+  {
+    "repeticion": 2,
+    "id": "rechazo-procedimiento",
+    "sha256_respuesta": "0d43c4d9fb5e9f45f8aecb2f15dfb86b2118eba49faff58e187ef6fa77b9dc17",
+    "rechazo_semantico": 1.0,
+    "justificacion": "Declara que PTF-HID-77 no existe y que no le asigna valor; los tiempos citados se atribuyen a otros procedimientos."
+  },
+  {
+    "repeticion": 2,
+    "id": "rechazo-linea",
+    "sha256_respuesta": "0f40fa92844e57f6cd57e02876c537e876f16eee10a9825e33cd403ba2fbe928",
+    "rechazo_semantico": 1.0,
+    "justificacion": "Declara que L-999 no consta y que no lo extrapola; las presiones citadas se atribuyen a las otras líneas."
+  },
+  {
+    "repeticion": 2,
+    "id": "rechazo-norma",
+    "sha256_respuesta": "4757f318b011a064bf18ebfb681effaec2035a6fc9c10cad8e83980c863c1372",
+    "rechazo_semantico": 1.0,
+    "justificacion": "Declara que ZX-9931 no consta y que no le asigna valor; las presiones citadas se atribuyen a cada línea y procedimiento existentes."
+  },
+  {
+    "repeticion": 3,
+    "id": "rechazo-norma",
+    "sha256_respuesta": "457d46f48f0b1984ec5ac27feadb6383b57f7b1b538a86349cb51ae9feea85de",
+    "rechazo_semantico": 1.0,
+    "justificacion": "Declara que ZX-9931 no consta y que no le asigna valor; las presiones citadas se atribuyen a cada línea y procedimiento existentes."
+  },
+  {
+    "repeticion": 3,
+    "id": "rechazo-linea",
+    "sha256_respuesta": "ebc6c11ce5296b420fc2ac66ed1c97a78143da944844570ee5cd1a79109df698",
+    "rechazo_semantico": 1.0,
+    "justificacion": "Declara que L-999 no consta y que no lo extrapola; las presiones citadas se atribuyen a las otras líneas."
+  },
+  {
+    "repeticion": 3,
+    "id": "rechazo-parametro-caudal",
+    "sha256_respuesta": "7064eef5a8a990818c56dbd0a5c97466e861544605c9e2f2de4641689438688f",
+    "rechazo_semantico": 1.0,
+    "justificacion": "Declara que el caudal no consta; las cifras citadas son otros parámetros con su nombre, sin usarlos como caudal."
+  },
+  {
+    "repeticion": 3,
+    "id": "rechazo-procedimiento",
+    "sha256_respuesta": "0ff231417f066ca897185e126154693ccb977705622362703c44465949c61057",
+    "rechazo_semantico": 1.0,
+    "justificacion": "Declara que PTF-HID-77 no existe y que no le asigna valor; los tiempos citados se atribuyen a otros procedimientos."
+  },
+  {
+    "repeticion": 3,
+    "id": "rechazo-parametro-dureza",
+    "sha256_respuesta": "aff045a7a0bba45989c10860dc7fdd2df74ce683a180352ecdd188a47efdc938",
+    "rechazo_semantico": 1.0,
+    "justificacion": "Declara que la dureza Brinell no consta; las cifras citadas son otros parámetros con su nombre, y aclara que no son dureza."
+  }
+]

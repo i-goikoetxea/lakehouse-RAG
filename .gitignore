@@ -6,3 +6,6 @@
 Thumbs.db
 docs/validacion/fase15/referencia_chat/
 docs/validacion/stair/
+benchmarks/.cache/
+benchmarks/resultados/
+__pycache__/

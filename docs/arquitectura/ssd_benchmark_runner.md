@@ -72,7 +72,9 @@ Métricas: `recall_aguja` (valor correcto en la respuesta), `pagina_exacta` y `s
 
 ### 4.3 RGB industrial
 - **Ruido:** el dato en un documento más 5 distractores que usan la misma terminología con otros valores.
-- **Rechazo:** preguntas por normas, códigos o valores inexistentes. Vale 1.0 con abstención explícita y sin cifras nuevas; 0.0 si aparece cualquier cifra que no esté en la pregunta.
+- **Rechazo:** preguntas por normas, códigos o valores inexistentes. Se mide con dos notas separadas:
+  - `rechazo_estricto`: vale 1.0 con abstención explícita y sin cifras nuevas; 0.0 si aparece cualquier cifra que no esté en la pregunta. Desde el 2026-11-03 no cuentan los dígitos de identificadores ni el recuento «0 resultados» (§5.2).
+  - `rechazo_semantico`: vale 1.0 si se abstiene y no atribuye ningún valor a la entidad inexistente, aunque cite cifras claramente atribuidas a otras entidades. Las reglas no pueden resolver la atribución: solo deciden 1.0 (abstención sin cifras nuevas) y 0.0 (sin abstención). Una abstención con cifras queda pendiente de revisión manual.
 - **Integración:** el dato en una sección y su condición en otra. Solo acierta si aparecen ambos.
 
 ### 4.4 Ciclo de vida
@@ -85,6 +87,52 @@ La app viaja en el tiempo con `fecha_referencia`, así que se prueban dos formas
 ## 5. Puntuación e informe
 
 Reglas deterministas en `evaluacion/puntuar.py`: normalización numérica y de unidades, valores esperados y prohibidos, y locuciones de abstención. Sin LLM juez, porque añadiría otra fuente de ruido. Se revisan a mano las respuestas clasificadas como dudosas.
+
+La precisión global usa `rechazo_estricto`. `rechazo_semantico` no da nota mientras tenga pendientes, y `rechazo_semantico_pendientes` indica cuántas quedan. `evaluacion/repuntuar.py` las resuelve sobre un informe guardado, sin llamar a Claude, con una revisión manual atada al hash de cada respuesta. Con `--valores` repuntúa también las demás categorías con las reglas actuales. Una revisión manual de una respuesta que las reglas ya resuelven se acepta si coincide con ellas (`revision_manual_concordante`) y se rechaza si las contradice.
+
+### 5.1 Valores prohibidos mencionados (desde el 2026-11-03)
+
+Un valor prohibido (de otra revisión, de otra celda, de otra entidad) **solo es fallo si la respuesta lo da como respuesta**. Mencionarlo atribuido a otra cosa no lo es, siempre que el esperado aparezca como respuesta. Motivo: el aviso `ejes_ambiguos` y la regla 13 de la app piden explicar el orden de ejes descartado, y la respuesta histórica suele citar el valor vigente. Con la regla anterior, esas respuestas correctas valían 0.
+
+**Unidades de atribución.** La respuesta se parte en líneas y cada línea en frases (un `.`, `!` o `?` seguido de espacio y mayúscula). En una tabla Markdown, cada celda es una unidad, junto con la cabecera de su columna y la primera celda de su fila.
+
+**Una mención está atribuida** si se cumple una de estas dos condiciones:
+1. **Descarte en su línea:** `descart…`, `invert…`, `invirt…`, `inverso/a`, `al revés`, `no es/son válido(s)`, `no es/son aplicable(s)`, `no aplica(n)`, `no corresponde(n)`.
+2. **Otra revisión en su frase:** la frase cita una revisión distinta de la esperada, y no la esperada. Si la frase no cita ninguna, hereda las citas de la frase anterior de la misma línea («La Rev. 01 la sustituye. En esa revisión fija 85 °C»). No cuentan como cita «no el/la de la Rev. NN», «sustituye a la Rev. NN» ni «reemplaza a la Rev. NN». Solo se aplica si la consulta espera una revisión, es decir, en ciclo de vida.
+
+**Presentar como respuesta:** la frase dice `respuesta`, `valor pedido/solicitado/correcto/buscado/consultado`, `el valor es` o `valor:`. En las consultas `vigente`, también `vigente`, `en vigor`, `rige`, `actual(mente)` u `hoy`, salvo en forma negada (`no vigente`, `ya no está vigente`, `no rige`). En las históricas no cuentan, porque el prohibido es justamente el vigente.
+
+**Veredicto**, del peor estado al mejor:
+
+| Situación | Nota | Clasificación |
+| :--- | :--- | :--- |
+| Alguna mención sin atribución (también la negación simple: «Es 72, no 85») | 0.0 | `valor_prohibido`, dudosa si están los esperados |
+| Falta un esperado | 0.0 | `valor_ausente` o `abstencion` |
+| Mención ambigua: atribuida y presentada como respuesta, en la misma frase que un esperado numérico, o con la revisión esperada y otra en la misma frase | 0.0 | `mencion_dudosa`, siempre dudosa |
+| El esperado solo aparece junto a un prohibido o en una línea de descarte | 0.0 | `mencion_dudosa`, siempre dudosa |
+| Todas las menciones atribuidas y cada esperado dado como respuesta | 1.0 | `acierto_con_mencion`, con `Mención atribuida: …` en los motivos |
+
+Ante la duda la regla da 0 y marca la respuesta para revisión manual; nunca da un acierto automático.
+
+**Límites conocidos:**
+- Una línea con un descarte atribuye todas sus menciones, aunque se descarte otra cosa. Solo lo evita una marca de respuesta en la misma frase.
+- Basta citar otra revisión para atribuir. En una pregunta histórica, «Consultada la Rev. 01, la temperatura es 85 °C» se toma por atribuida aunque dé el valor equivocado; solo la salva el requisito de que el esperado aparezca como respuesta en otra frase. La herencia solo cruza frases dentro de una línea: una tabla o un título no se heredan.
+- Un esperado con el valor y la unidad en celdas distintas no se reconoce como respuesta, y la consulta queda dudosa.
+- Las marcas son en español y no cubren paráfrasis («ese dato es de la versión nueva»). Una mención así cuenta como no atribuida, que es el lado seguro.
+- `vigente` y `hoy` en una consulta `vigente` hacen dudosa también una frase correcta como «La Rev. 00, vigente hasta 2026, fijaba 6,5 bar».
+
+### 5.2 Identificadores en `rechazo_estricto` (desde el 2026-11-03)
+
+Antes contaba cualquier dígito, así que el nombre del centro (`bench-rgb-industrial-r1`), el modo `EXACT_BM25` o «devolvió 0 resultados» daban 0 a una abstención sin ningún valor. Ahora, solo para esta métrica, se ignoran los dígitos de:
+
+1. **Códigos con separador:** una palabra que empieza por letra y contiene un dígito y algún `-`, `_`, `@` o `#` (`PTF-HID-10`, `L-104`, `PTF-HID-10#sec-2`).
+2. **Citas de revisión:** `Rev. 02`, `revisión n.º 3`.
+3. **Citas de capa:** `Capa 0`, `Capas 0 y 2`, solo con una cifra y sin unidad detrás (`Capa 2 mm` cuenta).
+4. **Recuento de ausencia:** `0 resultados`, `0 coincidencias`, `0 filas`, `0 fragmentos`, `0 documentos`, `0 referencias`. Solo el cero.
+
+Todo lo demás sigue contando: cualquier valor con o sin unidad, también dentro de comillas invertidas o en una tabla, las fechas, los apartados y páginas («apartados 1 y 2»), el nivel de prelación, un recuento distinto de cero y un código sin separador (`M12`). La métrica sigue castigando que se ofrezca un valor y no decide a quién se atribuye: eso sigue siendo cosa de `rechazo_semantico`.
+
+**Límite conocido:** un valor escrito como código con guion (`DN-50`, `HB-200`) se ignora.
 
 Salida: `benchmark_report_<TIMESTAMP>.json` y `.md`, con una sección por pista:
 
@@ -100,7 +148,9 @@ Salida: `benchmark_report_<TIMESTAMP>.json` y `.md`, con una sección por pista:
   "precision_global": { "media": 0.0, "min": 0.0, "max": 0.0 },
   "metricas": {
     "robustez_ruido": 0.0,
-    "rechazo_negativo": 0.0,
+    "rechazo_estricto": 0.0,
+    "rechazo_semantico": null,
+    "rechazo_semantico_pendientes": 0,
     "exactitud_tabular": 0.0,
     "latencia_respuesta_ms_media": 0,
     "latencia_recuperacion_ms_media": 0
