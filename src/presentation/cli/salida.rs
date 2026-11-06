@@ -168,6 +168,10 @@ pub fn respuesta_json(respuesta: &RespuestaLakehouse) -> Value {
             "es_error": h.es_error,
             "resultado": h.resultado,
         })).collect::<Vec<_>>(),
+        "arnes": respuesta.arnes.iter().map(|i| json!({
+            "etapa": i.etapa,
+            "motivo": i.motivo,
+        })).collect::<Vec<_>>(),
     })
 }
 
@@ -282,7 +286,8 @@ pub fn error_json(mensaje: &str) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::application::use_cases::lakehouse_app::UsoHerramienta;
+    use crate::application::dtos::agent::EtapaArnes;
+    use crate::application::use_cases::lakehouse_app::{IntervencionArnes, UsoHerramienta};
 
     #[test]
     fn test_respuesta_legible_lista_herramientas_con_extracto() {
@@ -296,6 +301,10 @@ mod tests {
                 es_error: false,
                 resultado: json!([{ "texto": "x".repeat(1000) }]),
             }],
+            arnes: vec![IntervencionArnes {
+                etapa: EtapaArnes::SalidaSegura,
+                motivo: "cifra sin anclar".into(),
+            }],
         };
         let texto = respuesta_legible(&respuesta);
         assert!(texto.starts_with("Jefe de Producción"));
@@ -307,6 +316,8 @@ mod tests {
             "query_operational_matrix"
         );
         assert_eq!(json["ok"], true);
+        assert_eq!(json["arnes"][0]["etapa"], "salida_segura");
+        assert_eq!(json["arnes"][0]["motivo"], "cifra sin anclar");
     }
 
     #[test]

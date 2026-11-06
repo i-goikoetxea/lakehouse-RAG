@@ -45,7 +45,7 @@ Valores: `PREAMBULO`, `NARRATIVA`, `DEFINICION`, `ALCANCE`, `PROCEDIMIENTO`.
 | :--- | :--- |
 | Búsqueda | Índice híbrido en memoria (coseno + BM25 + RRF), sin índices nativos de LanceDB (IVF-PQ/FTS). |
 | Resumen ToC | Extractivo y determinista: título + 2 primeras frases, máximo 250 caracteres. Sin LLM. |
-| Chunking | Una sección de hasta 600 tokens es un único chunk. Por encima, ventana de 512 tokens con solapamiento de 64. |
+| Chunking | Una sección de hasta 512 tokens estimados es un único chunk. Por encima, ventana de 512 tokens con solapamiento de 64. El umbral bajó de 600 a 512 en la sesión Umbral 512 (§10). |
 | Preámbulo | `nodo_id = <doc_id>#sec-preambulo`, `codigo_seccion = "0.0"`, `titulo_seccion = "Preámbulo / Introducción"`, `ruta_linaje = "/0"`, nivel 0. |
 | Vector de sección | Embedding de `titulo_seccion + " " + resumen_seccion`. |
 | PDF | `lopdf` (`/Outlines`) y `pdf-extract` (texto); detalle en §5. Sin OCR: menos de 50 caracteres por página marca `REQUIERE_OCR`. |
@@ -115,8 +115,8 @@ Se destila **antes** de escribir, porque el `doc_id` canónico depende de Claude
 ### Tokens y truncado del modelo
 - **Estimación determinista** (`domain/services/fragmentacion.rs`): 1 token por signo o ideograma y 1 por cada 4 caracteres alfanuméricos.
 - **No se usa el tokenizer de E5 para cortar:** exigiría cargar un modelo de 2,2 GB en una capa pura y haría depender los cortes del modelo activo.
-- **Hallazgo:** fastembed 4.9.1 trunca en silencio a 512 tokens y E5 no admite más. Por eso una sección de 513 a 600 tokens, que el contrato deja en un chunk, y una ventana de 512 con `passage: `, breadcrumb y condición pueden exceder el límite. El texto queda íntegro en 02; el vector solo representa el inicio. En las ventanas, el solapamiento de 64 cubre la cola salvo con breadcrumbs muy largos.
-- **Medida:** `EmbeddingEnginePort::contar_truncados` usa el tokenizer real después de vectorizar, y el informe avisa si hay truncado. **Pendiente de la Fase 5:** medir con el modelo real si hace falta bajar los umbrales, con el test `#[ignore]` de `fastembed_engine.rs`.
+- **Hallazgo:** fastembed 4.9.1 trunca en silencio a 512 tokens y E5 no admite más. Con el umbral anterior de 600, una sección de 513 a 600 tokens quedaba en un chunk y podía exceder el límite. Ahora el umbral coincide con la ventana (§10). Un chunk de 512 con `passage: `, breadcrumb y condición sigue pudiendo exceder el límite si el contexto es muy largo o el texto no tiene espacios. El texto queda íntegro en 02; el vector solo representa el inicio. En las ventanas, el solapamiento de 64 cubre la cola salvo en la última.
+- **Medida:** `EmbeddingEnginePort::contar_truncados` usa el tokenizer real después de vectorizar, y el informe avisa si hay truncado. Medido en la Fase 5 y en la sesión Umbral 512 (§10).
 
 ### Reintento (`reintentar_destilacion`)
 Caso de uso y método de `LakehouseApp`, que recibe la ruta del archivo. Es idempotente: sobre un documento definitivo devuelve `ya_ingerido` sin llamar a Claude.
@@ -227,7 +227,7 @@ El system prompt añade los 4 casos, citar sección y página, y no decir que no
 Informe completo: `docs/validacion/stair/aceptacion_stair.md`.
 
 - **Enrutamiento real:** matriz E2E, 4/4 en 3 ejecuciones.
-- **`contar_truncados`:** medido. Sin recorte en el PDF real ni en los fixtures. **Propuesta no aplicada:** bajar el umbral de chunk único de 600 a 512 tras medir con un documento largo.
+- **`contar_truncados`:** medido. Sin recorte en el PDF real ni en los fixtures. La propuesta de bajar el umbral de chunk único de 600 a 512 se aplicó después (§10).
 - **Límite del subárbol:** se mantiene en 40.000. **Corrección del contrato de §6:** los metadatos que consumen el límite son toda la sección serializada, no solo título y condición. El primer texto avanza al menos 1/4 del límite. El escapado JSON del texto no se descuenta, así que el límite es aproximado.
 - **07 fuera del índice semántico (§6):** no se detectó ninguna carencia de recuperación.
 - **GUI:** verificada en ventana por DevTools. Faltan el diálogo nativo y el arrastre desde el Explorador.
@@ -338,3 +338,39 @@ Autorizados por el usuario con alcance cerrado. `VERSION_ESQUEMA_CENTRO` pasa a 
 - `ParsedSection::saltos_pagina` guarda dónde empieza cada página. `fragmentar_con_posiciones` devuelve la posición de cada fragmento, y `pagina_inicio` y `pagina_fin` de 02 salen de ambos. Un chunk a caballo cita las dos páginas.
 - Markdown sigue con `NULL`. Un título sin texto o el respaldo de un PDF sin líneas heredan el rango de la sección.
 - El subárbol da el rango de la menor a la mayor página de sus chunks.
+
+## 10. Umbral de chunk único a 512 (2026-11-03)
+
+Aprobado por el usuario. `UMBRAL_CHUNK_UNICO` vale `TOKENS_VENTANA` (512). La ventana (512) y el solapamiento (64) no cambian, y tampoco el esquema: `VERSION_ESQUEMA_CENTRO` sigue en 5.
+
+### Medición
+Documento Markdown sintético con 6 niveles de títulos largos, hojas de 400 a 700 tokens estimados, en prosa y con cifras y códigos (`tests/medicion_truncado_sintetico.rs`, `#[ignore]`). Se usó el tokenizer real de E5 con `contar_truncados`, sin Claude.
+
+| | Umbral 600 | Umbral 512 |
+| :--- | ---: | ---: |
+| Chunks | 34 | 43 |
+| Truncados (`passage: ` + breadcrumb + condición + texto) | 5 | 0 |
+| Truncados (solo el texto) | 0 | 0 |
+| Máximo vectorizable, en tokens estimados | 731 | 643 |
+
+- Los 5 truncados eran chunks únicos de 580 a 600 tokens con un breadcrumb de unos 129 tokens estimados.
+- Cuántos tokens estimados caben en los 512 reales:
+
+| Tipo de texto | Tokens estimados en el límite real |
+| :--- | ---: |
+| Prosa | 699 |
+| Prosa con cifras y códigos | 656 |
+| Ideogramas | 812 |
+| Texto sin espacios | 380 |
+
+### Presupuesto de las ventanas: sin reserva
+No se descuenta el contexto (`passage: `, breadcrumb y condición) de la ventana. Motivo:
+- En texto con espacios, la estimación sobrecuenta. Un chunk de 512 admite un contexto de unos 144 tokens estimados con cifras y códigos (656 − 512) y de unos 187 en prosa (699 − 512). El breadcrumb sintético de 6 niveles mide unos 129. Estos márgenes son cálculos sobre lo medido.
+- En texto sin espacios, la estimación subcuenta: 512 estimados exceden el límite incluso sin contexto. Una reserva para el breadcrumb no lo evitaría; haría falta otra estimación.
+- Una reserva generaría más chunks en el caso común sin ganancia medida. El riesgo restante, con breadcrumbs de más de unos 144 tokens estimados o texto sin espacios, queda visible en el aviso de `contar_truncados` del informe de ingesta.
+
+### Centros existentes
+- **Sin migración ni recreación:** el esquema no cambia.
+- Un documento ya ingerido se reconoce por su sha256 y devuelve `ya_ingerido`, sin volver a fragmentarse. Sus chunks conservan los cortes de 600.
+- `reintentar_destilacion` sobre un documento provisional sí vuelve a parsear y fragmentar con 512. Solo reutiliza el vector de los textos idénticos.
+- No hay operación para quitar un solo documento. Para aplicar los cortes de 512 a un documento definitivo ya ingerido, hay que eliminar el centro, recrearlo y volver a ingerir. Es opcional: solo cambian las secciones de 513 a 600 tokens estimados, y el aviso de truncado de su ingesta ya indicaba si alguna quedó recortada.

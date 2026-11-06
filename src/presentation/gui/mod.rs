@@ -6,6 +6,7 @@
 
 pub mod chat_service;
 pub mod comandos;
+pub mod intervenciones_arnes;
 pub mod markdown_seguro;
 pub mod resultados_tools;
 
@@ -311,6 +312,10 @@ pub struct ChatResponsePayload {
     pub fuentes: Vec<FuenteCitadaDto>,
     pub matrix_result: Option<serde_json::Value>,
     pub graph_result: Option<serde_json::Value>,
+    /// Actuaciones del arnés en este turno, en lenguaje del operador
+    pub arnes: Vec<intervenciones_arnes::IntervencionArnesDto>,
+    /// La respuesta no se pudo validar: `reply_html` es el mensaje fijo y remite al Studio
+    pub salida_segura: bool,
 }
 
 /// Controlador de la aplicación gráfica

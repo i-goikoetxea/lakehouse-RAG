@@ -185,6 +185,38 @@ async fn test_lookup_por_codigo_4a_resuelve_a_la_primera_aunque_el_titulo_destil
     );
 }
 
+/// El arnés llega a la ventana: si el documento no declara responsable, un rol inventado no se
+/// muestra, y los resultados de las tools siguen disponibles para el Studio.
+#[tokio::test]
+async fn test_chat_de_la_ventana_no_muestra_un_responsable_sin_respaldo() {
+    let inventada = "**Jefe de Producción** firma FOR-ALM-05";
+    let agente = Arc::new(MockAgentRunner::new_scripted(vec![
+        AgentTurnOutput::ToolCalls(vec![ToolCall {
+            id: "m".into(),
+            name: "query_operational_matrix".into(),
+            arguments: json!({ "centro_id": CENTRO, "fase": "custodia", "solo_declarados": false }),
+        }]),
+        AgentTurnOutput::FinalMessage(inventada.into()),
+        AgentTurnOutput::FinalMessage(inventada.into()),
+    ]));
+    let entorno = entorno_con_agente(agente);
+    centro_activo_con_revisiones(&entorno).await;
+    let chat = GuiChatService::desde_asistente(Arc::new(entorno.app));
+
+    let respuesta = chat
+        .enviar_mensaje("¿Quién custodia?", CENTRO, "sonnet")
+        .await
+        .unwrap();
+
+    assert!(
+        !respuesta.reply_html.contains("Jefe de Producción"),
+        "{}",
+        respuesta.reply_html
+    );
+    assert!(respuesta.reply_html.contains("No he podido validar"));
+    assert_eq!(respuesta.tools_used.len(), 1);
+}
+
 #[tokio::test]
 async fn test_chat_de_la_ventana_rellena_citas_matriz_y_grafo_desde_las_tools_reales() {
     let llamada = |id: &str, nombre: &str, args: Value| ToolCall {
@@ -219,8 +251,9 @@ async fn test_chat_de_la_ventana_rellena_citas_matriz_y_grafo_desde_las_tools_re
     let app = Arc::new(entorno.app);
     let chat = GuiChatService::desde_asistente(app);
 
+    // Sin intención para el arnés: este test comprueba el pintado, no la validación del rol.
     let respuesta = chat
-        .enviar_mensaje("¿Quién custodia?", CENTRO, "sonnet")
+        .enviar_mensaje("Resume la custodia", CENTRO, "sonnet")
         .await
         .unwrap();
 

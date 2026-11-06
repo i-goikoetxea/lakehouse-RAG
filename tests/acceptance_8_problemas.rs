@@ -28,7 +28,7 @@ use std::time::Instant;
 use arrow_array::{Array, RecordBatch, StringArray};
 use async_trait::async_trait;
 use lakehouse_rag::application::dtos::agent::{
-    AgentExecutionEvent, AgentMessage, AgentTurnOutput, ClaudeModel,
+    AgentExecutionEvent, AgentMessage, AgentTurnOutput, ClaudeModel, TurnoDirigido,
 };
 use lakehouse_rag::application::dtos::centros::{
     DocumentoOriginal, ManifiestoCentroDisco, ModeloEmbeddingsActivo,
@@ -37,7 +37,7 @@ use lakehouse_rag::application::dtos::ingestion::{
     AristaDestilada, CatalogoDestilado, DistilledDocumentPackage, HitoDestilado, ParsedDocument,
 };
 use lakehouse_rag::application::dtos::lakehouse_filas::LoteIngesta;
-use lakehouse_rag::application::dtos::tools::{ToolCall, ToolDefinition};
+use lakehouse_rag::application::dtos::tools::{LakehouseToolName, ToolCall, ToolDefinition};
 use lakehouse_rag::application::ports::agent_runner::AgentRunnerPort;
 use lakehouse_rag::application::ports::center_workspace::{CenterWorkspacePort, CentroAbierto};
 use lakehouse_rag::application::ports::lakehouse_store::{
@@ -58,6 +58,7 @@ use lakehouse_rag::infrastructure::bootstrap::{
     ComposicionReal, ConfiguracionComposicion, composicion_real,
 };
 use lakehouse_rag::infrastructure::llm::{ClaudeAgentConfig, ClaudeAgentRunner, MockDistiller};
+use lakehouse_rag::infrastructure::reloj_sistema::RelojDelSistema;
 use serde_json::{Value, json};
 use tokio::runtime::Runtime;
 
@@ -109,6 +110,11 @@ fn composicion(raiz: &Path) -> ComposicionReal {
     })
 }
 
+/// Modelo de las preguntas de los 8 problemas: `LAKEHOUSE_MODELO_ACEPTACION` o `sonnet`
+fn modelo_aceptacion() -> String {
+    std::env::var("LAKEHOUSE_MODELO_ACEPTACION").unwrap_or_else(|_| "sonnet".to_string())
+}
+
 fn recortar(texto: &str, maximo: usize) -> String {
     if texto.chars().count() <= maximo {
         texto.to_string()
@@ -156,8 +162,33 @@ impl AgentRunnerPort for AgenteRegistrador {
             .lock()
             .unwrap()
             .push(modelo.cli_model_name().to_string());
-        self.interno
+        let salida = self
+            .interno
             .ejecutar_turno(modelo, system_prompt, historial, herramientas)
+            .await;
+        // Con `LAKEHOUSE_ACEPTACION_VOLCAR` se ve también el texto que el arnés rechace
+        if std::env::var_os("LAKEHOUSE_ACEPTACION_VOLCAR").is_some()
+            && let Ok(AgentTurnOutput::FinalMessage(texto)) = &salida
+        {
+            println!("    [salida bruta del modelo]\n{texto}\n    [fin de la salida bruta]");
+        }
+        salida
+    }
+
+    async fn ejecutar_turno_dirigido(
+        &self,
+        modelo: &ClaudeModel,
+        system_prompt: &str,
+        historial: &[AgentMessage],
+        herramientas: &[ToolDefinition],
+        dirigida: LakehouseToolName,
+    ) -> Result<TurnoDirigido, DomainError> {
+        self.modelos
+            .lock()
+            .unwrap()
+            .push(modelo.cli_model_name().to_string());
+        self.interno
+            .ejecutar_turno_dirigido(modelo, system_prompt, historial, herramientas, dirigida)
             .await
     }
 }
@@ -228,6 +259,12 @@ impl Lakehouse {
             inicio.elapsed().as_secs_f64(),
             recortar(&respuesta.respuesta, 1200)
         );
+        for intervencion in &respuesta.arnes {
+            println!(
+                "    arnés {:?}: {}",
+                intervencion.etapa, intervencion.motivo
+            );
+        }
         for uso in &respuesta.herramientas {
             println!(
                 "    tool {} [{}] args={} → {}",
@@ -544,7 +581,7 @@ fn p1_anti_fusion_la_custodia_solo_devuelve_su_responsable_y_registro() {
             .preguntar(
                 CENTRO_A,
                 "¿Quién es el responsable de la custodia y qué registro llena?",
-                "sonnet",
+                &modelo_aceptacion(),
             )
             .await;
         let texto = &r.respuesta;
@@ -567,6 +604,150 @@ fn p1_anti_fusion_la_custodia_solo_devuelve_su_responsable_y_registro() {
 // ---------------------------------------------------------------------------------------------
 // P2 — Geometría de tablas · especificación §9.3
 // ---------------------------------------------------------------------------------------------
+
+/// Oráculo de P2 sobre «100 °C», que es a la vez el valor de la Rev. 03 y la celda que da el orden
+/// invertido de los ejes. Criterio vigente desde la corrección de los falsos bloqueos del arnés.
+///
+/// La respuesta se parte en fragmentos (líneas y frases). Un fragmento con «100 °C» (o `100°C`,
+/// `100 ºC`) solo se acepta si nombra los ejes invertidos o el descarte y no lo presenta como
+/// vigente, de la Rev. 03 ni como respuesta. Límite conocido: una frase que da 100 °C como valor y
+/// además menciona el orden invertido de otra cosa se acepta.
+mod oraculo_p2 {
+    const MARCAS_DE_DESCARTE: &[&str] = &[
+        "invert",
+        "invirt",
+        "descart",
+        "al reves",
+        "inverso",
+        "intercambi",
+        "permut",
+    ];
+    const MARCAS_DE_VALOR: &[&str] = &[
+        "vigente",
+        "rev. 03",
+        "rev 03",
+        "rev.03",
+        "revision 03",
+        "respuesta",
+        "no lo descarto",
+        "no se descarta",
+    ];
+    const SEPARADORES_DE_FRASE: &[&str] = &[
+        ". ", "; ", "
+",
+    ];
+
+    /// Si la respuesta da «100 °C» como valor y no como lectura descartada.
+    pub fn da_100_grados_como_valor(respuesta: &str) -> bool {
+        fragmentos(&plegar(respuesta))
+            .iter()
+            .any(|fragmento| menciona_100_grados(fragmento) && !es_lectura_descartada(fragmento))
+    }
+
+    fn es_lectura_descartada(fragmento: &str) -> bool {
+        MARCAS_DE_DESCARTE
+            .iter()
+            .any(|marca| fragmento.contains(marca))
+            && !MARCAS_DE_VALOR
+                .iter()
+                .any(|marca| fragmento.contains(marca))
+    }
+
+    fn plegar(texto: &str) -> String {
+        texto
+            .to_lowercase()
+            .chars()
+            .map(|letra| match letra {
+                'á' => 'a',
+                'é' => 'e',
+                'í' => 'i',
+                'ó' => 'o',
+                'ú' => 'u',
+                'º' => '°',
+                otra => otra,
+            })
+            .collect()
+    }
+
+    fn fragmentos(texto: &str) -> Vec<String> {
+        SEPARADORES_DE_FRASE
+            .iter()
+            .fold(vec![texto.to_string()], |trozos, separador| {
+                trozos
+                    .iter()
+                    .flat_map(|trozo| trozo.split(separador).map(str::to_string))
+                    .collect()
+            })
+    }
+
+    /// `100` sin otra cifra delante (`1100`, `0,100`) seguido de `°c`, con o sin espacios.
+    fn menciona_100_grados(fragmento: &str) -> bool {
+        let letras: Vec<char> = fragmento.chars().collect();
+        (0..letras.len()).any(|inicio| {
+            let empieza_numero = inicio == 0
+                || !(letras[inicio - 1].is_ascii_digit()
+                    || matches!(letras[inicio - 1], ',' | '.'));
+            let unidad: String = letras
+                .get(inicio + 3..)
+                .unwrap_or_default()
+                .iter()
+                .filter(|letra| !letra.is_whitespace())
+                .take(2)
+                .collect();
+            empieza_numero
+                && letras.get(inicio..inicio + 3) == Some(&['1', '0', '0'])
+                && unidad == "°c"
+        })
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::da_100_grados_como_valor;
+
+        #[test]
+        fn test_oraculo_p2_rechaza_100_grados_como_valor_o_respuesta() {
+            for respuesta in [
+                "Son 100 °C.",
+                "Son 100°C con la nota (*).",
+                "Son 100 ºC.",
+                "| 30 mm | 0,42 % | 100 °C |",
+                "La Rev. 03 fijaba 100 °C.",
+                "Con los ejes invertidos sería 100 °C, que es el valor vigente.",
+                "No lo descarto: 100 °C.",
+                "La temperatura es 100 °C; con los ejes invertidos serían 125 °C.",
+                "Respuesta: 100 °C. El orden invertido se descarta.",
+            ] {
+                assert!(da_100_grados_como_valor(respuesta), "{respuesta}");
+            }
+        }
+
+        #[test]
+        fn test_oraculo_p2_acepta_100_grados_como_lectura_con_ejes_invertidos_o_descartada() {
+            for respuesta in [
+                "125 °C (*) HV10. Si se invirtieran los ejes, la celda daría 100 °C; lo descarto.",
+                "| Orden invertido (descartado) | 100 °C |",
+                "Con los ejes al revés saldría 100 °C.",
+                "Leyendo la tabla con los ejes intercambiados se obtendrían 100 °C, lectura descartada.",
+                "El orden inverso da 100°C y no corresponde a la pregunta.",
+            ] {
+                assert!(!da_100_grados_como_valor(respuesta), "{respuesta}");
+            }
+        }
+
+        #[test]
+        fn test_oraculo_p2_ignora_lo_que_no_es_100_grados() {
+            for respuesta in [
+                "Son 125 °C.",
+                "Son 1100 °C.",
+                "Espesor de 100 mm.",
+                "Son 0,100 °C.",
+                "",
+            ] {
+                assert!(!da_100_grados_como_valor(respuesta), "{respuesta}");
+            }
+        }
+    }
+}
 
 #[test]
 #[ignore = "real: Claude Code headless + FastEmbed E5-large"]
@@ -599,7 +780,7 @@ fn p2_tabla_cruce_exacto_con_nota_y_fronteras() {
             .preguntar(
                 CENTRO_A,
                 "Según la Tabla 4-A, ¿cuál es la temperatura mínima de precalentamiento para un espesor de 30 mm y un carbono equivalente de 0,42 %?",
-                "sonnet",
+                &modelo_aceptacion(),
             )
             .await;
         let texto = &r.respuesta;
@@ -608,7 +789,10 @@ fn p2_tabla_cruce_exacto_con_nota_y_fronteras() {
             contiene_alguno(texto, &["HV10", "QA/QC"]),
             "falta la nota (*): {texto}"
         );
-        assert!(!texto.contains("100 °C"), "valor de la Rev. 03: {texto}");
+        assert!(
+            !oraculo_p2::da_100_grados_como_valor(texto),
+            "100 °C como valor, no como lectura descartada: {texto}"
+        );
         assert!(
             tool_con(&r, "lookup_double_entry_table", |_, res| res["estado"]
                 == "resuelto")
@@ -620,7 +804,7 @@ fn p2_tabla_cruce_exacto_con_nota_y_fronteras() {
             .preguntar(
                 CENTRO_A,
                 "En la Tabla 4-A, ¿qué temperatura mínima de precalentamiento corresponde a un espesor de exactamente 20 mm con CE = 0,42 %?",
-                "sonnet",
+                &modelo_aceptacion(),
             )
             .await;
         assert!(r.respuesta.contains("50"), "{}", r.respuesta);
@@ -663,20 +847,30 @@ fn p2_cruce_con_la_tabla_ya_en_el_historial_invoca_lookup() {
         let orquestador = AgentOrchestrator::new(
             Arc::new(ClaudeAgentRunner::new(ClaudeAgentConfig::default())),
             lh.herramientas.clone(),
-        );
+        )
+        .with_reloj(Arc::new(RelojDelSistema));
         let respuesta = orquestador
             .procesar_turno(
-                &ClaudeModel::sonnet(),
+                &ClaudeModel::new(modelo_aceptacion()).unwrap(),
                 &CenterId::new(CENTRO_A).unwrap(),
                 &mut historial,
-                Some(Arc::new(move |evento| {
-                    if let AgentExecutionEvent::CallingTool { name, .. } = evento {
+                Some(Arc::new(move |evento| match evento {
+                    AgentExecutionEvent::CallingTool { name, .. } => {
                         destino.lock().unwrap().push(name);
                     }
+                    AgentExecutionEvent::ArnesIntervino { etapa, motivo } => {
+                        println!("    arnés {etapa:?}: {motivo}");
+                    }
+                    _ => {}
                 })),
             )
             .await
             .unwrap();
+        println!(
+            "
+  R: {}",
+            recortar(&respuesta, 1200)
+        );
         assert!(respuesta.contains("125"), "{respuesta}");
         let usadas = usadas.lock().unwrap();
         assert!(
@@ -746,7 +940,7 @@ fn p3_versiones_vigente_125_a_fecha_100_y_cero_aristas_v3() {
             .preguntar(
                 CENTRO_A,
                 "¿Cuál es hoy la temperatura mínima de precalentamiento de la Tabla 4-A para 30 mm y CE 0,42 %, y cuál era el 1 de junio de 2026, antes de que entrara en vigor la Rev. 04?",
-                "sonnet",
+                &modelo_aceptacion(),
             )
             .await;
         assert!(r.respuesta.contains("125"), "{}", r.respuesta);
@@ -820,7 +1014,7 @@ fn p4_supernodos_dos_saltos_acotados_con_hub_resumido() {
             .preguntar(
                 CENTRO_HUB,
                 "Recorre el grafo normativo desde el procedimiento PO-SINT-01 hasta dos saltos: ¿con qué documentos y registros se relaciona?",
-                "sonnet",
+                &modelo_aceptacion(),
             )
             .await;
         assert!(r.respuesta.contains("NORMA-HUB"), "{}", r.respuesta);
@@ -860,7 +1054,7 @@ fn p5_prelacion_el_pliego_prevalece_sobre_la_norma() {
             .preguntar(
                 CENTRO_A,
                 "¿Qué porcentaje de las uniones soldadas a tope hay que ensayar con radiografía en esta obra?",
-                "sonnet",
+                &modelo_aceptacion(),
             )
             .await;
         let texto = &r.respuesta;
@@ -923,7 +1117,7 @@ fn p6_agregacion_exhaustiva_coincide_con_el_oraculo() {
             .preguntar(
                 CENTRO_A,
                 "Dame el listado exhaustivo de todos los registros que exige el procedimiento PO-ALM-03 vigente, con la fase y el responsable que firma cada uno.",
-                "sonnet",
+                &modelo_aceptacion(),
             )
             .await;
         for (codigo, responsable) in &oraculo {
@@ -942,7 +1136,7 @@ fn p6_agregacion_exhaustiva_coincide_con_el_oraculo() {
             .preguntar(
                 CENTRO_A,
                 "¿En qué procedimientos vigentes interviene el Jefe de Producción y qué formatos firma? Quiero la lista completa.",
-                "sonnet",
+                &modelo_aceptacion(),
             )
             .await;
         assert!(r.respuesta.contains("PO-ALM-03"), "{}", r.respuesta);
@@ -994,7 +1188,7 @@ fn p7_condicion_heredada_80_grados_siempre_con_bajo_cero() {
             "Según la norma NT-SOL-01, ¿a qué temperatura hay que calentar la zona de soldadura antes de soldar y en qué situación se aplica?",
             "¿A cuántos grados hay que precalentar la zona de soldadura según la NT-SOL-01?",
         ] {
-            let r = lh.preguntar(CENTRO_A, pregunta, "sonnet").await;
+            let r = lh.preguntar(CENTRO_A, pregunta, &modelo_aceptacion()).await;
             assert!(r.respuesta.contains("80"), "{}", r.respuesta);
             assert!(
                 r.respuesta.contains("< 0") || r.respuesta.to_lowercase().contains("bajo cero"),
@@ -1368,7 +1562,7 @@ fn s9_1_multicentro_solo_se_leen_los_datos_del_centro_activo() {
             .preguntar(
                 CENTRO_A,
                 "Lista todos los documentos del catálogo de este centro con su revisión.",
-                "sonnet",
+                &modelo_aceptacion(),
             )
             .await;
         assert!(r.respuesta.contains("PO-ALM-03"), "{}", r.respuesta);

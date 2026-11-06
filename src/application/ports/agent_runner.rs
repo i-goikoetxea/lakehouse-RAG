@@ -4,8 +4,8 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use crate::application::dtos::agent::{AgentMessage, AgentTurnOutput, ClaudeModel};
-use crate::application::dtos::tools::ToolDefinition;
+use crate::application::dtos::agent::{AgentMessage, AgentTurnOutput, ClaudeModel, TurnoDirigido};
+use crate::application::dtos::tools::{LakehouseToolName, ToolDefinition};
 use crate::domain::errors::DomainError;
 
 /// Puerto para la ejecución de turnos de conversación con LLM y llamada a herramientas
@@ -34,6 +34,23 @@ pub trait AgentRunnerPort: Send + Sync {
         let _ = observador;
         self.ejecutar_turno(modelo, system_prompt, historial, herramientas)
             .await
+    }
+
+    /// Solicita la llamada a `dirigida`, sin garantizarla: el modelo puede no hacerla y elige los
+    /// argumentos. `herramientas` es el catálogo que ve el modelo, como en un turno normal.
+    async fn ejecutar_turno_dirigido(
+        &self,
+        modelo: &ClaudeModel,
+        system_prompt: &str,
+        historial: &[AgentMessage],
+        herramientas: &[ToolDefinition],
+        dirigida: LakehouseToolName,
+    ) -> Result<TurnoDirigido, DomainError> {
+        let _ = (modelo, system_prompt, historial, herramientas);
+        Err(DomainError::AgentError(format!(
+            "Este ejecutor no admite turnos dirigidos ({})",
+            dirigida.as_str()
+        )))
     }
 }
 

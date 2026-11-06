@@ -10,9 +10,11 @@ pub mod lakehouse_projection;
 pub mod lakehouse_store;
 pub mod llm_distiller;
 pub mod model_catalog;
+pub mod reloj;
 pub mod semantic_index;
 pub mod tool_server;
 
 pub use agent_runner::*;
 pub use model_catalog::*;
+pub use reloj::*;
 pub use tool_server::*;

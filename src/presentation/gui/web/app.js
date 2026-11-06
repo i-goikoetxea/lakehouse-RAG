@@ -614,6 +614,12 @@
     if (pendiente) {
       turno.trabajando.hidden = false;
       turno.trabajando.textContent = `Consultando ${pendiente.nombre}… ${segundosDesde(turno.inicio)} s`;
+    } else if (!turno.texto && turno.reintentando) {
+      turno.trabajando.hidden = false;
+      turno.trabajando.textContent = `La primera respuesta no pasó la comprobación: preparando otra… ${segundosDesde(turno.inicio)} s`;
+    } else if (!turno.texto && turno.retenido) {
+      turno.trabajando.hidden = false;
+      turno.trabajando.textContent = `Validando con los datos del centro antes de mostrar la respuesta… ${segundosDesde(turno.inicio)} s`;
     } else if (!turno.texto) {
       turno.trabajando.hidden = false;
       turno.trabajando.textContent = `Pensando con ${turno.etiqueta}… ${segundosDesde(turno.inicio)} s`;
@@ -662,6 +668,12 @@
         if (datos.esError) linea.nodo.classList.add('fallo');
         linea.nodo.querySelector('.estado').textContent = datos.esError ? '⚠' : '✓';
       }
+    } else if (datos.tipo === 'turnoRetenido') {
+      turno.retenido = true;
+    } else if (datos.tipo === 'arnes') {
+      turno.reintentando = datos.etapa === 'reintento';
+      turno.intervenciones.push(datos);
+      pintarValidacion(turno.intervenciones);
     }
     actualizarTrabajando(turno);
     seguirAlFinal(turno);
@@ -679,7 +691,9 @@
       trabajando: el('div', 'trabajando'),
       respuesta: el('div', 'respuesta en-vivo'),
       texto: '', lineas: [], inicio: Date.now(), ultimoRender: 0, temporizador: null, detenido: false,
+      retenido: false, reintentando: false, intervenciones: [],
     };
+    pintarValidacion(turno.intervenciones);
     mensaje.append(turno.tools, turno.trabajando, turno.respuesta);
     chatColumna.appendChild(mensaje); // tras su pregunta; anclarPregunta recoloca el espaciador al final
     anclarPregunta(pregunta);
@@ -732,9 +746,10 @@
       mensaje.appendChild(bloque);
     }
 
-    const respuesta = el('div', 'respuesta');
+    const respuesta = el('div', `respuesta${data.salidaSegura ? ' salida-segura' : ''}`);
     pintarHtmlSeguro(respuesta, data);
     mensaje.appendChild(respuesta);
+    if (data.salidaSegura) mensaje.appendChild(botonVerResultados(data));
 
     const notas = notasYCondiciones(data.citations || []);
     if (notas.length) {
@@ -766,6 +781,22 @@
     mensaje.appendChild(acciones);
 
     actualizarStudio(data);
+  }
+
+  /** Pestaña con lo que sí se obtuvo en el turno; sin resultados, la explicación de lo ocurrido */
+  function pestanaDeResultados(data) {
+    if (data.matrixResult) return 'tab-tabla';
+    if (data.graphResult) return 'tab-grafo';
+    if ((data.fuentes || []).length) return 'tab-fuentes';
+    if ((data.toolsUsed || []).length) return 'tab-tools';
+    return 'tab-validacion';
+  }
+
+  function botonVerResultados(data) {
+    const boton = el('button', 'btn-accion btn-ver-resultados', 'Ver los resultados en el Studio');
+    boton.type = 'button';
+    boton.addEventListener('click', () => { pestanaElegidaPorUsuario = true; activarPestana(pestanaDeResultados(data)); });
+    return boton;
   }
 
   function lineaTool(tool) {
@@ -811,15 +842,49 @@
   function actualizarStudio(data) {
     fuentesUltimaRespuesta = data.fuentes || [];
     pintarFuentes(fuentesUltimaRespuesta, -1);
+    if (data.salidaSegura) limpiarResultadosAnteriores(data);
+    const intervenciones = data.arnes || [];
+    pintarValidacion(intervenciones);
     const novedades = [];
     if (fuentesUltimaRespuesta.length) novedades.push('tab-fuentes');
     if (data.graphResult) { pintarGrafo(data.graphResult); novedades.unshift('tab-grafo'); }
     if (data.matrixResult) { pintarTabla(data.matrixResult); novedades.unshift('tab-tabla'); }
+    if (intervenciones.length) novedades.push('tab-validacion');
     const tools = data.toolsUsed || [];
     if (tools.length) pintarDetalleTool(tools[tools.length - 1]);
+    if (data.salidaSegura && !pestanaElegidaPorUsuario) activarPestana(pestanaDeResultados(data));
     if (!novedades.length) return;
     if (!pestanaElegidaPorUsuario) activarPestana(novedades[0]);
     novedades.forEach(marcarNovedad);
+  }
+
+  /** El mensaje fijo remite al Studio: no debe encontrar allí los datos de un turno anterior */
+  function limpiarResultadosAnteriores(data) {
+    const sinDatos = (id) => {
+      const destino = $(id);
+      vaciar(destino);
+      destino.appendChild(el('p', 'vacio', 'Este turno no obtuvo datos de este tipo.'));
+    };
+    if (!data.matrixResult) sinDatos('tab-tabla');
+    if (!data.graphResult) sinDatos('tab-grafo');
+    if (!(data.toolsUsed || []).length) sinDatos('tab-tools');
+  }
+
+  function pintarValidacion(intervenciones) {
+    const destino = $('tab-validacion');
+    vaciar(destino);
+    if (!intervenciones.length) {
+      destino.appendChild(el('p', 'vacio', 'En la última respuesta no hizo falta intervenir.'));
+      return;
+    }
+    const tarjeta = el('div', 'tarjeta');
+    tarjeta.appendChild(el('h4', null, 'Comprobaciones de la última respuesta'));
+    const lista = el('ul', 'lista-validacion');
+    intervenciones.forEach((i) => {
+      lista.appendChild(el('li', i.etapa === 'salida_segura' ? 'validacion-fallida' : null, i.mensaje));
+    });
+    tarjeta.appendChild(lista);
+    destino.appendChild(tarjeta);
   }
 
   function pintarFuentes(fuentes, seleccionada) {
@@ -906,6 +971,8 @@
     const cabeceraLookup = el('div', 'fila-chips');
     cabeceraLookup.appendChild(el('span', `chip ${r.estado === 'resuelto' ? 'chip-ok' : 'chip-aviso'}`, String(r.estado || '').replace(/_/g, ' ')));
     if (r.fecha_referencia) cabeceraLookup.appendChild(el('span', 'chip chip-aviso', `a ${r.fecha_referencia}`));
+    if (r.ejes_ambiguos) cabeceraLookup.appendChild(el('span', 'chip chip-aviso', 'Ejes ambiguos'));
+    if (r.orden_invertido_resolveria) cabeceraLookup.appendChild(el('span', 'chip chip-aviso', 'Valores posiblemente cambiados'));
     destino.appendChild(cabeceraLookup);
     const tarjeta = el('div', 'tarjeta');
     if (r.tabla) tarjeta.appendChild(el('h4', null, r.tabla.titulo_tabla || r.tabla.tabla_id));
@@ -937,7 +1004,39 @@
       tarjeta.appendChild(el('p', 'texto-sutil', r.mensaje || 'Sin resultado.'));
       (r.tablas || []).forEach((t) => tarjeta.appendChild(ficha([['Tabla', t.titulo_tabla || t.tabla_id], ['Id', t.tabla_id], ['Documento', t.doc_id]])));
     }
+    if (r.ejes_ambiguos) tarjeta.appendChild(avisoEjesAmbiguos(r.ejes_ambiguos));
+    if (r.orden_invertido_resolveria) tarjeta.appendChild(avisoOrdenInvertido(r.orden_invertido_resolveria, ejes));
     destino.appendChild(tarjeta);
+  }
+
+  function nombreDeEje(eje, reserva) {
+    if (!eje || !eje.nombre) return reserva;
+    return eje.unidad ? `${eje.nombre} (${eje.unidad})` : eje.nombre;
+  }
+
+  function valoresDeCeldas(lado) {
+    return (lado.celdas || []).map((c) => c.valor_resultado_texto).filter(Boolean).join(' · ') || 'sin valor';
+  }
+
+  /** Los textos del aviso de la tool se dirigen al modelo: el operador lee los suyos */
+  function avisoEjesAmbiguos(aviso) {
+    const nodo = el('div', 'nota-obligatoria aviso-ejes');
+    nodo.appendChild(el('strong', null, 'Ejes ambiguos: '));
+    nodo.appendChild(document.createTextNode('al intercambiar los valores entre los ejes sale otra celda. Comprueba qué valor corresponde a cada eje.'));
+    const ejeX = nombreDeEje(aviso.eje_x, 'Eje x');
+    const ejeY = nombreDeEje(aviso.eje_y, 'Eje y');
+    [['Consultado', aviso.orden_recibido], ['Intercambiado', aviso.orden_invertido]].forEach(([etiqueta, lado]) => {
+      if (!lado) return;
+      nodo.appendChild(ficha([[etiqueta, `${ejeX} = ${lado.valor_x}, ${ejeY} = ${lado.valor_y} → ${valoresDeCeldas(lado)}`]]));
+    });
+    return nodo;
+  }
+
+  function avisoOrdenInvertido(aviso, ejes) {
+    const nodo = el('div', 'nota-obligatoria aviso-ejes');
+    nodo.appendChild(el('strong', null, 'Valores posiblemente cambiados: '));
+    nodo.appendChild(document.createTextNode(`este orden no tiene celda, pero sí la tiene ${ejes[0] || 'Eje x'} = ${aviso.valor_x}, ${ejes[1] || 'Eje y'} = ${aviso.valor_y}. Comprueba qué valor corresponde a cada eje y repite la pregunta si estaban cambiados.`));
+    return nodo;
   }
 
   function pintarGrafo(g) {

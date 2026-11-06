@@ -19,6 +19,7 @@ use lakehouse_rag::infrastructure::bootstrap::motores_consulta;
 use lakehouse_rag::infrastructure::embeddings::mock_engine::MockEmbeddingEngine;
 use lakehouse_rag::infrastructure::llm::MockAgentRunner;
 use lakehouse_rag::infrastructure::parsers::ParserPorFormato;
+use lakehouse_rag::infrastructure::reloj_sistema::RelojDelSistema;
 use lakehouse_rag::infrastructure::storage::center_registry_json::JsonCenterRegistry;
 use lakehouse_rag::infrastructure::storage::center_workspace_disk::DiskCenterWorkspace;
 use serde_json::json;
@@ -103,6 +104,7 @@ pub fn construir_app(
         agente,
         herramientas: herramientas.clone(),
         catalogo_modelos: Arc::new(CatalogoVacio),
+        reloj: Arc::new(RelojDelSistema),
     });
     (app, herramientas)
 }

@@ -143,9 +143,31 @@ pub enum AgentTurnOutput {
     ToolCalls(Vec<ToolCall>),
 }
 
+/// Salida de un turno dirigido con `--json-schema`, que solicita la tool pero no la garantiza
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum TurnoDirigido {
+    Llamada(ToolCall),
+    /// Es un desenlace normal del comando, no un error del proceso. Su texto no es una respuesta
+    SinLlamada,
+}
+
+/// Momento del turno en el que actuó el arnés
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EtapaArnes {
+    Directiva,
+    LlamadaNoObtenida,
+    Reintento,
+    SalidaSegura,
+}
+
 /// Eventos emitidos durante la ejecución reactiva del agente (para TUI y streaming)
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum AgentExecutionEvent {
+    ArnesIntervino {
+        etapa: EtapaArnes,
+        motivo: String,
+    },
     Thought(String),
     CallingTool {
         name: String,

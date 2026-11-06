@@ -9,4 +9,5 @@ pub mod llm;
 pub mod mcp;
 pub mod parsers;
 pub mod query_engine;
+pub mod reloj_sistema;
 pub mod storage;

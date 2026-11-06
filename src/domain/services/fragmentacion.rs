@@ -4,10 +4,11 @@
 //! cada tramo alfanumérico cuenta 1 token por cada 4 caracteres (redondeando hacia arriba). No se
 //! usa el tokenizer de E5: exigiría cargar el modelo (≈ 2,2 GB) en una capa pura, y el resultado
 //! dependería del modelo activo. La estimación solo decide dónde cortar; quien vectoriza comprueba
-//! el truncado real con `EmbeddingEnginePort::textos_truncados`.
+//! el truncado real con `EmbeddingEnginePort::contar_truncados`.
 
-/// Una sección de hasta este número de tokens es un único chunk
-pub const UMBRAL_CHUNK_UNICO: usize = 600;
+/// Una sección de hasta este número de tokens es un único chunk. Coincide con la ventana: E5
+/// trunca a 512 tokens reales y un chunk único no tiene solape que cubra su cola
+pub const UMBRAL_CHUNK_UNICO: usize = TOKENS_VENTANA;
 /// Tamaño máximo en tokens de cada ventana de una sección mayor
 pub const TOKENS_VENTANA: usize = 512;
 /// Tokens que comparten dos ventanas consecutivas
@@ -267,18 +268,53 @@ mod tests {
     }
 
     #[test]
-    fn test_frontera_600_tokens_es_un_chunk_y_601_se_divide() {
-        let seiscientos = palabras(600);
-        assert_eq!(estimar_tokens(&seiscientos), 600);
-        assert_eq!(fragmentar_seccion(&seiscientos), vec![seiscientos.clone()]);
+    fn test_frontera_511_y_512_tokens_son_un_chunk_y_513_se_divide() {
+        for total in [511, 512] {
+            let seccion = palabras(total);
+            assert_eq!(estimar_tokens(&seccion), total);
+            assert_eq!(fragmentar_seccion(&seccion), vec![seccion.clone()]);
+        }
 
-        let fragmentos = fragmentar_seccion(&palabras(601));
+        let fragmentos = fragmentar_seccion(&palabras(513));
         assert_eq!(fragmentos.len(), 2);
         assert!(
             fragmentos
                 .iter()
                 .all(|f| estimar_tokens(f) <= TOKENS_VENTANA)
         );
+    }
+
+    #[test]
+    fn test_ningun_fragmento_supera_la_ventana_del_modelo() {
+        for total in [400, 512, 513, 580, 600, 601, 700, 1500] {
+            let fragmentos = fragmentar_seccion(&palabras(total));
+            assert!(
+                fragmentos
+                    .iter()
+                    .all(|f| estimar_tokens(f) <= TOKENS_VENTANA),
+                "{total} tokens"
+            );
+        }
+    }
+
+    #[test]
+    fn test_justo_sobre_el_umbral_el_solape_cubre_la_cola_sin_perdidas() {
+        for total in [513, 514, 576, 577, 600, 1024, 1025] {
+            let original = palabras(total);
+            let ventanas = fragmentar_seccion(&original);
+            assert!(ventanas.len() >= 2, "{total} tokens");
+            assert!(original.ends_with(ventanas.last().unwrap().as_str()));
+            for par in ventanas.windows(2) {
+                let previas: Vec<&str> = par[0].split_whitespace().collect();
+                let siguientes: Vec<&str> = par[1].split_whitespace().collect();
+                assert_eq!(previas.last(), siguientes.get(TOKENS_SOLAPE - 1), "{total}");
+            }
+            assert_eq!(
+                reconstruir_sin_solape(&ventanas),
+                original,
+                "{total} tokens"
+            );
+        }
     }
 
     #[test]

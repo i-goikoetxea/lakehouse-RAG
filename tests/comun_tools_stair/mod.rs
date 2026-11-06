@@ -16,6 +16,7 @@ use lakehouse_rag::infrastructure::bootstrap::motores_consulta_con;
 use lakehouse_rag::infrastructure::embeddings::mock_engine::MockEmbeddingEngine;
 use lakehouse_rag::infrastructure::llm::{MockAgentRunner, MockDistiller};
 use lakehouse_rag::infrastructure::parsers::parser_por_formato::ParserPorFormato;
+use lakehouse_rag::infrastructure::reloj_sistema::RelojDelSistema;
 use lakehouse_rag::infrastructure::storage::center_registry_json::JsonCenterRegistry;
 use lakehouse_rag::infrastructure::storage::center_workspace_disk::DiskCenterWorkspace;
 use serde_json::{Value, json};
@@ -186,6 +187,7 @@ fn construir(raiz: tempfile::TempDir, config: ConfiguracionHerramientas) -> Ento
         agente: Arc::new(MockAgentRunner::new_scripted(Vec::new())),
         herramientas: herramientas.clone(),
         catalogo_modelos: Arc::new(CatalogoVacio),
+        reloj: Arc::new(RelojDelSistema),
     });
     EntornoStair {
         raiz,

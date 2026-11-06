@@ -50,6 +50,10 @@ impl ValorEntrada {
             categoria: plegar_mayusculas(&original).trim().to_string(),
         })
     }
+
+    fn a_json(&self) -> Value {
+        self.numero.map_or(json!(self.categoria), |n| json!(n))
+    }
 }
 
 fn limite(valor: Option<f64>, inclusivo: bool) -> LimiteRango {
@@ -224,6 +228,59 @@ fn marcar_prelacion(candidatas: &[&Map<String, Value>]) -> Vec<Value> {
         .collect()
 }
 
+fn identidades(candidatas: &[&Map<String, Value>]) -> BTreeSet<(String, Option<i64>, String)> {
+    candidatas
+        .iter()
+        .map(|c| {
+            (
+                texto(c, "doc_id"),
+                entero(c, "version_num"),
+                texto(c, "celda_id"),
+            )
+        })
+        .collect()
+}
+
+fn lado_del_aviso(x: &ValorEntrada, y: &ValorEntrada, candidatas: &[&Map<String, Value>]) -> Value {
+    json!({
+        "valor_x": x.a_json(),
+        "valor_y": y.a_json(),
+        "celdas": marcar_prelacion(candidatas),
+    })
+}
+
+/// La tool no sabe qué eje es cuál: repite el cruce invertido y avisa si eso cambia el resultado.
+/// `estado` y el valor del orden recibido no se tocan, para no romper a quien ya los lee.
+fn anotar_orden_invertido(
+    salida: &mut Value,
+    celdas: &[Map<String, Value>],
+    recibidas: &[&Map<String, Value>],
+    x: &ValorEntrada,
+    y: &ValorEntrada,
+    eje_z: Option<&str>,
+) {
+    let invertidas = celdas_candidatas(celdas, y, x, eje_z);
+    if invertidas.is_empty() || identidades(recibidas) == identidades(&invertidas) {
+        return;
+    }
+    if recibidas.is_empty() {
+        // Sin la celda: el valor solo existe si el modelo repite la llamada con los ejes correctos.
+        salida["orden_invertido_resolveria"] = json!({
+            "valor_x": y.a_json(),
+            "valor_y": x.a_json(),
+            "mensaje": "Con los ejes invertidos sí hay celda. Comprueba con los nombres y unidades de la tabla qué eje es cada valor: si estaban cambiados, repite la llamada con ese orden; si no, la tabla no cubre el caso.",
+        });
+        return;
+    }
+    salida["ejes_ambiguos"] = json!({
+        "mensaje": "Los dos órdenes de los ejes resuelven con celdas distintas. Decide por las unidades o los nombres de los ejes; si no lo distinguen, muestra ambos valores o pregunta. Nunca elijas uno en silencio.",
+        "eje_x": salida["tabla"]["eje_x"].clone(),
+        "eje_y": salida["tabla"]["eje_y"].clone(),
+        "orden_recibido": lado_del_aviso(x, y, recibidas),
+        "orden_invertido": lado_del_aviso(y, x, &invertidas),
+    });
+}
+
 impl LakehouseToolService {
     pub(super) async fn cruzar_tabla(&self, argumentos: &Value) -> Result<Value, DomainError> {
         let params: LookupDoubleEntryTableParams =
@@ -274,7 +331,7 @@ impl LakehouseToolService {
         let base = json!({
             "centro_id": contexto.centro.as_str(),
             "fecha_referencia": contexto.fecha_json(),
-            "entrada": { "valor_x": x.numero.map_or(json!(x.categoria), |n| json!(n)), "valor_y": y.numero.map_or(json!(y.categoria), |n| json!(n)), "eje_z": params.eje_z },
+            "entrada": { "valor_x": x.a_json(), "valor_y": y.a_json(), "eje_z": params.eje_z },
         });
         let ids_distintos: BTreeSet<String> = elegidas
             .iter()
@@ -371,6 +428,14 @@ impl LakehouseToolService {
                 salida["candidatas"] = json!(marcar_prelacion(varias));
             }
         }
+        anotar_orden_invertido(
+            &mut salida,
+            &celdas,
+            &candidatas,
+            &x,
+            &y,
+            params.eje_z.as_deref(),
+        );
         Ok(salida)
     }
 }
@@ -426,6 +491,348 @@ mod tests {
         assert_eq!(resolver(40.0001), vec!["150"]);
         let celdas = tabla_4a();
         assert!(celdas_candidatas(&celdas, &valor(30.0), &valor(0.46), None).is_empty());
+    }
+
+    type Limites = (f64, bool, f64, bool);
+
+    fn celda_cruzada(
+        celda_id: &str,
+        x: Limites,
+        y: Limites,
+        resultado: &str,
+    ) -> Map<String, Value> {
+        json!({
+            "celda_id": celda_id, "doc_id": "DOC-1", "version_num": 1,
+            "eje_x_min": x.0, "eje_x_min_inclusivo": x.1, "eje_x_max": x.2, "eje_x_max_inclusivo": x.3,
+            "eje_y_min": y.0, "eje_y_min_inclusivo": y.1, "eje_y_max": y.2, "eje_y_max_inclusivo": y.3,
+            "valor_resultado_texto": resultado,
+        })
+        .as_object()
+        .unwrap()
+        .clone()
+    }
+
+    fn celda_categorica(celda_id: &str, x: &str, y: &str, resultado: &str) -> Map<String, Value> {
+        json!({
+            "celda_id": celda_id, "doc_id": "DOC-1", "version_num": 1,
+            "eje_x_categoria": x, "eje_y_categoria": y,
+            "valor_resultado_texto": resultado,
+        })
+        .as_object()
+        .unwrap()
+        .clone()
+    }
+
+    /// `A` y `B` tienen los rangos cruzados: con ejes solapados, el intercambio cambia de celda.
+    fn tabla_solapada() -> Vec<Map<String, Value>> {
+        vec![
+            celda_cruzada(
+                "A",
+                (0.0, true, 20.0, false),
+                (20.0, true, 40.0, false),
+                "A",
+            ),
+            celda_cruzada(
+                "B",
+                (20.0, true, 40.0, false),
+                (0.0, true, 20.0, false),
+                "B",
+            ),
+        ]
+    }
+
+    fn entrada(valor_eje: ValorEje) -> ValorEntrada {
+        ValorEntrada::desde("x", &valor_eje).unwrap()
+    }
+
+    /// Resultado de anotar un cruce sobre una salida que solo trae los ejes de la tabla
+    fn salida_anotada(
+        celdas: &[Map<String, Value>],
+        x: ValorEje,
+        y: ValorEje,
+        eje_z: Option<&str>,
+        unidades: (&str, &str),
+    ) -> Value {
+        let (x, y) = (entrada(x), entrada(y));
+        let recibidas = celdas_candidatas(celdas, &x, &y, eje_z);
+        let mut salida = json!({ "tabla": {
+            "eje_x": { "nombre": "espesor", "unidad": unidades.0 },
+            "eje_y": { "nombre": "ancho", "unidad": unidades.1 },
+        }});
+        anotar_orden_invertido(&mut salida, celdas, &recibidas, &x, &y, eje_z);
+        salida
+    }
+
+    fn numeros(celdas: &[Map<String, Value>], x: f64, y: f64) -> Value {
+        salida_anotada(
+            celdas,
+            ValorEje::Numero(x),
+            ValorEje::Numero(y),
+            None,
+            ("mm", "mm"),
+        )
+    }
+
+    fn sin_anotaciones(salida: &Value) -> bool {
+        salida.get("ejes_ambiguos").is_none() && salida.get("orden_invertido_resolveria").is_none()
+    }
+
+    fn valor_de_la_primera_celda(salida: &Value, orden: &str) -> String {
+        salida["ejes_ambiguos"][orden]["celdas"][0]["valor_resultado_texto"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string()
+    }
+
+    /// Spike de la Fase 0 (§4.4): con rangos disjuntos el orden invertido es el único que resuelve,
+    /// y se dice sin devolver su valor, para que el modelo repita el cruce en vez de copiarlo.
+    #[test]
+    fn test_ejes_intercambiados_con_rangos_disjuntos_indican_que_el_invertido_resolveria() {
+        let celdas = tabla_4a();
+        assert!(celdas_candidatas(&celdas, &valor(0.42), &valor(30.0), None).is_empty());
+        let salida = numeros(&celdas, 0.42, 30.0);
+        assert!(salida.get("ejes_ambiguos").is_none(), "{salida}");
+        let aviso = &salida["orden_invertido_resolveria"];
+        assert_eq!(aviso["valor_x"], 30.0, "{salida}");
+        assert_eq!(aviso["valor_y"], 0.42, "{salida}");
+        assert!(aviso.get("celdas").is_none(), "{salida}");
+        assert!(!salida.to_string().contains("125"), "{salida}");
+    }
+
+    /// El orden recibido se mantiene: la tool no sabe cuál es el bueno, lo avisa con ambas celdas.
+    #[test]
+    fn test_ejes_intercambiados_con_rangos_solapados_avisan_de_ejes_ambiguos() {
+        let celdas = tabla_solapada();
+        let solo_ejes = |x, y| -> Vec<String> {
+            celdas_candidatas(&celdas, &valor(x), &valor(y), None)
+                .iter()
+                .map(|c| texto(c, "valor_resultado_texto"))
+                .collect()
+        };
+        assert_eq!(solo_ejes(10.0, 30.0), vec!["A"]);
+        assert_eq!(solo_ejes(30.0, 10.0), vec!["B"]);
+
+        let salida = numeros(&celdas, 10.0, 30.0);
+        let aviso = &salida["ejes_ambiguos"];
+        assert_eq!(aviso["eje_x"]["nombre"], "espesor", "{salida}");
+        assert_eq!(aviso["eje_y"]["nombre"], "ancho", "{salida}");
+        assert_eq!(aviso["eje_x"]["unidad"], "mm", "{salida}");
+        assert_eq!(aviso["orden_recibido"]["valor_x"], 10.0);
+        assert_eq!(aviso["orden_recibido"]["valor_y"], 30.0);
+        assert_eq!(aviso["orden_invertido"]["valor_x"], 30.0);
+        assert_eq!(aviso["orden_invertido"]["valor_y"], 10.0);
+        assert_eq!(valor_de_la_primera_celda(&salida, "orden_recibido"), "A");
+        assert_eq!(valor_de_la_primera_celda(&salida, "orden_invertido"), "B");
+        assert_eq!(
+            aviso["orden_invertido"]["celdas"][0]["cita"]["celda_id"],
+            "B"
+        );
+    }
+
+    #[test]
+    fn test_rangos_solapados_con_unidades_distintas_las_exponen_en_el_aviso() {
+        let salida = salida_anotada(
+            &tabla_solapada(),
+            ValorEje::Numero(10.0),
+            ValorEje::Numero(30.0),
+            None,
+            ("mm", "%"),
+        );
+        assert_eq!(salida["ejes_ambiguos"]["eje_x"]["unidad"], "mm", "{salida}");
+        assert_eq!(salida["ejes_ambiguos"]["eje_y"]["unidad"], "%", "{salida}");
+    }
+
+    #[test]
+    fn test_tabla_simetrica_con_la_misma_celda_no_cambia_la_salida() {
+        let celdas = vec![celda_cruzada(
+            "UNICA",
+            (0.0, true, 40.0, true),
+            (0.0, true, 40.0, true),
+            "V",
+        )];
+        assert!(sin_anotaciones(&numeros(&celdas, 10.0, 30.0)));
+    }
+
+    /// Dos celdas con el mismo valor siguen siendo celdas distintas: pueden diferir en su cita.
+    #[test]
+    fn test_celdas_distintas_con_el_mismo_valor_tambien_avisan() {
+        let celdas = vec![
+            celda_cruzada(
+                "A",
+                (0.0, true, 20.0, false),
+                (20.0, true, 40.0, false),
+                "V",
+            ),
+            celda_cruzada(
+                "B",
+                (20.0, true, 40.0, false),
+                (0.0, true, 20.0, false),
+                "V",
+            ),
+        ];
+        assert!(numeros(&celdas, 10.0, 30.0).get("ejes_ambiguos").is_some());
+    }
+
+    #[test]
+    fn test_mismo_valor_en_ambos_ejes_no_avisa() {
+        let celdas = vec![
+            celda_cruzada("D", (0.0, true, 20.0, false), (0.0, true, 20.0, false), "D"),
+            celda_cruzada(
+                "A",
+                (0.0, true, 20.0, false),
+                (20.0, true, 40.0, false),
+                "A",
+            ),
+        ];
+        assert!(sin_anotaciones(&numeros(&celdas, 10.0, 10.0)));
+    }
+
+    #[test]
+    fn test_solo_el_orden_recibido_resuelve_no_cambia_la_salida() {
+        let celdas = vec![celda_cruzada(
+            "A",
+            (0.0, true, 20.0, false),
+            (20.0, true, 40.0, false),
+            "A",
+        )];
+        assert!(sin_anotaciones(&numeros(&celdas, 10.0, 30.0)));
+    }
+
+    #[test]
+    fn test_ningun_orden_resuelve_no_anota_nada() {
+        assert!(sin_anotaciones(&numeros(&tabla_solapada(), 100.0, 200.0)));
+    }
+
+    #[test]
+    fn test_ejes_categoricos_solapados_avisan_con_ambas_celdas() {
+        let celdas = vec![
+            celda_categorica("A", "Clase I", "Clase II", "A"),
+            celda_categorica("B", "Clase II", "Clase I", "B"),
+        ];
+        let salida = salida_anotada(
+            &celdas,
+            ValorEje::Texto("clase i".into()),
+            ValorEje::Texto("CLASE II".into()),
+            None,
+            ("", ""),
+        );
+        assert_eq!(valor_de_la_primera_celda(&salida, "orden_recibido"), "A");
+        assert_eq!(valor_de_la_primera_celda(&salida, "orden_invertido"), "B");
+    }
+
+    #[test]
+    fn test_categoria_frente_a_numero_solo_admite_un_orden() {
+        let celdas = vec![json!({
+            "celda_id": "A", "doc_id": "DOC-1", "version_num": 1,
+            "eje_x_categoria": "Clase I",
+            "eje_y_min": 0.0, "eje_y_min_inclusivo": true, "eje_y_max": 40.0, "eje_y_max_inclusivo": true,
+            "valor_resultado_texto": "A",
+        })
+        .as_object()
+        .unwrap()
+        .clone()];
+        let bien = salida_anotada(
+            &celdas,
+            ValorEje::Texto("clase i".into()),
+            ValorEje::Numero(30.0),
+            None,
+            ("", "mm"),
+        );
+        assert!(sin_anotaciones(&bien), "{bien}");
+        let invertida = salida_anotada(
+            &celdas,
+            ValorEje::Numero(30.0),
+            ValorEje::Texto("clase i".into()),
+            None,
+            ("", "mm"),
+        );
+        assert_eq!(
+            invertida["orden_invertido_resolveria"]["valor_y"], 30.0,
+            "{invertida}"
+        );
+    }
+
+    #[test]
+    fn test_frontera_inclusiva_decide_si_el_orden_invertido_resuelve() {
+        let celdas = vec![
+            celda_cruzada("A", (0.0, true, 20.0, true), (20.0, false, 40.0, true), "A"),
+            celda_cruzada("B", (20.0, false, 40.0, true), (0.0, true, 20.0, true), "B"),
+        ];
+        // (20, 20) cae fuera en los dos órdenes: 20 está excluido del extremo inferior.
+        assert!(sin_anotaciones(&numeros(&celdas, 20.0, 20.0)));
+        // Justo encima de la frontera, cada orden cae en una celda.
+        let encima = numeros(&celdas, 20.0, 20.0001);
+        assert_eq!(
+            valor_de_la_primera_celda(&encima, "orden_recibido"),
+            "A",
+            "{encima}"
+        );
+        assert_eq!(
+            valor_de_la_primera_celda(&encima, "orden_invertido"),
+            "B",
+            "{encima}"
+        );
+        // El extremo superior inclusivo 40 resuelve; un paso más allá, solo queda sin celda.
+        assert!(numeros(&celdas, 20.0, 40.0).get("ejes_ambiguos").is_some());
+        assert!(sin_anotaciones(&numeros(&celdas, 20.0, 40.0001)));
+    }
+
+    #[test]
+    fn test_orden_invertido_respeta_el_eje_z() {
+        let mut solo_z = celda_cruzada(
+            "B",
+            (20.0, true, 40.0, false),
+            (0.0, true, 20.0, false),
+            "B",
+        );
+        solo_z.insert("eje_z_filtro_adicional".to_string(), json!("Proceso 135"));
+        let celdas = vec![
+            celda_cruzada(
+                "A",
+                (0.0, true, 20.0, false),
+                (20.0, true, 40.0, false),
+                "A",
+            ),
+            solo_z,
+        ];
+        let sin_ese_proceso = salida_anotada(
+            &celdas,
+            ValorEje::Numero(10.0),
+            ValorEje::Numero(30.0),
+            Some("Proceso 111"),
+            ("mm", "mm"),
+        );
+        assert!(sin_anotaciones(&sin_ese_proceso), "{sin_ese_proceso}");
+        let con_ese_proceso = salida_anotada(
+            &celdas,
+            ValorEje::Numero(10.0),
+            ValorEje::Numero(30.0),
+            Some("Proceso 135"),
+            ("mm", "mm"),
+        );
+        assert_eq!(
+            valor_de_la_primera_celda(&con_ese_proceso, "orden_invertido"),
+            "B"
+        );
+    }
+
+    #[test]
+    fn test_orden_recibido_ambiguo_lista_todas_sus_candidatas_en_el_aviso() {
+        let mut celdas = tabla_solapada();
+        celdas.push(celda_cruzada(
+            "A2",
+            (0.0, true, 20.0, false),
+            (20.0, true, 40.0, false),
+            "A2",
+        ));
+        let salida = numeros(&celdas, 10.0, 30.0);
+        assert_eq!(
+            salida["ejes_ambiguos"]["orden_recibido"]["celdas"]
+                .as_array()
+                .map(Vec::len),
+            Some(2),
+            "{salida}"
+        );
     }
 
     #[test]

@@ -109,7 +109,7 @@ Antes de finalizar la sesión, el agente **DEBE**:
 - Un hito exige rol o registro. `query_operational_matrix` filtra con `solo_declarados` por defecto y lo deja a la vista con `excluidos_no_declarados`. Un nodo `SINTETICO` de 07 nunca se presenta como apartado: se cita la sección real y sus páginas.
 - `fecha_vigor` puede ser nula y nunca se inventa. Con `fecha_referencia`, lo no afirmable se marca como `vigencia_no_declarada`. `origen_responsable` distingue `DECLARADO`, `INFERIDO` y `NO_CONSTA`. La matriz no es determinista ni fuente fiable de roles en documentos en voz pasiva.
 - Ningún test, fixture ni documento versionado puede contener nombres o texto de documentos reales. La evidencia real va a `docs/validacion/stair/`, ignorada por git.
-- 600 tests pasando y 31 `#[ignore]`. `acceptance_8_problemas`: 10/10 en 5 pasadas seguidas. Abierto: umbral 600→512 y pasos manuales de la GUI, ver `PROGRESS.md`.
+- 600 tests pasando y 31 `#[ignore]`. `acceptance_8_problemas`: 10/10 en 5 pasadas seguidas. Abierto: pasos manuales de la GUI, ver `PROGRESS.md`. El umbral de chunk único ya es 512 (`decisiones_stair.md` §10).
 
 ### Estado general del código en la Fase 15 (2026-10-19)
 - **367 tests pasando, más 19 `#[ignore]`.** Los ignorados son las suites reales con Claude Code y FastEmbed, más un generador visual.

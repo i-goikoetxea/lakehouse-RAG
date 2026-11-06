@@ -206,7 +206,7 @@
 ### STAIR Fase 2: Ingesta universal
 - [x] Preámbulo, secciones sin texto y BOM en `markdown_parser.rs`.
 - [x] Árbol ToC y resumen extractivo (`domain/services/arbol_secciones.rs`); filas de 07 en la ingesta.
-- [x] Fragmentación 600/512/64 con estimación determinista (`domain/services/fragmentacion.rs`).
+- [x] Fragmentación 600/512/64 (umbral bajado a 512 en la sesión Umbral 512) con estimación determinista (`domain/services/fragmentacion.rs`).
 - [x] Tablas Markdown íntegras en 02.
 - [x] Fallback sin Claude: `doc_id` provisional, `PARCIAL_UNIVERSAL` y avisos en el informe, CLI y GUI.
 - [x] `reintentar_destilacion` en el servicio y en `LakehouseApp`; `confirmar_sustitucion` en el store.
@@ -1098,3 +1098,162 @@
 - El test real de la regla 12 no se ejecutó: el cumplimiento por Claude real queda sin verificar.
 - `Anexo A` en minúsculas no abre nodo, a propósito: suele ser una remisión.
 - Abierto: umbral 600→512; `pattern` no válido en un campo del alta de centro; pasos manuales de la GUI.
+
+### Sesión Arnés 1 (2026-11-02) — Fase 1: `IntentDetector` y `PostInferenceGuard`
+
+**Cambios:**
+- `ssd_arnes_determinista.md` ajustado al spike: `--json-schema` es una directiva, `Obligatoria` pasa a `Dirigida`, la señal de llamada es `structured_output` y queda como riesgo de la Fase 2 el intercambio de ejes.
+- Nuevo `use_cases/arnes_turno`, puro y sin dependencias: `IntentDetector`, `PreInferenceInterceptor::plan` y `PostInferenceGuard` con `RegistroTurno`. Sin cablear: no se tocó puerto, runner, orquestador, GUI ni eventos.
+- Decisión añadida al SSD: `Responsable` también exige el intento (matriz o SQL), para que el guard cubra el turno dirigido sin llamada.
+
+**Tests:** 52 unitarios (`cargo test --lib arnes_turno`), vistos en rojo con implementaciones vacías (38 fallaban; 14 pasaban por comprobar casos que la implementación vacía ya cumplía), y la nueva `adversarial_arnes_tests` (16), escrita junto a la implementación; encontró un fallo real (la unidad de un valor se tomaba como etiqueta del siguiente). No se ejecutó la suite completa: no estaba autorizada.
+
+**Notas para la siguiente sesión (Fase 2):**
+- Pendientes de §5, por depender del orquestador o del adaptador: `test_directiva_solo_afecta_al_primer_paso`, `test_turno_dirigido_sin_structured_output_no_cuenta_como_llamada`, reintento, historial y streaming.
+- Comprobar qué hace la tool con ejes intercambiados o vacíos.
+- Medir en la Fase 4 los falsos bloqueos: `TabularIncompleta` que pide el eje que falta y recuentos redactados por el modelo.
+
+### Sesión Arnés 2 (2026-11-02) — Fase 2: puerto, runner, orquestador y evento
+
+**Cambios:**
+- `AgentRunnerPort::ejecutar_turno_dirigido`, que devuelve `TurnoDirigido::{Llamada, SinLlamada}`. Respecto al §3.2 original añade el parámetro `herramientas`: el spike midió con las 8 tools a la vista. SSD actualizado.
+- `ClaudeAgentRunner`: `--output-format json --json-schema`. Solo un `structured_output` conforme cuenta como llamada; `result` nunca se usa. `is_error` y una salida que no sea JSON son errores.
+- `AgentOrchestrator` conectado al arnés: clasifica, dirige solo el primer paso, registra las tools del turno, valida, hace un reintento y luego da el mensaje fijo. El recordatorio solo existe en la vista del modelo. Los turnos retenidos no pasan observador y emiten un único `TextDelta` ya validado; los turnos sin intención conservan el streaming.
+- `AgentExecutionEvent::ArnesIntervino { etapa, motivo }`, expuesto en el campo `arnes` del `--json`. La GUI no necesitó cambios: su `match` ya tiene `_`.
+- Ejes intercambiados: `lookup_double_entry_table` **no los detecta**. Con rangos solapados devuelve otra celda sin aviso, y el guard la acepta. Evidencia y propuesta en el SSD §3.2; no implementado en esta sesión (ver Sesión Arnés 2b).
+
+**Tests:** 711 pasando, 0 fallos, 32 `#[ignore]` no ejecutados. `cargo clippy --all-targets -- -D warnings` y `cargo fmt --check`: OK. Los tests del orquestador y del adaptador se vieron en rojo. Los adversariales nuevos (8) se escribieron después de la implementación y pasaron a la primera, así que no hay rojo que los respalde.
+
+**Test heredado adaptado:** `test_chat_de_la_ventana_rellena_citas_matriz_y_grafo_desde_las_tools_reales` preguntaba «¿Quién custodia?» con una respuesta guionizada que nombra un rol, y la matriz devolvía `sin_responsable_declarado`: el guard la rechaza con razón. Ahora pregunta «Resume la custodia», sin cambiar ninguna aserción, y el caso original pasa a `test_chat_de_la_ventana_no_muestra_un_responsable_sin_respaldo`. `acceptance_8_problemas` (ignorado) solo gana el reenvío del turno dirigido en su `AgenteRegistrador`.
+
+**Notas para la siguiente sesión:**
+- Nada de esto se ha probado con Claude real: es la Fase 4. Allí conviene medir los ejes intercambiados y qué ocurre si la CLI agota sus reintentos de esquema, porque hoy un `is_error` termina el turno con error en vez de pasar por el guard.
+- Fase 3: mostrar `ArnesIntervino` en el Studio; `evento_en_vivo` de la GUI aún lo ignora. El efecto de escritura se pierde en los turnos retenidos.
+- Decisión pendiente del usuario: la propuesta de `ejes_ambiguos` (aprobada e implementada en la Sesión Arnés 2b).
+
+### Sesión Arnés 2b (2026-11-02) — Ejes intercambiados en `lookup_double_entry_table`
+
+**Cambios:**
+- `lookup_double_entry_table` repite el cruce con los ejes invertidos, con las mismas celdas ya filtradas por fecha y el mismo `eje_z`. Si ambos órdenes dan celdas distintas añade `ejes_ambiguos`, sin cambiar `estado` ni valor. Si solo resuelve el invertido, conserva `sin_coincidencia` y añade `orden_invertido_resolveria`, sin la celda.
+- Regla 13 en `build_system_prompt`. También se avisa en la descripción de la tool y en `MCP_GUIDE.md`, porque un cliente MCP no recibe el prompt.
+- `PostInferenceGuard`: nueva `ViolacionArnes::EjesAmbiguosSinAclarar`. Rechaza el valor de un solo orden si la respuesta no nombra ambos ejes por su nombre o unidad. Usa solo datos del propio aviso, sin vocabulario añadido.
+- SSD §3.2 y §3.3 actualizados: riesgo resuelto en la salida de la tool, con lo que queda sin garantizar.
+
+**Hallazgo:** el aviso también sale en cruces correctos cuando la tabla tiene extremos abiertos. En la tabla 4-A del fixture, 30 mm y CE 0,42 % avisan, porque 0,42 cae en `x <= 20` y 30 en `y > 0,45`. El SSD suponía que el riesgo solo existía con rangos solapados.
+
+**Tests:** 744 pasando, 0 fallos, 32 `#[ignore]` no ejecutados. `cargo clippy --all-targets -- -D warnings` y `cargo fmt --check`: OK. Los unitarios de `lookup.rs` y del guard se vieron en rojo con stubs (13 fallaban). Los `test_ejes_intercambiados_*` documentaban el fallo y ahora exigen el aviso: `test_ejes_intercambiados_con_rangos_disjuntos_indican_que_el_invertido_resolveria` y `test_ejes_intercambiados_con_rangos_solapados_avisan_de_ejes_ambiguos`. Los 2 de integración y los 12 adversariales nuevos se escribieron después de la implementación, así que no hay rojo que los respalde. No se ejecutó ningún `#[ignore]` ni Claude real.
+
+**Notas para la siguiente sesión:**
+- Fase 4: medir la frecuencia del aviso en tablas reales, los reintentos que causa `EjesAmbiguosSinAclarar` y si el modelo decide bien por unidades.
+- Límites conocidos en el SSD §3.2: el guard no prueba que la asignación sea correcta, y los turnos sin intención y `execute_athena_sql` quedan fuera.
+
+### Sesión Arnés 3 (2026-11-03) — Fase 3: streaming y Studio
+
+**Cambios:**
+- `ChatStreamEvento` gana `TurnoRetenido` y `Arnes { etapa, mensaje }`. La retención se decide con las mismas funciones puras que usa el orquestador, sin tocar el puerto ni el evento de la aplicación.
+- Nuevo `presentation/gui/intervenciones_arnes.rs`: traduce etapa y `motivo` a lenguaje del operador. El `motivo` nunca se muestra; uno desconocido da una causa genérica. `ChatResponsePayload` añade `arnes` y `salida_segura`.
+- Ventana: estado «Validando…» y «preparando otra…», pestaña Validación en el Studio, mensaje fijo resaltado con botón al Studio, y avisos `ejes_ambiguos` y `orden_invertido_resolveria` en la tarjeta y en el resumen del lookup. Con salida segura se limpian los resultados de turnos anteriores, para que el mensaje no remita a datos ajenos.
+
+**Tests:** 759 pasando, 0 fallos, 32 `#[ignore]` no ejecutados. `cargo clippy --all-targets -- -D warnings`, `cargo fmt --check` y `node --check`: OK. Nueva `tests/integration_chat_arnes.rs` (9) y 6 unitarios. Vistos en rojo con stubs, salvo tres que ya pasaban porque describen lo hecho en la Fase 2: serialización, historial con reintento e historial con salida segura. Los casos adversariales de la fase (motivo con HTML u órdenes, Detener en paso dirigido y en reintento) están en esos tests; no hay fichero `adversarial_*` propio. El JavaScript no tiene tests automáticos: se comprobó en la ventana.
+
+**Comprobado en la ventana real** (release del worktree, CDP, config y centro temporales, Markdown sintético, Haiku):
+- Turno sin intención: el texto crece en 8 pasos, sin estado de validación.
+- Turno tabular: «Validando…», luego «preparando otra…»; tarjeta con el chip y el aviso de ejes ambiguos.
+- Salida segura real, provocada por Haiku: mensaje fijo resaltado, Studio en Matriz · Tabla y pestaña Validación legible.
+- Detener en paso dirigido y en reintento: el `claude.exe` hijo (PID 482916 y 39848) desaparece, y tras el primero el turno siguiente responde con normalidad.
+- Ventana cerrada (PID 193028): sin procesos del worktree ni puerto de depuración.
+
+**No comprobado con un turno real:**
+- `orden_invertido_resolveria`: el fixture no lo provoca. Se llamó a `pintarTabla` en la ventana con datos sintéticos, incluido HTML, que queda escapado. El botón «Ver los resultados en el Studio» no se pulsó.
+- Un turno tabular retenido que acabe en respuesta válida: en las dos preguntas tabulares completadas o reintentadas Haiku fue rechazado; la entrega válida solo está cubierta por tests.
+
+**Notas para la siguiente sesión (Fase 4):**
+- Posible falso bloqueo a medir: «Tabla 4-A, 30 mm y CE 0,42 %» con Haiku devolvió el lookup correcto (125 °C) y acabó en salida segura por `CifraSinAnclar`, con dos llamadas iguales. La GUI no guarda la cifra rechazada, así que no se sabe cuál fue. En otro intento apareció una línea de lookup con error antes del reintento.
+- El aviso de ejes ambiguos aparece en este cruce correcto (ver Sesión Arnés 2b) y puede sumar rechazos.
+- `gen/schemas/*.json` se regeneran al compilar y no forman parte de esta fase.
+
+### Sesión Arnés 3b (2026-11-03) — Guard de abstención y revisión del anclaje
+
+**Cambios:**
+- Regla 14 del prompt: ante lo que no consta, decirlo sin ofrecer valores de referencia, salvo que se pidan. Sí se da lo preguntado que consta.
+- Nueva violación `CifraEnAbstencion`: abstención con una cifra que no está en la pregunta ni en una salida válida del turno, salvo que el operador pida referencias. Usa el mismo reintento único y el mensaje fijo.
+- Nueva intención `DatoConcreto` (valor o código): retiene el texto, no dirige ninguna tool y solo valida la abstención.
+- Anclaje: las fuentes se leen con `lecturas_de_fuente`, más amplia que la lectura de la respuesta. También se admiten marcadores de lista con Markdown, guiones tipográficos en identificadores y miles con espacio duro. `125ºC` en una respuesta ya es una cifra, y `999.` al inicio de línea ya no pasa por marcador.
+- Telemetría: `tracing::warn!` en cada intervención, con el `motivo` que lleva el literal rechazado. La ventana sigue sin recibirlo.
+- GUI, en commit aparte: `pattern` del alta de centro válido con el indicador `v`.
+
+**Tests:** 811 pasando, 0 fallos, 32 `#[ignore]` no ejecutados. `cargo clippy --all-targets -- -D warnings` y `cargo fmt --check`: OK. Rojo verificado contra stubs: 24 unitarios y 9 adversariales, más el del `pattern`. Los demás tests nuevos ya pasaban porque fijan comportamiento que no debía cambiar o límites declarados. La suite adversarial se amplió en `tests/adversarial_arnes_tests.rs`.
+
+**Hallazgo de `CifraSinAnclar` (Fase 3): no reproducido.** No se guardó la cifra, así que no se sabe cuál fue. `125 °C`, `125°C`, `0,42 %`, `0.42%`, rangos y `**125 °C**` ya se anclaban bien con una salida de la forma real del lookup. Sí se hallaron y corrigieron rechazos falsos de otros formatos: `**1.**`, `### 1.`, `Tabla 4‑A`, `125ºC` o `Rev02` en la fuente, y `apartado 5.2` con `5.2.1` en la fuente. Cualquiera pudo ser la causa, o ninguna. Otra hipótesis sigue abierta y no es un fallo de formato: la `cita` del lookup no trae página ni fecha, y citarlas desde el historial se sigue rechazando.
+
+**No comprobado con Claude real:** todo lo de esta sesión. Ni la regla 14, ni la tasa de falsos bloqueos, ni el efecto en la línea base.
+
+**Notas para la siguiente sesión (Fase 4):**
+- El guard **no frena** la forma dominante de la línea base (`No consta; la línea L-204 tiene 14,5 bar`) si esa cifra salió de una tool del turno: contra eso solo actúa la regla 14. Ver SSD §3.3. Hay que medir `rechazo_estricto` tras este cambio.
+- Para leer la cifra rechazada: `--json` (campo `arnes`) o `RUST_LOG=warn` con stderr redirigido en la ventana.
+- `DatoConcreto` no ancla una respuesta sin abstención: `Son 999 bar` pasa.
+- Durante esta sesión se llenó el disco D:. Con aprobación del usuario se borraron los `target` de `arnes-ejes-ambiguos` y `arnes-fase-2`, que hay que recompilar si se vuelven a usar.
+
+### Sesión Arnés 4 (2026-11-03) — Fase 4: suites reales y benchmark con Claude
+
+**Estado de la Fase 4: medida, no completada.** Informe: `docs/arquitectura/ssd_arnes_fase4_suites_reales.md`.
+
+**Cambios:**
+- `tests/acceptance_8_problemas.rs`: el modelo de los 8 problemas se elige con `LAKEHOUSE_MODELO_ACEPTACION` (por defecto `sonnet`; §9.4 conserva los suyos). Cada intervención del arnés se imprime con su `motivo`, y `LAKEHOUSE_ACEPTACION_VOLCAR` vuelca la salida bruta del modelo, también la rechazada.
+- No se tocó código de producción ni `benchmarks/`.
+
+**Medido con Claude real:**
+- `acceptance_8_problemas`: 10/11 con Haiku y 9/11 con Sonnet. `p2_cruce_con_la_tabla_ya_en_el_historial_invoca_lookup` pasa con los dos (125 °C, con lookup).
+- P2 cruce exacto falla con los dos modelos por el oráculo del test: prohíbe «100 °C», y la respuesta correcta lo cita como orden de ejes descartado (regla 13).
+- P3 con Sonnet: **falso bloqueo** por `CifraEnAbstencion` con «11». La causa está en el texto rechazado: `vigencia_no_declarada` activa la locución «no declarada», y «Hoy (2026-11-03)» aporta el «11».
+- Benchmark (binario release sha256 `f26f5972…`, Sonnet, 3 repeticiones, semilla 42):
+  - Ciclo de vida: 0,852 → 0,630 estricta. `historico_por_fecha` pasa de 1,000 a 0,333 por 6 salidas seguras: el detector toma la fecha de la pregunta por valor de eje (`TabularIncompleta`) y exige Capa 2.
+  - RGB industrial: 0,625 → 0,625 estricta y 0,688 → 0,688 revisada. `rechazo_estricto` sigue en 0,000 y `rechazo_semantico` en 1,000 (revisión manual).
+  - Hubo 3 reintentos más por «11», recuperados por el reintento, y 0 fallos de ejecución.
+- Caso «Tabla 4-A, 30 mm y CE 0,42 %» de la Fase 3: no reproducido en 5 pasadas.
+
+**Notas para la siguiente sesión:**
+- Hay tres propuestas para el arnés pendientes de aprobación: fechas y revisiones que no cuenten como ejes, locuciones fuera de los identificadores y fechas ISO ancladas enteras con la fecha de hoy. Están en el §5 del informe. Después hay que repetir P3 con Sonnet y el benchmark.
+- El oráculo de P2 y el puntuador del benchmark penalizan el valor descartado que la regla 13 obliga a explicar. Son decisiones del usuario y de la sesión del benchmark.
+- La compilación se hizo con `CARGO_TARGET_DIR` en los `target` de `arnes-guard-rechazo` (tests) y `arnes-fase-3` (release), sin borrar nada. Este worktree no tiene `target`.
+
+### Sesión Arnés 4b (2026-11-03) — Corrección de los falsos bloqueos de la Fase 4
+
+**Estado: corregida y medida con Claude real. Pendiente de aprobación del usuario.** Informe: `docs/arquitectura/ssd_arnes_fase4_suites_reales.md` §7.
+
+**Cambios:**
+- [x] Detector: una fecha (textual, ISO, `d/m/a`, `d-m-a`) o el número de una revisión (`Rev. 00`, `Rev.01`) no cuentan como valor de eje. Nuevo `arnes_turno/fechas.rs`.
+- [x] Abstención: un identificador con `_` es una sola palabra (`vigencia_no_declarada` no es «no declarada»); `NO_CONSTA` sigue contando como «no consta» (regla 9).
+- [x] Anclaje: una fecha ISO o textual de la respuesta es una sola cifra. La fecha de hoy entra por el nuevo puerto `RelojPort` (adaptador `infrastructure/reloj_sistema.rs`, campo `reloj` de `DependenciasLakehouse`, `AgentOrchestrator::with_reloj`) y ancla solo la fecha entera.
+- [x] Oráculo de P2 en `acceptance_8_problemas.rs` (`oraculo_p2`): «100 °C» solo se admite como lectura con los ejes invertidos o descartada. Es un cambio de criterio aprobado por el usuario, documentado en el informe §7.1.
+- No se tocó `benchmarks/`.
+
+**Tests:** 842 pasando, 0 fallos, 32 `#[ignore]` no ejecutados. `cargo clippy --all-targets -- -D warnings` y `cargo fmt --check`: OK. Rojo verificado: 14 unitarios del arnés y 3 del oráculo. Se añadieron 6 casos a `tests/adversarial_arnes_tests.rs`.
+
+**Medido con Claude real:**
+- `acceptance_8_problemas`: 11/11 con Haiku (0 reintentos) y 11/11 con Sonnet (1 reintento por «50», un dato del historial que el SSD rechaza a propósito). P3 con Sonnet pasa sin intervención, con «Hoy (2026-11-03)» y `vigencia_no_declarada` en la respuesta.
+- Benchmark ciclo de vida (binario sha256 `5e90bc8e…`, Sonnet, 3 repeticiones, semilla 42): 0,852 estricta y 1,000 revisada, igual que la línea base (Fase 4: 0,630 y 0,778). `historico_por_fecha` vuelve a 1,000. Hubo 0 directivas, 0 reintentos y 0 salidas seguras.
+- No queda ningún falso bloqueo medido.
+
+**Notas para la siguiente sesión:**
+- Pendiente fuera de alcance: el puntuador del benchmark cuenta como fallo citar un valor atribuido a otra revisión o a un orden descartado. Deja `historico_por_revision` en 0,556 estricta.
+- No se repitió la pista RGB industrial.
+- Compilación con `CARGO_TARGET_DIR` en los `target` de `arnes-guard-rechazo` (tests) y `arnes-fase-3` (release), sin borrar nada.
+
+### Sesión Umbral 512 (2026-11-03) — Umbral de chunk único de 600 a 512
+
+**Estado: [COMPLETADO]. Aprobada por el usuario (2026-11-03), sin reserva de contexto en la ventana.** Contrato: `docs/arquitectura/decisiones_stair.md` §10.
+
+**Cambios:**
+- [x] `UMBRAL_CHUNK_UNICO` vale `TOKENS_VENTANA` (512). Ventana y solapamiento sin cambios. Sin cambio de esquema.
+- [x] Presupuesto de las ventanas revisado con números: no se reserva espacio para el contexto (§10).
+- [x] Nuevo `tests/medicion_truncado_sintetico.rs` (`#[ignore]`, FastEmbed real, sin Claude) con un documento sintético.
+
+**Tests:** 849 pasando, 0 fallos, 34 `#[ignore]` no ejecutados salvo los de FastEmbed citados. `cargo clippy --all-targets -- -D warnings` y `cargo fmt --check`: OK. Casos: frontera 511, 512 y 513, ninguna ventana por encima de 512, solape que cubre la cola sin pérdidas justo sobre el umbral. Rojo verificado: 3 unitarios y 4 adversariales. Nueva suite `tests/adversarial_umbral_512_tests.rs` con 5 casos: sección de 200.000 tokens, breadcrumb de 6 títulos largos, texto sin espacios e ideogramas en la frontera.
+
+**Medido con FastEmbed real (documento sintético):** con 600 salían 34 chunks y 5 truncados; con 512, 43 chunks y 0 truncados. En el límite real de 512 caben 699 tokens estimados en prosa, 656 con códigos, 812 en ideogramas y 380 sin espacios.
+
+**Notas para la siguiente sesión:**
+- Los centros existentes no se recrean. Lo ya ingerido conserva los cortes de 600 hasta que se reingiera en un centro nuevo; un provisional que se reintenta ya fragmenta con 512.
+- Riesgo restante, visible en el aviso de truncado: texto sin espacios, porque la estimación subcuenta, y breadcrumbs de más de unos 144 tokens estimados.
+- Compilación con `CARGO_TARGET_DIR` en el `target` de `arnes-guard-rechazo` y `FASTEMBED_CACHE_DIR` en `target/fastembed_cache` del checkout principal, sin borrar nada.

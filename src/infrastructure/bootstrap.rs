@@ -20,6 +20,7 @@ use crate::infrastructure::parsers::ParserPorFormato;
 use crate::infrastructure::query_engine::datafusion_engine::DataFusionEngine;
 use crate::infrastructure::query_engine::indice_semantico_memoria::IndiceSemanticoMemoria;
 use crate::infrastructure::query_engine::lakehouse_projection::LanceProjection;
+use crate::infrastructure::reloj_sistema::RelojDelSistema;
 use crate::infrastructure::storage::center_registry_json::{
     JsonCenterRegistry, directorio_configuracion_efectivo,
 };
@@ -105,6 +106,7 @@ pub fn composicion_real(config: &ConfiguracionComposicion) -> ComposicionReal {
             catalogo_modelos: Arc::new(ClaudeHeadlessModelCatalog::new(
                 ClaudeModelCatalogConfig::default(),
             )),
+            reloj: Arc::new(RelojDelSistema),
         },
         indice: motores.indice,
     }

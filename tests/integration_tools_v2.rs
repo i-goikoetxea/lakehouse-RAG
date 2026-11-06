@@ -462,3 +462,72 @@ async fn test_aislamiento_de_centro_en_las_6_tools() {
             .contains("Acceso denegado")
     );
 }
+/// La Tabla 4-A tiene extremos abiertos: `x <= 20` y `y > 0,45` admiten también el orden invertido
+/// de un cruce correcto. El aviso sale aunque el modelo haya acertado: la tool no puede saberlo.
+#[tokio::test]
+async fn test_lookup_avisa_de_ejes_ambiguos_sin_cambiar_estado_ni_valor() {
+    let entorno = entorno_sembrado().await;
+    let salida = ok(
+        &entorno.herramientas,
+        "lookup_double_entry_table",
+        args(json!({ "tabla_id": "4-A", "valor_x": 30, "valor_y": 0.42 })),
+    )
+    .await;
+    assert_eq!(salida["estado"], "resuelto", "{salida}");
+    assert_eq!(salida["valor_resultado_texto"], "125 (*)");
+    let aviso = &salida["ejes_ambiguos"];
+    assert_eq!(aviso["eje_x"]["nombre"], "espesor_nominal_mm", "{salida}");
+    assert_eq!(aviso["eje_x"]["unidad"], "mm");
+    assert_eq!(aviso["eje_y"]["unidad"], "%");
+    assert_eq!(aviso["orden_recibido"]["valor_x"], 30.0);
+    assert_eq!(
+        aviso["orden_recibido"]["celdas"][0]["valor_resultado_texto"],
+        "125 (*)"
+    );
+    assert_eq!(aviso["orden_invertido"]["valor_x"], 0.42);
+    assert_eq!(
+        aviso["orden_invertido"]["celdas"][0]["valor_resultado_texto"],
+        "75"
+    );
+}
+
+#[tokio::test]
+async fn test_lookup_invertido_respeta_fecha_referencia() {
+    let entorno = entorno_sembrado().await;
+    let cruce = |fecha: Option<&str>| {
+        let mut a = args(json!({ "tabla_id": "4-A", "valor_x": 0.42, "valor_y": 30 }));
+        if let Some(f) = fecha {
+            a["fecha_referencia"] = json!(f);
+        }
+        a
+    };
+    let celda_invertida =
+        |salida: &Value| salida["ejes_ambiguos"]["orden_invertido"]["celdas"][0].clone();
+
+    let vigente = ok(
+        &entorno.herramientas,
+        "lookup_double_entry_table",
+        cruce(None),
+    )
+    .await;
+    assert_eq!(
+        celda_invertida(&vigente)["valor_resultado_texto"],
+        "125 (*)",
+        "{vigente}"
+    );
+    assert_eq!(celda_invertida(&vigente)["cita"]["revision"], "Rev. 04");
+
+    let historico = ok(
+        &entorno.herramientas,
+        "lookup_double_entry_table",
+        cruce(Some(FECHA_ANTERIOR_REV04)),
+    )
+    .await;
+    assert_eq!(
+        celda_invertida(&historico)["valor_resultado_texto"],
+        "100 (*)",
+        "{historico}"
+    );
+    assert_eq!(celda_invertida(&historico)["cita"]["revision"], "Rev. 03");
+    assert!(!historico.to_string().contains("Rev. 04"), "{historico}");
+}

@@ -358,7 +358,7 @@ impl ToolDefinition {
             ),
             Self::nueva(
                 LakehouseToolName::LookupDoubleEntryTable,
-                "Cruce EXACTO en una tabla de doble entrada (respeta <, <=, > y >= de cada extremo; no interpola). Indica tabla_id (o busqueda_tabla), valor_x y valor_y (número o categoría) y, si la tabla lo tiene, eje_z. Devuelve valor_resultado_texto/num, la nota_pie_condicion (OBLIGATORIO citarla si existe), la cita y la prelación. Si no hay celda o hay varias candidatas lo dice explícitamente.",
+                "Cruce EXACTO en una tabla de doble entrada (respeta <, <=, > y >= de cada extremo; no interpola). Indica tabla_id (o busqueda_tabla), valor_x y valor_y (número o categoría) y, si la tabla lo tiene, eje_z. Devuelve valor_resultado_texto/num, la nota_pie_condicion (OBLIGATORIO citarla si existe), la cita y la prelación. Si no hay celda o hay varias candidatas lo dice explícitamente. Con ejes_ambiguos, los dos órdenes de los ejes dan celdas distintas: decide por unidades o nombres de eje; si no lo distinguen, muestra ambos valores o pregunta. Con orden_invertido_resolveria, comprueba los ejes y repite la llamada si estaban cambiados.",
                 esquema_objeto(
                     json!({
                         "centro_id": propiedad_centro(),

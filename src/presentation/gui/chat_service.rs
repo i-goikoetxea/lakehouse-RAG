@@ -9,12 +9,14 @@ use serde::Serialize;
 use tokio::sync::{Mutex, Notify};
 
 use crate::application::dtos::agent::{
-    AgentExecutionEvent, AgentMessage, AgentRole, ClaudeModel, ModelDescriptor,
+    AgentExecutionEvent, AgentMessage, AgentRole, ClaudeModel, EtapaArnes, ModelDescriptor,
 };
 use crate::application::ports::model_catalog::ModelCatalogPort;
 use crate::application::use_cases::agent_orchestrator::{AgentOrchestrator, EventCallback};
+use crate::application::use_cases::arnes_turno::{IntentDetector, PreInferenceInterceptor};
 use crate::application::use_cases::lakehouse_app::{AsistenteDirecto, AsistenteLakehousePort};
 use crate::domain::models::center::CenterId;
+use crate::presentation::gui::intervenciones_arnes::{IntervencionArnesDto, explicar_intervencion};
 use crate::presentation::gui::markdown_seguro::markdown_a_html_seguro;
 use crate::presentation::gui::resultados_tools::{
     agrupar_fuentes, extraer_citas, extraer_graph_result, extraer_matrix_result, resumen_tool,
@@ -40,6 +42,14 @@ pub enum ChatStreamEvento {
         turno_id: String,
         nombre: String,
         es_error: bool,
+    },
+    /// El texto no se emite hasta validarlo: la ventana indica que está comprobando
+    TurnoRetenido { turno_id: String },
+    /// El arnés actuó, con el texto ya preparado para el operador
+    Arnes {
+        turno_id: String,
+        etapa: EtapaArnes,
+        mensaje: String,
     },
 }
 
@@ -145,6 +155,12 @@ impl GuiChatService {
         if let Ok(mut turnos) = self.en_curso.lock() {
             turnos.insert(turno_id.to_string(), Arc::clone(&aviso_detener));
         }
+        // Misma decisión que tomará el orquestador sobre esta pregunta: ambos usan el arnés puro
+        if PreInferenceInterceptor::plan(&IntentDetector::clasificar(mensaje)).retener_texto {
+            emisor(ChatStreamEvento::TurnoRetenido {
+                turno_id: turno_id.to_string(),
+            });
+        }
         // Al detener se suelta el futuro del turno: el subproceso de Claude muere (kill_on_drop)
         let resultado = tokio::select! {
             resultado = self.asistente.conversar(
@@ -164,6 +180,7 @@ impl GuiChatService {
                 Self::acotar_historial(historial);
                 let eventos = eventos.lock().map(|e| e.clone()).unwrap_or_default();
                 let tarjetas = Self::tarjetas_de_herramientas(&eventos);
+                let intervenciones = Self::intervenciones_del_turno(&eventos);
                 let citations = extraer_citas(&tarjetas);
                 Ok(ChatResponsePayload {
                     reply_html: texto_a_html_seguro(&respuesta),
@@ -172,6 +189,10 @@ impl GuiChatService {
                     matrix_result: extraer_matrix_result(&tarjetas),
                     graph_result: extraer_graph_result(&tarjetas),
                     tools_used: tarjetas,
+                    salida_segura: intervenciones
+                        .iter()
+                        .any(|i| i.etapa == EtapaArnes::SalidaSegura),
+                    arnes: intervenciones,
                 })
             }
             Err(e) => {
@@ -233,6 +254,13 @@ impl GuiChatService {
                     es_error: *is_error,
                 })
             }
+            AgentExecutionEvent::ArnesIntervino { etapa, motivo } => {
+                Some(ChatStreamEvento::Arnes {
+                    turno_id,
+                    etapa: *etapa,
+                    mensaje: explicar_intervencion(*etapa, motivo),
+                })
+            }
             _ => None,
         }
     }
@@ -247,6 +275,23 @@ impl GuiChatService {
             inicio += 1;
         }
         historial.drain(..inicio);
+    }
+
+    fn intervenciones_del_turno(
+        eventos: &[(AgentExecutionEvent, Instant)],
+    ) -> Vec<IntervencionArnesDto> {
+        eventos
+            .iter()
+            .filter_map(|(evento, _)| match evento {
+                AgentExecutionEvent::ArnesIntervino { etapa, motivo } => {
+                    Some(IntervencionArnesDto {
+                        etapa: *etapa,
+                        mensaje: explicar_intervencion(*etapa, motivo),
+                    })
+                }
+                _ => None,
+            })
+            .collect()
     }
 
     fn tarjetas_de_herramientas(eventos: &[(AgentExecutionEvent, Instant)]) -> Vec<ToolCardDto> {

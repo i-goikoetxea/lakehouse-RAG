@@ -10,8 +10,8 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 use tokio::time::timeout;
 
-use crate::application::dtos::agent::{AgentMessage, AgentTurnOutput, ClaudeModel};
-use crate::application::dtos::tools::{ToolCall, ToolDefinition};
+use crate::application::dtos::agent::{AgentMessage, AgentTurnOutput, ClaudeModel, TurnoDirigido};
+use crate::application::dtos::tools::{LakehouseToolName, ToolCall, ToolDefinition};
 use crate::application::ports::agent_runner::{AgentRunnerPort, ObservadorTexto};
 use crate::domain::errors::DomainError;
 use crate::infrastructure::llm::ocultar_consola_en_windows;
@@ -25,6 +25,9 @@ const MAX_AVISO_SESION: usize = 200;
 
 /// Caracteres de diagnóstico que se conservan de una salida fallida
 const MAX_SALIDA_DIAGNOSTICO: usize = 2000;
+
+/// El turno dirigido pide una sola llamada, y el sobre de la CLI no trae identificador
+const ID_LLAMADA_DIRIGIDA: &str = "call_dirigida";
 
 /// Configuración para la ejecución de Claude Headless
 #[derive(Debug, Clone)]
@@ -303,6 +306,80 @@ impl ClaudeAgentRunner {
         }
     }
 
+    /// Lee el sobre de un turno dirigido. Solo la presencia de un `structured_output` conforme
+    /// indica llamada: sin ella el sobre también marca éxito, y `result` nunca se usa.
+    pub fn interpretar_sobre_dirigido(
+        stdout: &str,
+        definicion: &ToolDefinition,
+    ) -> Result<TurnoDirigido, DomainError> {
+        let sobre: Value = serde_json::from_str(stdout.trim()).map_err(|e| {
+            DomainError::AgentError(format!(
+                "La salida de Claude CLI no es el sobre JSON esperado ({e}): {}",
+                stdout
+                    .chars()
+                    .take(MAX_SALIDA_DIAGNOSTICO)
+                    .collect::<String>()
+            ))
+        })?;
+        if sobre.get("is_error").and_then(Value::as_bool) == Some(true) {
+            if es_fallo_de_sesion(stdout) {
+                return Err(DomainError::AgentError(MENSAJE_SESION_CLAUDE.to_string()));
+            }
+            return Err(DomainError::AgentError(format!(
+                "Claude CLI devolvió is_error = true: {}",
+                stdout
+                    .chars()
+                    .take(MAX_SALIDA_DIAGNOSTICO)
+                    .collect::<String>()
+            )));
+        }
+        let Some(salida) = sobre.get("structured_output") else {
+            return Ok(TurnoDirigido::SinLlamada);
+        };
+        let nombre_conforme = salida.get("name").and_then(Value::as_str) == Some(&definicion.name);
+        match salida.get("arguments") {
+            Some(argumentos) if nombre_conforme && argumentos.is_object() => {
+                Ok(TurnoDirigido::Llamada(ToolCall {
+                    id: ID_LLAMADA_DIRIGIDA.to_string(),
+                    name: definicion.name.clone(),
+                    arguments: argumentos.clone(),
+                }))
+            }
+            _ => Ok(TurnoDirigido::SinLlamada),
+        }
+    }
+
+    /// Esquema de `--json-schema`: fija el nombre de la tool y toma sus argumentos de la definición
+    pub fn esquema_de_llamada(definicion: &ToolDefinition) -> Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "name": { "const": definicion.name },
+                "arguments": definicion.parameters,
+            },
+            "required": ["name", "arguments"],
+            "additionalProperties": false,
+        })
+    }
+
+    /// Argumentos de un turno dirigido: sobre JSON con la salida sujeta a `esquema`
+    pub fn construir_argumentos_dirigidos(
+        &self,
+        modelo: &ClaudeModel,
+        system_prompt: &str,
+        esquema: &Value,
+    ) -> Vec<String> {
+        let mut args = self.construir_argumentos(modelo, system_prompt);
+        let dirigido = [
+            "--output-format".to_string(),
+            "json".to_string(),
+            "--json-schema".to_string(),
+            esquema.to_string(),
+        ];
+        args.splice(1..1, dirigido);
+        args
+    }
+
     async fn ejecutar_cli(
         &self,
         args: Vec<String>,
@@ -397,6 +474,34 @@ impl AgentRunnerPort for ClaudeAgentRunner {
             .await?;
         Ok(Self::parsear_salida_claude(&texto))
     }
+
+    async fn ejecutar_turno_dirigido(
+        &self,
+        modelo: &ClaudeModel,
+        system_prompt: &str,
+        historial: &[AgentMessage],
+        herramientas: &[ToolDefinition],
+        dirigida: LakehouseToolName,
+    ) -> Result<TurnoDirigido, DomainError> {
+        let definicion = herramientas
+            .iter()
+            .find(|h| h.name == dirigida.as_str())
+            .ok_or_else(|| {
+                DomainError::AgentError(format!(
+                    "La herramienta dirigida '{}' no está en el catálogo",
+                    dirigida.as_str()
+                ))
+            })?;
+        let entrada = Self::construir_entrada_conversacion(historial, herramientas)?;
+        let esquema = Self::esquema_de_llamada(definicion);
+        let stdout = self
+            .ejecutar_cli(
+                self.construir_argumentos_dirigidos(modelo, system_prompt, &esquema),
+                entrada,
+            )
+            .await?;
+        Self::interpretar_sobre_dirigido(&stdout, definicion)
+    }
 }
 
 #[cfg(test)]
@@ -462,6 +567,43 @@ mod tests {
         assert_eq!(args[posicion("--system-prompt") + 1], "Eres el asistente");
         assert!(args.contains(&"-p".to_string()));
         assert!(args.contains(&"--no-session-persistence".to_string()));
+    }
+
+    fn definicion_lookup() -> ToolDefinition {
+        ToolDefinition::lakehouse_tools()
+            .into_iter()
+            .find(|t| t.name == LakehouseToolName::LookupDoubleEntryTable.as_str())
+            .unwrap()
+    }
+
+    fn interpretar(sobre: Value) -> TurnoDirigido {
+        ClaudeAgentRunner::interpretar_sobre_dirigido(&sobre.to_string(), &definicion_lookup())
+            .unwrap()
+    }
+
+    #[test]
+    fn test_sobre_con_structured_output_incumplido_no_es_una_llamada() {
+        let nombre = definicion_lookup().name;
+        for incumplido in [
+            serde_json::json!(null),
+            serde_json::json!("texto"),
+            serde_json::json!([]),
+            serde_json::json!({}),
+            serde_json::json!({ "name": nombre }),
+            serde_json::json!({ "arguments": {} }),
+            serde_json::json!({ "name": "otra_tool", "arguments": {} }),
+            serde_json::json!({ "name": nombre, "arguments": "30 y 0,42" }),
+            serde_json::json!({ "name": nombre, "arguments": null }),
+            serde_json::json!({ "name": 7, "arguments": {} }),
+        ] {
+            assert_eq!(
+                interpretar(serde_json::json!({
+                    "is_error": false, "result": "x", "structured_output": incumplido,
+                })),
+                TurnoDirigido::SinLlamada,
+                "{incumplido}"
+            );
+        }
     }
 
     #[tokio::test]

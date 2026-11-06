@@ -73,3 +73,10 @@ fn test_la_respuesta_se_anade_despues_de_su_pregunta() {
         "la respuesta quedaría encima de la pregunta"
     );
 }
+
+/// HTML compila `pattern` con el indicador `v` de RegExp: ahí un `-` final de clase debe escaparse
+#[test]
+fn test_pattern_del_identificador_de_centro_es_valido_con_el_indicador_v() {
+    assert!(HTML.contains(r#"id="centro-id" required pattern="[A-Za-z0-9_\-]+""#));
+    assert!(!HTML.contains("_-]"));
+}

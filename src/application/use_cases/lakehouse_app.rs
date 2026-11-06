@@ -15,7 +15,7 @@ use async_trait::async_trait;
 use tokio::sync::Mutex;
 
 use crate::application::dtos::agent::{
-    AgentExecutionEvent, AgentMessage, ClaudeModel, ModelDescriptor,
+    AgentExecutionEvent, AgentMessage, ClaudeModel, EtapaArnes, ModelDescriptor,
 };
 use crate::application::dtos::centros::{
     DocumentoOriginal, ManifiestoCentroDisco, ModeloEmbeddingsActivo, validar_ruta_centro,
@@ -34,6 +34,7 @@ use crate::application::ports::lakehouse_store::{
 };
 use crate::application::ports::llm_distiller::LlmDistillerPort;
 use crate::application::ports::model_catalog::ModelCatalogPort;
+use crate::application::ports::reloj::RelojPort;
 use crate::application::ports::tool_server::ToolServerPort;
 use crate::application::use_cases::agent_orchestrator::{AgentOrchestrator, EventCallback};
 use crate::application::use_cases::document_ingestion_service::{
@@ -81,6 +82,8 @@ pub struct DependenciasLakehouse {
     pub agente: Arc<dyn AgentRunnerPort>,
     pub herramientas: Arc<dyn ToolServerPort>,
     pub catalogo_modelos: Arc<dyn ModelCatalogPort>,
+    /// Fecha de hoy con la que el arnés ancla las respuestas que la citen
+    pub reloj: Arc<dyn RelojPort>,
 }
 
 /// Resultado de `ingestar`
@@ -111,6 +114,14 @@ pub struct RespuestaLakehouse {
     pub modelo: String,
     pub respuesta: String,
     pub herramientas: Vec<UsoHerramienta>,
+    pub arnes: Vec<IntervencionArnes>,
+}
+
+/// Actuación del arnés durante `preguntar`
+#[derive(Debug, Clone, PartialEq)]
+pub struct IntervencionArnes {
+    pub etapa: EtapaArnes,
+    pub motivo: String,
 }
 
 /// Diagnóstico de `integridad`: el del almacén más las tablas que faltan en disco
@@ -172,7 +183,8 @@ pub struct LakehouseApp {
 impl LakehouseApp {
     pub fn new(dependencias: DependenciasLakehouse) -> Self {
         let orquestador =
-            AgentOrchestrator::new(dependencias.agente, Arc::clone(&dependencias.herramientas));
+            AgentOrchestrator::new(dependencias.agente, Arc::clone(&dependencias.herramientas))
+                .with_reloj(dependencias.reloj);
         Self {
             registro: dependencias.registro,
             espacio: dependencias.espacio,
@@ -498,22 +510,28 @@ impl LakehouseApp {
         };
 
         let usos: Arc<StdMutex<Vec<UsoHerramienta>>> = Arc::default();
+        let intervenciones: Arc<StdMutex<Vec<IntervencionArnes>>> = Arc::default();
         let mut historial = vec![AgentMessage::user(texto)];
         let respuesta = self
             .conversar(
                 &modelo,
                 &centro,
                 &mut historial,
-                Some(registrador_de_herramientas(&usos)),
+                Some(registrador_de_arnes(
+                    &intervenciones,
+                    registrador_de_herramientas(&usos),
+                )),
             )
             .await?;
 
         let herramientas = usos.lock().map(|u| u.clone()).unwrap_or_default();
+        let arnes = intervenciones.lock().map(|i| i.clone()).unwrap_or_default();
         Ok(RespuestaLakehouse {
             centro_id: centro.to_string(),
             modelo: modelo.cli_model_name().to_string(),
             respuesta,
             herramientas,
+            arnes,
         })
     }
 
@@ -602,6 +620,22 @@ fn registrador_de_herramientas(destino: &Arc<StdMutex<Vec<UsoHerramienta>>>) -> 
     })
 }
 
+/// Guarda las actuaciones del arnés y pasa los demás eventos a `siguiente`
+fn registrador_de_arnes(
+    destino: &Arc<StdMutex<Vec<IntervencionArnes>>>,
+    siguiente: EventCallback,
+) -> EventCallback {
+    let destino = Arc::clone(destino);
+    Arc::new(move |evento| match evento {
+        AgentExecutionEvent::ArnesIntervino { etapa, motivo } => {
+            if let Ok(mut intervenciones) = destino.lock() {
+                intervenciones.push(IntervencionArnes { etapa, motivo });
+            }
+        }
+        otro => siguiente(otro),
+    })
+}
+
 #[async_trait]
 impl AsistenteLakehousePort for LakehouseApp {
     async fn listar_modelos(&self) -> Result<Vec<ModelDescriptor>, DomainError> {
@@ -684,6 +718,30 @@ mod tests {
         assert_eq!(usos[0].argumentos["sql_query"], "SELECT 1");
         assert!(!usos[0].es_error);
         assert_eq!(usos[1].argumentos, serde_json::Value::Null);
+    }
+
+    #[test]
+    fn test_registrador_de_arnes_guarda_intervenciones_y_reenvia_el_resto() {
+        let usos: Arc<StdMutex<Vec<UsoHerramienta>>> = Arc::default();
+        let intervenciones: Arc<StdMutex<Vec<IntervencionArnes>>> = Arc::default();
+        let cb = registrador_de_arnes(&intervenciones, registrador_de_herramientas(&usos));
+        cb(AgentExecutionEvent::ArnesIntervino {
+            etapa: EtapaArnes::Reintento,
+            motivo: "cifra".into(),
+        });
+        cb(AgentExecutionEvent::ToolResultReceived {
+            name: "execute_athena_sql".into(),
+            result: json!([]),
+            is_error: false,
+        });
+        assert_eq!(usos.lock().unwrap().len(), 1);
+        assert_eq!(
+            *intervenciones.lock().unwrap(),
+            vec![IntervencionArnes {
+                etapa: EtapaArnes::Reintento,
+                motivo: "cifra".into(),
+            }]
+        );
     }
 
     #[test]

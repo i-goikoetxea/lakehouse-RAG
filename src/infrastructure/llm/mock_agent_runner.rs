@@ -5,7 +5,9 @@ use std::sync::Mutex;
 use async_trait::async_trait;
 use serde_json::json;
 
-use crate::application::dtos::agent::{AgentMessage, AgentRole, AgentTurnOutput, ClaudeModel};
+use crate::application::dtos::agent::{
+    AgentMessage, AgentRole, AgentTurnOutput, ClaudeModel, TurnoDirigido,
+};
 use crate::application::dtos::tools::{LakehouseToolName, ToolCall, ToolDefinition};
 use crate::application::ports::agent_runner::AgentRunnerPort;
 use crate::domain::errors::DomainError;
@@ -172,6 +174,35 @@ impl AgentRunnerPort for MockAgentRunner {
         }
 
         Ok(respuestas.remove(0))
+    }
+
+    /// Consume el guion o la heurística como un turno normal: una llamada cuenta como llamada
+    /// dirigida, y un mensaje final, como turno sin llamada. El turno dirigido admite una sola
+    /// llamada: las demás de ese paso del guion quedan para el paso siguiente.
+    async fn ejecutar_turno_dirigido(
+        &self,
+        modelo: &ClaudeModel,
+        system_prompt: &str,
+        historial: &[AgentMessage],
+        herramientas: &[ToolDefinition],
+        _dirigida: LakehouseToolName,
+    ) -> Result<TurnoDirigido, DomainError> {
+        let salida = self
+            .ejecutar_turno(modelo, system_prompt, historial, herramientas)
+            .await?;
+        Ok(match salida {
+            AgentTurnOutput::ToolCalls(mut llamadas) if !llamadas.is_empty() => {
+                let primera = llamadas.remove(0);
+                if !llamadas.is_empty() {
+                    self.scripted_responses
+                        .lock()
+                        .unwrap()
+                        .insert(0, AgentTurnOutput::ToolCalls(llamadas));
+                }
+                TurnoDirigido::Llamada(primera)
+            }
+            _ => TurnoDirigido::SinLlamada,
+        })
     }
 }
 

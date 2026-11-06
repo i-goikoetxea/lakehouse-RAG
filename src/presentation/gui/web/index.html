@@ -163,6 +163,7 @@
           <button class="tab-btn" data-tab="tab-tabla" role="tab">Matriz · Tabla</button>
           <button class="tab-btn" data-tab="tab-grafo" role="tab">Grafo</button>
           <button class="tab-btn" data-tab="tab-tools" role="tab">Tools</button>
+          <button class="tab-btn" data-tab="tab-validacion" role="tab">Validación</button>
           <button class="tab-btn" data-tab="tab-centro" role="tab">Centro</button>
         </div>
         <div class="studio-cuerpo scroll-fino">
@@ -178,6 +179,9 @@
           <div id="tab-tools" class="tab-content">
             <p class="vacio">Pulsa una tool del chat para ver sus parámetros y su resultado completo.</p>
           </div>
+          <div id="tab-validacion" class="tab-content">
+            <p class="vacio">Aquí se indica si una respuesta tuvo que comprobarse o repetirse antes de mostrarla.</p>
+          </div>
           <div id="tab-centro" class="tab-content">
             <p class="vacio">Selecciona o crea un centro.</p>
           </div>
@@ -192,7 +196,7 @@
   <dialog id="dialogo-centro" class="dialogo">
     <form id="form-centro" method="dialog">
       <h3>Nuevo centro de conocimiento</h3>
-      <label>Identificador <input id="centro-id" required pattern="[A-Za-z0-9_-]+" placeholder="obra-planta-solar-01" autocomplete="off"></label>
+      <label>Identificador <input id="centro-id" required pattern="[A-Za-z0-9_\-]+" placeholder="obra-planta-solar-01" autocomplete="off"></label>
       <label>Nombre <input id="centro-nombre" placeholder="Planta Solar" autocomplete="off"></label>
       <label>Carpeta (vacía o inexistente)
         <span class="fila-ruta"><input id="centro-ruta" required placeholder="Elige una carpeta" autocomplete="off"><button type="button" id="btn-elegir-carpeta" class="btn btn-sutil">Elegir…</button></span>

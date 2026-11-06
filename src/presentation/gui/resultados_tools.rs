@@ -139,7 +139,7 @@ pub fn resumen_tool(nombre: &str, salida: &Value, estado: &str) -> String {
                 .as_str()
                 .unwrap_or("sin estado")
                 .replace('_', " ");
-            match salida["valor_resultado_texto"].as_str() {
+            let mut partes = match salida["valor_resultado_texto"].as_str() {
                 Some(valor) if estado == "resuelto" => {
                     let unidad = salida["unidad_medida"]
                         .as_str()
@@ -148,7 +148,14 @@ pub fn resumen_tool(nombre: &str, salida: &Value, estado: &str) -> String {
                     vec![estado, format!("{valor}{unidad}")]
                 }
                 _ => vec![estado],
+            };
+            if salida.get("ejes_ambiguos").is_some() {
+                partes.push("ejes ambiguos".to_string());
             }
+            if salida.get("orden_invertido_resolveria").is_some() {
+                partes.push("hay celda con los valores intercambiados".to_string());
+            }
+            partes
         }
         Some(LakehouseToolName::TraverseNormativeGraph) if salida["nodos"].is_array() => {
             let mut partes = vec![
@@ -562,6 +569,39 @@ mod tests {
             tarjeta("query_operational_matrix", salida_matriz(), "ok"),
         ]);
         assert_eq!(sin_grafo.len(), 1, "duplicados fuera");
+    }
+
+    #[test]
+    fn test_resumen_del_lookup_avisa_de_ejes_ambiguos_y_de_orden_invertido() {
+        let ambiguo = json!({
+            "estado": "resuelto", "valor_resultado_texto": "125", "unidad_medida": "°C",
+            "ejes_ambiguos": { "mensaje": "m" }
+        });
+        assert_eq!(
+            resumen_tool("lookup_double_entry_table", &ambiguo, "ok"),
+            "resuelto · 125 °C · ejes ambiguos"
+        );
+        let invertido = json!({
+            "estado": "sin_coincidencia",
+            "orden_invertido_resolveria": { "valor_x": 1, "valor_y": 2 }
+        });
+        assert_eq!(
+            resumen_tool("lookup_double_entry_table", &invertido, "ok"),
+            "sin coincidencia · hay celda con los valores intercambiados"
+        );
+    }
+
+    #[test]
+    fn test_matrix_result_conserva_los_avisos_de_ejes_del_lookup() {
+        let salida = json!({
+            "estado": "resuelto",
+            "ejes_ambiguos": { "orden_recibido": { "valor_x": 30 } },
+            "orden_invertido_resolveria": { "valor_x": 2 }
+        });
+        let resultado =
+            extraer_matrix_result(&[tarjeta("lookup_double_entry_table", salida, "ok")]).unwrap();
+        assert_eq!(resultado["ejes_ambiguos"]["orden_recibido"]["valor_x"], 30);
+        assert_eq!(resultado["orden_invertido_resolveria"]["valor_x"], 2);
     }
 
     #[test]
