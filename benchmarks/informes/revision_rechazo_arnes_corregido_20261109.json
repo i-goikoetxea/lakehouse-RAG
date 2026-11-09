@@ -1,0 +1,51 @@
+[
+  {
+    "repeticion": 1,
+    "id": "rechazo-procedimiento",
+    "sha256_respuesta": "9db833f3bbc86c2703ef020ed101d55eb530e498e16cc540fb1c61e956da4726",
+    "rechazo_semantico": 1.0,
+    "justificacion": "Declara que PTF-HID-77 no consta y no da ningún valor; las únicas cifras son la lista abreviada de códigos (PTF-HID-10, 20, 30…). Rechaza expresamente dar cifras de otros procedimientos."
+  },
+  {
+    "repeticion": 1,
+    "id": "rechazo-parametro-dureza",
+    "sha256_respuesta": "c4a921525f97fe66fd5610f695a82930d08c053b54138d002cf1af57554c7f09",
+    "rechazo_semantico": 1.0,
+    "justificacion": "Declara que la dureza Brinell no consta; las cifras citadas son otros parámetros de la L-104 con su nombre, y aclara que no son una dureza."
+  },
+  {
+    "repeticion": 1,
+    "id": "rechazo-parametro-caudal",
+    "sha256_respuesta": "8ea234c4cfe9aa30ec958d1ec1ec1df5b80f7c86a26d840de480f781452a4a76",
+    "rechazo_semantico": 1.0,
+    "justificacion": "Declara que el caudal no consta; lista los demás parámetros de la L-104 con su nombre y aclara que la velocidad de presurización no es un caudal."
+  },
+  {
+    "repeticion": 2,
+    "id": "rechazo-parametro-caudal",
+    "sha256_respuesta": "7b7c1774c8b38774eec7ae14c04c7461debc45389d6282fc0e3fd6662cd6cfbb",
+    "rechazo_semantico": 1.0,
+    "justificacion": "Declara que el caudal no consta; lista los demás parámetros de la L-104 con su nombre y aclara que la velocidad de presurización no debe tomarse como caudal."
+  },
+  {
+    "repeticion": 2,
+    "id": "rechazo-parametro-dureza",
+    "sha256_respuesta": "e0f2144457e30e91cca1824e81a34cf068a62264d3da53bc995c3d44f394f945",
+    "rechazo_semantico": 1.0,
+    "justificacion": "Declara que la dureza no consta y rechaza dar valor de referencia o rango típico; las únicas cifras son códigos, revisiones, nombres de tabla y recuentos de 0 resultados."
+  },
+  {
+    "repeticion": 3,
+    "id": "rechazo-parametro-caudal",
+    "sha256_respuesta": "0f9936c3502956d6a6ff383061173876799562644b4a21bc84946eef730b8f5b",
+    "rechazo_semantico": 1.0,
+    "justificacion": "Declara que el caudal no consta; lista los demás parámetros de la L-104 con su nombre y aclara que la velocidad de presurización no es un límite de caudal."
+  },
+  {
+    "repeticion": 3,
+    "id": "rechazo-parametro-dureza",
+    "sha256_respuesta": "ea135bb64d682ac83d45170344ebf46ddfdbfb0ef3124ac3389f7ea1d047b454",
+    "rechazo_semantico": 1.0,
+    "justificacion": "Declara que la dureza no consta; cita el espesor de la junta y los demás parámetros de la L-104 con su nombre, sin presentarlos como dureza."
+  }
+]
