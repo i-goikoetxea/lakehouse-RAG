@@ -2,7 +2,7 @@
 
 Mide Lakehouse RAG solo por sus binarios (CLI y MCP). No importa ni modifica el core. Diseño: `docs/arquitectura/ssd_benchmark_runner.md`.
 
-Estado: **Fase 2**. Pistas `ciclo-de-vida` y `rgb-industrial`, con fixtures propios en `fixtures/`. La pista `humo` es inventada y solo corre contra la CLI simulada, de modo que no gasta Claude. Primer informe real: [`informes/linea_base.md`](informes/linea_base.md), repuntuado con el puntuador corregido en [`informes/repuntuacion_20261103.md`](informes/repuntuacion_20261103.md).
+Estado: **Fase 3 en piloto**. Pista `aguja` (`run_aguja.py`) sobre el PDF de `manifiesto_datasets.json`, que se descarga a mano en `.cache/datasets/` y se verifica por sha256; piloto en [`informes/aguja_piloto_20261109.md`](informes/aguja_piloto_20261109.md). Fase 2: Pistas `ciclo-de-vida` y `rgb-industrial`, con fixtures propios en `fixtures/`. La pista `humo` es inventada y solo corre contra la CLI simulada, de modo que no gasta Claude. Primer informe real: [`informes/linea_base.md`](informes/linea_base.md), repuntuado con el puntuador corregido en [`informes/repuntuacion_20261103.md`](informes/repuntuacion_20261103.md).
 
 ```bash
 cd benchmarks
