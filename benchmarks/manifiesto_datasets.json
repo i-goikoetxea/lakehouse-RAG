@@ -1,0 +1,29 @@
+{
+  "comentario": "Datos externos del benchmark. Ninguno se versiona: se descargan a mano a la ruta local indicada y se verifican por sha256 antes de usarlos.",
+  "datasets": {
+    "aguja_base": {
+      "titulo": "MIL-STD-882E w/CHANGE 1, Department of Defense Standard Practice: System Safety (27 September 2023)",
+      "editor": "U.S. Department of Defense (ASSIST, Defense Logistics Agency)",
+      "ficha": "https://quicksearch.dla.mil/qsDocDetails.aspx?ident_number=36027",
+      "url_descarga": "https://quicksearch.dla.mil/WMX/Default.aspx?token=5784600",
+      "url_descarga_nota": "ImageRedirector.aspx?token=5784600.36027 devuelve una página HTML que enlaza aquí. Esta URL redirige (302) a un PDF temporal en /Transient/.",
+      "fecha_acceso": "2026-11-09T18:35Z",
+      "ruta_local": ".cache/datasets/mil-std-882e-c1.pdf",
+      "sha256": "ba0fa5334a2cd5e3f796367ee50509ecd0bb8f0ecb64e206b5dac8393d652341",
+      "bytes": 1420451,
+      "paginas": 106,
+      "sha256_texto_sin_sello": "8b47e3075fdc9baf8e1b67b7c448f72d2661b1873ee6a59254e710753ca6c570",
+      "reproducibilidad": "Cada descarga sale con bytes distintos: cambian los identificadores internos y el sello 'Source: https://assist.dla.mil -- Downloaded: <fecha>' de cada página. El sha256 identifica esta copia. Una descarga nueva se valida por sha256_texto_sin_sello: texto de pypdf por página, sin la línea del sello, unido con \\f.",
+      "licencia": "DISTRIBUTION A: Approved for public release: distribution unlimited (portada). Obra del Gobierno federal de EE. UU., sin copyright en EE. UU. (17 U.S.C. §105).",
+      "licencia_fuente": "https://assist.dla.mil/Online/help/dist_stmt.cfm",
+      "verificacion": {
+        "encrypt": false,
+        "outlines": true,
+        "marcadores": 48,
+        "page_labels": false,
+        "media_caracteres_por_pagina": 2160,
+        "paginas_con_menos_de_50_caracteres": 0
+      }
+    }
+  }
+}

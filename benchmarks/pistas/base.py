@@ -11,7 +11,8 @@ CARPETA_FIXTURES = Path(__file__).resolve().parent.parent / "fixtures"
 @dataclass(frozen=True)
 class Documento:
     nombre_archivo: str
-    contenido: str
+    # `str` para Markdown (se escribe en UTF-8); `bytes` para un PDF, que se escribe tal cual
+    contenido: str | bytes
 
 
 def cargar_documentos(carpeta, nombres):

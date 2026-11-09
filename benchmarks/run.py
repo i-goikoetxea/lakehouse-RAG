@@ -121,6 +121,12 @@ def _resumen_de_ingesta(documento, repeticion, salida):
     }
 
 
+def _bytes_de(documento):
+    """Un PDF viaja tal cual; un Markdown, en UTF-8."""
+    contenido = documento.contenido
+    return contenido if isinstance(contenido, bytes) else contenido.encode("utf-8")
+
+
 def _preparar_centro(cliente, pista, raiz, centro_id, repeticion):
     cliente.crear_centro(centro_id, raiz / "centros" / centro_id)
     cliente.activar(centro_id)
@@ -129,7 +135,7 @@ def _preparar_centro(cliente, pista, raiz, centro_id, repeticion):
     ingestas = []
     for documento in pista.documentos:
         ruta = documentos / documento.nombre_archivo
-        ruta.write_text(documento.contenido, encoding="utf-8")
+        ruta.write_bytes(_bytes_de(documento))
         ingestas.append(_resumen_de_ingesta(documento, repeticion, cliente.ingestar(ruta, centro_id)))
     return ingestas
 
@@ -209,7 +215,7 @@ def _sha256(ruta):
 def _sha256_de_documentos(pista):
     resumen = hashlib.sha256()
     for documento in pista.documentos:
-        resumen.update(documento.nombre_archivo.encode("utf-8") + b"\0" + documento.contenido.encode("utf-8") + b"\0")
+        resumen.update(documento.nombre_archivo.encode("utf-8") + b"\0" + _bytes_de(documento) + b"\0")
     return resumen.hexdigest()
 
 
