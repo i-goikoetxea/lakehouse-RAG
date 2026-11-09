@@ -538,3 +538,33 @@ fn test_adv_la_respuesta_no_puede_fabricar_su_propia_fuente() {
         ResultadoCita::NoEncontrada
     );
 }
+
+#[test]
+fn test_adv_titulo_entre_comillas_no_se_anota_pero_el_texto_crudo_de_sql_si() {
+    let mut registro = RegistroTurno::default();
+    registro.registrar(ToolResult {
+        call_id: "t".into(),
+        tool_name: "stair_navigate_toc".into(),
+        output: json!({ "nodos": [{ "titulo_seccion": "Recepción de válvulas y accesorios" }] }),
+        is_error: false,
+    });
+    registro.registrar(ToolResult {
+        call_id: "q".into(),
+        tool_name: "execute_athena_sql".into(),
+        output: json!({ "resultado": [{ "texto_contenido": format!("{FRASE}.") }] }),
+        is_error: false,
+    });
+    assert!(
+        VerificadorPaginas::revisar(
+            "Apartado «Recepción de válvulas y accesorios» (p. 4)",
+            &registro
+        )
+        .is_empty(),
+        "un título no es un extracto"
+    );
+    assert_eq!(
+        resultado_unico(&format!("«{FRASE}» (p. 4)"), &registro),
+        ResultadoCita::NoEncontrada,
+        "el texto del documento leído por SQL no tiene página que confirmar"
+    );
+}

@@ -75,7 +75,7 @@ def _resumen_de_fragmentos(fragmentos, esperada, seccion):
     }
 
 
-def _consulta(cliente, mcp, centro_id, modelo, tipo, pregunta, aguja, esperado, otra=None):
+def _consulta(cliente, mcp, centro_id, modelo, tipo, pregunta, aguja, esperado, otra=None, pagina_otra=None):
     registro = {"tipo": tipo, "pregunta": pregunta, "fallo": None, "arnes": []}
     try:
         respuesta = cliente.preguntar(pregunta, centro_id, modelo)
@@ -97,7 +97,8 @@ def _consulta(cliente, mcp, centro_id, modelo, tipo, pregunta, aguja, esperado, 
         tools_del_agente=_resumen_de_fragmentos(fragmentos_con_aguja(respuesta.herramientas, aguja.lote), pagina, seccion),
     )
     if otra is not None:
-        registro["valor_y_pagina"] = valor_y_pagina(respuesta.texto, aguja, otra, pagina)
+        registro["pagina_otra_aguja"] = pagina_otra
+        registro["valor_y_pagina"] = valor_y_pagina(respuesta.texto, aguja, otra, pagina, pagina_otra)
         registro["mismo_chunk"] = float(fragmento_con_ambas(respuesta.herramientas, aguja.lote, otra.lote))
     registro["mcp_directo"] = _recuperacion_directa(mcp, centro_id, pregunta, aguja, esperado)
     return registro
@@ -148,7 +149,8 @@ def _ejecutar_caso(comando, pdf_base, texto_base, repeticion, profundidad, argum
     caso["aguja"] = _datos_de(aguja)
     esperado = (documento.pagina_esperada, caso["seccion_esperada"])
     consultas = [
-        (tipo, pregunta, aguja, esperado, None) for tipo, pregunta in zip(("lexica", "semantica"), preguntas_de(aguja))
+        (tipo, pregunta, aguja, esperado, None, None)
+        for tipo, pregunta in zip(("lexica", "semantica"), preguntas_de(aguja))
     ]
     centro_id = f"bench-aguja-r{repeticion}-p{round(profundidad * 100):02d}"
     return _ejecutar_en_centro(comando, documento.pdf, repeticion, centro_id, argumentos, caso, consultas)
@@ -161,9 +163,12 @@ def _ejecutar_caso_dos_agujas(comando, pdf_base, texto_base, repeticion, profund
     caso = _caso_base(repeticion, profundidad, documento, documento.paginas_esperadas[0], sin_seccion)
     caso["paginas_esperadas"] = list(documento.paginas_esperadas)
     caso["agujas"] = [_datos_de(aguja) for aguja in par]
+    paginas = documento.paginas_esperadas
     consultas = [
-        (f"aguja_{numero}", preguntas_de(aguja)[0], aguja, (pagina, caso["seccion_esperada"]), otra)
-        for numero, (aguja, otra, pagina) in enumerate(zip(par, reversed(par), documento.paginas_esperadas), start=1)
+        (f"aguja_{numero}", preguntas_de(aguja)[0], aguja, (pagina, caso["seccion_esperada"]), otra, pagina_otra)
+        for numero, (aguja, otra, pagina, pagina_otra) in enumerate(
+            zip(par, reversed(par), paginas, reversed(paginas)), start=1
+        )
     ]
     centro_id = f"bench-aguja2-r{repeticion}-p{round(profundidad * 100):02d}"
     return _ejecutar_en_centro(comando, documento.pdf, repeticion, centro_id, argumentos, caso, consultas)
@@ -182,9 +187,11 @@ def _ejecutar_en_centro(comando, pdf, repeticion, centro_id, argumentos, caso, c
             return caso
         mcp = run._abrir_mcp(comando, raiz)
         try:
-            for tipo, pregunta, aguja, esperado, otra in consultas:
+            for tipo, pregunta, aguja, esperado, otra, pagina_otra in consultas:
                 caso["consultas"].append(
-                    _consulta(cliente, mcp, centro_id, argumentos.modelo, tipo, pregunta, aguja, esperado, otra)
+                    _consulta(
+                        cliente, mcp, centro_id, argumentos.modelo, tipo, pregunta, aguja, esperado, otra, pagina_otra
+                    )
                 )
         finally:
             if not isinstance(mcp, FalloEjecucion):

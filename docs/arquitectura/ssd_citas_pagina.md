@@ -78,6 +78,7 @@ En `search_normative_context` y en las dos `cita` de `stair_get_subtree_context`
 1. **Extractos:** textos entre `«»`, `“”` o `""` de la respuesta cuyo esqueleto (§5.2) tiene al menos 12 caracteres. Como máximo 32 por respuesta.
 2. **Página asociada:** la referencia de página más cercana **después** del cierre de comillas, en la misma línea, a 80 caracteres como mucho y antes de la siguiente apertura de comillas. Si no hay, la más cercana **antes** de la apertura, en las mismas condiciones. Formas: `p. N`, `pp. N-M`, `pág. N`, `págs. N y M`, `página(s) N`, `page(s) N`, `⟦p. N⟧`; listas con `,`, `y`, `and`, `-` o `–`. Un rango de más de 50 páginas cuenta solo por sus extremos. Sin página asociada, el extracto no se comprueba.
 3. **Fuentes:** los campos `texto` (en cualquier anidamiento) de las salidas sin error de `search_normative_context` y `stair_get_subtree_context` **del turno actual**. Las páginas salen de las marcas `⟦p. N⟧`, que se derivan de `saltos_pagina` (§2), así que la página se confirma con los saltos guardados. Un texto sin marcas es una fuente «sin página».
+4. **Metadatos:** un entrecomillado que no aparece en ningún texto pero sí en otra cadena de las salidas del turno (título del documento, breadcrumb, título de sección, código) no es un extracto del documento y no se revisa. Así, «TÍTULO DE LA SECCIÓN» (págs. 52-55) no genera una nota.
 
 ### 5.2 Normalización (esqueleto)
 

@@ -13,7 +13,8 @@ CLAVES_BREADCRUMB = ("breadcrumb", "breadcrumb_jerarquia")
 SEPARADOR_BREADCRUMB = ">"
 MAX_PAGINAS_EN_RANGO = 50
 _CITA_DE_PAGINAS = re.compile(
-    r"(?<!\w)(?:pages?|pp?\.|p[áa]g(?:ina)?s?\.?)[\s*:]*(\d+(?:\s*(?:[-–,]|\by\b|\band\b|\bto\b)\s*\d+)*)",
+    r"(?<!\w)(?:pages?|pp?\.|p[áa]g(?:ina)?s?\.?)(?:\s+(?:del\s+dato|exacta|f[íi]sica|of\s+the\s+value))?"
+    r"[\s*:]*(\d+(?:\s*(?:[-–,]|\by\b|\band\b|\bto\b)\s*\d+)*)",
     re.IGNORECASE,
 )
 _RANGO = re.compile(r"(\d+)\s*[-–]\s*(\d+)|(\d+)")
@@ -131,16 +132,24 @@ def texto_del_modelo(respuesta):
     return respuesta.split(ENCABEZADO_VERIFICACION, 1)[0]
 
 
-def valor_y_pagina(respuesta, aguja, otra, esperada):
-    """Métrica conjunta (a la manera de la SAA de CiteVQA): el valor de esta aguja, no el de la otra, y
-    como única página citada sola la suya. Se mide sobre el texto del modelo."""
+def valor_y_pagina(respuesta, aguja, otra, esperada, pagina_otra):
+    """Métrica conjunta (a la manera de la SAA de CiteVQA), sobre el texto del modelo.
+
+    Acierta si da el valor de esta aguja y cita sola su página. El valor o la página de la otra aguja
+    solo se admiten en una línea que nombre el lote de la otra: es mencionarla como descartada, no
+    confundirla. Cualquier otra página citada sola es un fallo.
+    """
     texto = texto_del_modelo(respuesta)
-    acierta = (
-        recall_aguja(texto, aguja) == 1.0
-        and recall_aguja(texto, otra) == 0.0
-        and paginas_estrictas_citadas(texto) == {esperada}
-    )
-    return 1.0 if acierta else 0.0
+    if recall_aguja(texto, aguja) != 1.0 or esperada not in paginas_estrictas_citadas(texto):
+        return 0.0
+    for linea in texto.splitlines():
+        de_la_otra = otra.lote in linea
+        if recall_aguja(linea, otra) == 1.0 and not de_la_otra:
+            return 0.0
+        for pagina in paginas_estrictas_citadas(linea):
+            if pagina != esperada and not (pagina == pagina_otra and de_la_otra):
+                return 0.0
+    return 1.0
 
 
 def fragmento_con_ambas(contenido, lote, otro_lote):

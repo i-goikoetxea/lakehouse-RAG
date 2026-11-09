@@ -9,7 +9,7 @@ use serde_json::Value;
 use super::cifras::{extraer_cifras, lecturas_de_fuente};
 use super::intent_detector::IntencionTurno;
 use super::texto_normalizado::plegar_texto;
-use super::verificador_paginas::textos_marcables;
+use super::verificador_paginas::{textos_de_metadatos, textos_marcables};
 use crate::application::dtos::tools::{LakehouseToolName, ToolResult};
 use crate::domain::services::marcas_pagina::quitar_marcas;
 
@@ -132,6 +132,13 @@ impl RegistroTurno {
                     .any(|h| h.as_str() == r.tool_name)
             })
             .flat_map(|r| textos_marcables(&r.output))
+            .collect()
+    }
+
+    /// Títulos, breadcrumbs y demás cadenas de las salidas que no son texto del documento
+    pub(super) fn metadatos(&self) -> Vec<&str> {
+        self.salidas_validas()
+            .flat_map(|r| textos_de_metadatos(&r.output))
             .collect()
     }
 }

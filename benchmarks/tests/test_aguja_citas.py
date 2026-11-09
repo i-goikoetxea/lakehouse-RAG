@@ -50,18 +50,40 @@ class ValorYPagina(unittest.TestCase):
     def setUp(self):
         self.una, self.otra = generar_par_de_agujas(42, 1, 0.5)
 
+    def puntuar(self, respuesta):
+        return valor_y_pagina(respuesta, self.una, self.otra, 11, 12)
+
     def test_acierta_solo_con_su_valor_y_su_pagina_sola(self):
-        bien = f"{self.una.valor} {self.una.unidad} (p. 11)."
-        self.assertEqual(valor_y_pagina(bien, self.una, self.otra, 11), 1.0)
-        self.assertEqual(valor_y_pagina(f"{self.una.valor} {self.una.unidad} (p. 12).", self.una, self.otra, 11), 0.0)
-        self.assertEqual(valor_y_pagina(f"{self.una.valor} {self.una.unidad} (pp. 11-12).", self.una, self.otra, 11), 0.0)
+        self.assertEqual(self.puntuar(f"{self.una.valor} {self.una.unidad} (p. 11)."), 1.0)
+        self.assertEqual(self.puntuar(f"{self.una.valor} {self.una.unidad} (p. 12)."), 0.0)
+        self.assertEqual(self.puntuar(f"{self.una.valor} {self.una.unidad} (pp. 11-12)."), 0.0)
+        self.assertEqual(self.puntuar(f"{self.una.valor} {self.una.unidad} (p. 11 y también p. 30)."), 0.0)
         mezcla = f"{self.una.valor} {self.una.unidad} (p. 11); {self.otra.valor} {self.otra.unidad} (p. 12)."
-        self.assertEqual(valor_y_pagina(mezcla, self.una, self.otra, 11), 0.0)
-        self.assertEqual(valor_y_pagina(f"{self.otra.valor} {self.otra.unidad} (p. 11).", self.una, self.otra, 11), 0.0)
+        self.assertEqual(self.puntuar(mezcla), 0.0)
+        self.assertEqual(self.puntuar(f"{self.otra.valor} {self.otra.unidad} (p. 11)."), 0.0)
+
+    def test_admite_la_otra_aguja_si_se_atribuye_a_su_lote_en_la_misma_linea(self):
+        descartada = (
+            f"**Valor:** {self.una.valor} {self.una.unidad}\n- **Página del dato:** 11\n"
+            f"- En la página 12 figura otra nota con {self.otra.valor} {self.otra.unidad}, del lote {self.otra.lote}."
+        )
+        self.assertEqual(self.puntuar(descartada), 1.0)
+        sin_atribuir = (
+            f"**Valor:** {self.una.valor} {self.una.unidad}\n- Página del dato: 11\n- Véase también la página 12."
+        )
+        self.assertEqual(self.puntuar(sin_atribuir), 0.0)
 
     def test_ignora_el_bloque_de_verificacion(self):
         respuesta = f"{self.una.valor} {self.una.unidad} (p. 12).\n\n{ENCABEZADO_VERIFICACION}\n- está en p. 11."
-        self.assertEqual(valor_y_pagina(respuesta, self.una, self.otra, 11), 0.0)
+        self.assertEqual(self.puntuar(respuesta), 0.0)
+
+    def test_pagina_del_dato_cuenta_como_cita_de_pagina(self):
+        from evaluacion.aguja import pagina_exacta_estricta, paginas_citadas
+
+        for texto in ("- **Página del dato:** 55, nota técnica", "Página del dato: 55.", "página física 55", "Page of the value: 55"):
+            self.assertEqual(paginas_citadas(texto), {55}, texto)
+            self.assertEqual(pagina_exacta_estricta(texto, 55), 1.0, texto)
+        self.assertEqual(paginas_citadas("la página del manual de 2024"), set())
 
 
 class ParDeAgujas(unittest.TestCase):
@@ -146,6 +168,7 @@ class RunDosAgujas(unittest.TestCase):
             por_tipo = {c["tipo"]: c for c in caso["consultas"]}
             self.assertEqual(set(por_tipo), {"aguja_1", "aguja_2"})
             self.assertEqual(por_tipo["aguja_1"]["valor_y_pagina"], 1.0)
+            self.assertEqual(caso["consultas"][0]["pagina_otra_aguja"], 12)
             self.assertEqual(por_tipo["aguja_2"]["valor_y_pagina"], 0.0)
             self.assertEqual(por_tipo["aguja_2"]["recall_aguja"], 1.0)
             self.assertIn("mismo_chunk", por_tipo["aguja_1"])

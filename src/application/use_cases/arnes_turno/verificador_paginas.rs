@@ -90,6 +90,7 @@ impl VerificadorPaginas {
             .into_iter()
             .map(FuentePaginada::nueva)
             .collect();
+        let metadatos: Vec<String> = registro.metadatos().into_iter().map(esqueleto).collect();
         let mut revisadas: Vec<CitaRevisada> = Vec::new();
         for (extracto, citadas) in extractos_con_pagina(respuesta) {
             let esqueleto = esqueleto(&extracto);
@@ -103,6 +104,12 @@ impl VerificadorPaginas {
                 continue;
             }
             let resultado = comprobar(&esqueleto, &citadas, &fuentes);
+            // Un título o un breadcrumb entre comillas no es un extracto del documento
+            if resultado == ResultadoCita::NoEncontrada
+                && metadatos.iter().any(|m| m.contains(&esqueleto))
+            {
+                continue;
+            }
             revisadas.push(CitaRevisada {
                 extracto,
                 citadas,
@@ -413,8 +420,24 @@ pub fn formatear_paginas(paginas: &Paginas) -> String {
     }
 }
 
-/// Textos `texto` de las salidas válidas de las tools que marcan páginas
+/// Campo con el texto marcado de un fragmento o de una sección
+const CLAVE_TEXTO_MARCADO: &str = "texto";
+/// Campos que llevan texto del documento: lo demás (títulos, breadcrumbs, códigos) son metadatos
+const CLAVES_DE_TEXTO_DOCUMENTAL: &[&str] = &[CLAVE_TEXTO_MARCADO, "texto_contenido"];
+
+/// Textos `texto` de la salida de una tool que marca páginas
 pub(super) fn textos_marcables(salida: &Value) -> Vec<&str> {
+    cadenas_con_clave(salida, |clave| clave == CLAVE_TEXTO_MARCADO)
+}
+
+/// Cadenas de una salida que no son texto del documento
+pub(super) fn textos_de_metadatos(salida: &Value) -> Vec<&str> {
+    cadenas_con_clave(salida, |clave| !CLAVES_DE_TEXTO_DOCUMENTAL.contains(&clave))
+}
+
+/// Cadenas que cuelgan directamente de una clave admitida, en cualquier anidamiento. Recorrido
+/// con pila propia: una salida muy anidada no agota la pila del hilo
+fn cadenas_con_clave(salida: &Value, admitida: impl Fn(&str) -> bool) -> Vec<&str> {
     let mut textos = Vec::new();
     let mut pendientes = vec![salida];
     while let Some(valor) = pendientes.pop() {
@@ -423,7 +446,8 @@ pub(super) fn textos_marcables(salida: &Value) -> Vec<&str> {
             Value::Object(campos) => {
                 for (clave, contenido) in campos {
                     match contenido {
-                        Value::String(texto) if clave == "texto" => textos.push(texto.as_str()),
+                        Value::String(texto) if admitida(clave) => textos.push(texto.as_str()),
+                        Value::String(_) => {}
                         otro => pendientes.push(otro),
                     }
                 }
@@ -619,6 +643,47 @@ mod tests {
         assert_eq!(
             unico(&format!("«{FRASE}» (p. 53)"), &subarbol).resultado,
             ResultadoCita::Confirmada
+        );
+    }
+
+    fn busqueda_con_metadatos() -> RegistroTurno {
+        let mut registro = RegistroTurno::default();
+        registro.registrar(ToolResult {
+            call_id: "1".into(),
+            tool_name: LakehouseToolName::SearchNormativeContext.as_str().into(),
+            output: json!({ "grupos": [{ "tema": "TAREA 201", "resultados": [{
+                "texto": fuente_52_53(),
+                "breadcrumb_jerarquia": "NORMA-01 > TAREA 201 LISTA PRELIMINAR DE PELIGROS",
+                "cita": { "titulo": "Norma de seguridad de sistemas", "paginas": "52-53" },
+            }] }] }),
+            is_error: false,
+        });
+        registro
+    }
+
+    #[test]
+    fn test_un_titulo_o_breadcrumb_entre_comillas_no_es_un_extracto_del_documento() {
+        let registro = busqueda_con_metadatos();
+        for metadato in [
+            "Apartado «TAREA 201 LISTA PRELIMINAR DE PELIGROS» (págs. 52-53)",
+            "Documento «Norma de seguridad de sistemas», p. 52",
+        ] {
+            assert!(
+                VerificadorPaginas::revisar(metadato, &registro).is_empty(),
+                "{metadato}"
+            );
+        }
+        // Lo que no está ni en el texto ni en los metadatos sigue sin verificar
+        assert_eq!(
+            unico("«Frase inventada que no devolvió nadie» (p. 52)", &registro).resultado,
+            ResultadoCita::NoEncontrada
+        );
+        // Y un extracto del texto se revisa aunque también haya metadatos
+        assert_eq!(
+            unico(&format!("«{FRASE}» (p. 52)"), &registro).resultado,
+            ResultadoCita::Discrepante {
+                verificadas: paginas(&[53])
+            }
         );
     }
 
