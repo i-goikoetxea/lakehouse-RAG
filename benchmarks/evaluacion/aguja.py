@@ -13,7 +13,7 @@ CLAVES_BREADCRUMB = ("breadcrumb", "breadcrumb_jerarquia")
 SEPARADOR_BREADCRUMB = ">"
 MAX_PAGINAS_EN_RANGO = 50
 _CITA_DE_PAGINAS = re.compile(
-    r"(?<!\w)(?:pages?|pp?\.|p[áa]g(?:ina)?s?\.?)\s*(\d+(?:\s*(?:[-–,]|\by\b|\band\b|\bto\b)\s*\d+)*)",
+    r"(?<!\w)(?:pages?|pp?\.|p[áa]g(?:ina)?s?\.?)[\s*:]*(\d+(?:\s*(?:[-–,]|\by\b|\band\b|\bto\b)\s*\d+)*)",
     re.IGNORECASE,
 )
 _RANGO = re.compile(r"(\d+)\s*[-–]\s*(\d+)|(\d+)")

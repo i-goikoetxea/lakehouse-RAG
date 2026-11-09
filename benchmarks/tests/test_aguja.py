@@ -213,6 +213,13 @@ class Metricas(unittest.TestCase):
         texto = "See page 54 (pp. 53-55) and p. 7; también la página 12 y págs. 3 y 4."
         self.assertEqual(paginas_citadas(texto), {54, 53, 55, 7, 12, 3, 4})
 
+    def test_paginas_citadas_con_dos_puntos_y_negrita_markdown(self):
+        # Formato real de la sección «Fuente» de la app: «- Páginas: 11-13.» o «- **Páginas:** 52-54.»
+        self.assertEqual(paginas_citadas("- Páginas: 11-13. - Fragmento: `X`"), {11, 12, 13})
+        self.assertEqual(paginas_citadas("- **Páginas:** 52-54."), {52, 53, 54})
+        self.assertEqual(paginas_citadas("**Página**: 54"), {54})
+        self.assertEqual(pagina_exacta_estricta("- **Página:** 54.", 54), 1.0)
+
     def test_pagina_exacta_estricta_no_acepta_rangos_ni_listas(self):
         self.assertEqual(pagina_exacta_estricta("Apartado X, páginas 52-54.", 54), 0.0)
         self.assertEqual(pagina_exacta_estricta("Véanse las págs. 53 y 54.", 54), 0.0)
