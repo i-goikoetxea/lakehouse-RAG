@@ -105,7 +105,7 @@ Antes de finalizar la sesión, el agente **DEBE**:
 ## 6. Estado actual (STAIR, Fase 7: hitos, roles e índice largo) y guía de continuación
 
 ### Rama STAIR (2026-11-01)
-- Contrato vigente: `docs/arquitectura/decisiones_stair.md`. Esquema de centro v5, sin migración: un centro anterior debe recrearse.
+- Contrato vigente: `docs/arquitectura/decisiones_stair.md`. Esquema de centro v6 desde las citas de página exacta (`docs/arquitectura/ssd_citas_pagina.md`), sin migración: un centro anterior debe recrearse.
 - Un hito exige rol o registro. `query_operational_matrix` filtra con `solo_declarados` por defecto y lo deja a la vista con `excluidos_no_declarados`. Un nodo `SINTETICO` de 07 nunca se presenta como apartado: se cita la sección real y sus páginas.
 - `fecha_vigor` puede ser nula y nunca se inventa. Con `fecha_referencia`, lo no afirmable se marca como `vigencia_no_declarada`. `origen_responsable` distingue `DECLARADO`, `INFERIDO` y `NO_CONSTA`. La matriz no es determinista ni fuente fiable de roles en documentos en voz pasiva.
 - Ningún test, fixture ni documento versionado puede contener nombres o texto de documentos reales. La evidencia real va a `docs/validacion/stair/`, ignorada por git.

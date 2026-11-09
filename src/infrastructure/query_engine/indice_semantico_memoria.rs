@@ -64,6 +64,7 @@ mod tests {
             estado_contenido: None,
             pagina_inicio: None,
             pagina_fin: None,
+            saltos_pagina: None,
             vector: vec![1.0, 0.0],
         }
     }

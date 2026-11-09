@@ -3,7 +3,7 @@
 
 use std::sync::Arc;
 
-use arrow_schema::{DataType, Field, Schema, SchemaRef};
+use arrow_schema::{DataType, Field, Fields, Schema, SchemaRef};
 
 use crate::application::dtos::centros::VERSION_ESQUEMA_CENTRO;
 use crate::application::ports::lakehouse_store::{
@@ -33,6 +33,10 @@ pub const COLUMNA_NODO_ID: &str = "nodo_id";
 pub const COLUMNA_NODO_PADRE_ID: &str = "nodo_padre_id";
 pub const COLUMNA_TIPO_BLOQUE: &str = "tipo_bloque";
 pub const COLUMNA_DOC_ID_PROVISIONAL: &str = "doc_id_provisional";
+/// Saltos de página dentro de cada chunk (`ssd_citas_pagina.md` §1)
+pub const COLUMNA_SALTOS_PAGINA: &str = "saltos_pagina";
+pub const CAMPO_SALTO_DESPLAZAMIENTO: &str = "desplazamiento";
+pub const CAMPO_SALTO_PAGINA: &str = "pagina";
 
 fn utf8(nombre: &str) -> Field {
     Field::new(nombre, DataType::Utf8, false)
@@ -59,6 +63,27 @@ fn lista_utf8(nombre: &str) -> Field {
         DataType::List(Arc::new(Field::new("item", DataType::Utf8, true))),
         false,
     )
+}
+
+/// Campos de un salto de página: bytes desde el inicio del chunk y página física
+pub fn campos_salto_pagina() -> Fields {
+    Fields::from(vec![
+        Field::new(CAMPO_SALTO_DESPLAZAMIENTO, DataType::Int32, false),
+        Field::new(CAMPO_SALTO_PAGINA, DataType::Int32, false),
+    ])
+}
+
+/// Elemento de la lista de saltos
+pub fn campo_item_salto() -> Arc<Field> {
+    Arc::new(Field::new(
+        "item",
+        DataType::Struct(campos_salto_pagina()),
+        true,
+    ))
+}
+
+fn lista_saltos(nombre: &str) -> Field {
+    Field::new(nombre, DataType::List(campo_item_salto()), true)
 }
 
 fn nivel_prelacion() -> Field {
@@ -117,6 +142,7 @@ pub fn schema_chunks_normativa() -> SchemaRef {
             utf8("texto_contenido"),
             Field::new("pagina_inicio", DataType::Int32, true),
             Field::new("pagina_fin", DataType::Int32, true),
+            lista_saltos(COLUMNA_SALTOS_PAGINA),
             lista_utf8("tablas_vinculadas"),
             lista_utf8("hitos_vinculados"),
             vector_nulable("vector"),
@@ -264,7 +290,7 @@ mod tests {
 
     #[test]
     fn test_version_y_nombres_de_tabla_de_la_especificacion() {
-        assert_eq!(VERSION_ESQUEMA, 5);
+        assert_eq!(VERSION_ESQUEMA, 6);
         assert_eq!(
             TODAS_LAS_TABLAS,
             [
@@ -462,6 +488,26 @@ mod tests {
         }
         assert_eq!(tipo(&indice, "nivel_jerarquico"), DataType::Int8);
         assert!(es_vector(&tipo(&indice, "vector_seccion")));
+    }
+
+    #[test]
+    fn test_chunks_02_guardan_los_saltos_de_pagina_como_lista_nulable() {
+        let chunks = obtener_esquema_por_nombre(TABLA_CHUNKS_NORMATIVA).unwrap();
+        let saltos = chunks.field_with_name("saltos_pagina").unwrap();
+        assert!(saltos.is_nullable(), "Markdown no tiene saltos");
+        let DataType::List(item) = saltos.data_type() else {
+            panic!("saltos_pagina debe ser una lista: {:?}", saltos.data_type());
+        };
+        let DataType::Struct(campos) = item.data_type() else {
+            panic!("cada salto es un struct: {:?}", item.data_type());
+        };
+        let nombres: Vec<_> = campos.iter().map(|c| c.name().as_str()).collect();
+        assert_eq!(nombres, ["desplazamiento", "pagina"]);
+        assert!(
+            campos
+                .iter()
+                .all(|c| c.data_type() == &DataType::Int32 && !c.is_nullable())
+        );
     }
 
     #[test]

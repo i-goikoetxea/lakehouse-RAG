@@ -2,11 +2,11 @@
 
 use std::sync::Arc;
 
-use arrow::buffer::NullBuffer;
+use arrow::buffer::{NullBuffer, OffsetBuffer};
 use arrow_array::builder::{ListBuilder, StringBuilder};
 use arrow_array::{
     ArrayRef, BooleanArray, Date32Array, FixedSizeListArray, Float32Array, Float64Array, Int8Array,
-    Int32Array, RecordBatch, StringArray,
+    Int32Array, ListArray, RecordBatch, StringArray, StructArray,
 };
 use arrow_schema::{DataType, Field, SchemaRef};
 use chrono::NaiveDate;
@@ -18,10 +18,11 @@ use crate::application::dtos::lakehouse_filas::{
 use crate::application::ports::lakehouse_store::EstadoIngesta;
 use crate::domain::errors::DomainError;
 use crate::domain::models::identificadores::IngestId;
+use crate::domain::services::marcas_pagina::SaltoPagina;
 use crate::infrastructure::storage::schemas::{
-    DIMENSION_EMBEDDINGS, schema_catalogo_tablas, schema_celdas_doble_entrada,
-    schema_chunks_normativa, schema_documentos_catalogo, schema_grafo_referencias,
-    schema_indice_jerarquico, schema_matriz_operativa,
+    DIMENSION_EMBEDDINGS, campo_item_salto, campos_salto_pagina, schema_catalogo_tablas,
+    schema_celdas_doble_entrada, schema_chunks_normativa, schema_documentos_catalogo,
+    schema_grafo_referencias, schema_indice_jerarquico, schema_matriz_operativa,
 };
 
 /// Valores de las columnas transaccionales que fija el almacén (nunca el llamador)
@@ -80,6 +81,48 @@ fn paginas(valores: impl Iterator<Item = Option<u32>>) -> ArrayRef {
             .map(|pagina| pagina.and_then(|p| i32::try_from(p).ok()))
             .collect::<Int32Array>(),
     )
+}
+
+/// Saltos de página de cada chunk como `List<Struct<desplazamiento, pagina>>`. Una fila sin
+/// saltos, o con un valor fuera de `Int32`, queda nula en lugar de corromperse
+fn saltos_de_pagina<'a>(valores: impl Iterator<Item = Option<&'a [SaltoPagina]>>) -> ArrayRef {
+    let mut desplazamientos: Vec<i32> = Vec::new();
+    let mut paginas: Vec<i32> = Vec::new();
+    let mut limites: Vec<i32> = vec![0];
+    let mut validas: Vec<bool> = Vec::new();
+    for saltos in valores {
+        let convertidos: Option<Vec<(i32, i32)>> = saltos.and_then(|lista| {
+            lista
+                .iter()
+                .map(|salto| {
+                    Some((
+                        i32::try_from(salto.desplazamiento).ok()?,
+                        i32::try_from(salto.pagina).ok()?,
+                    ))
+                })
+                .collect()
+        });
+        validas.push(convertidos.is_some());
+        for (desplazamiento, pagina) in convertidos.unwrap_or_default() {
+            desplazamientos.push(desplazamiento);
+            paginas.push(pagina);
+        }
+        limites.push(desplazamientos.len() as i32);
+    }
+    let estructuras = StructArray::new(
+        campos_salto_pagina(),
+        vec![
+            Arc::new(Int32Array::from(desplazamientos)),
+            Arc::new(Int32Array::from(paginas)),
+        ],
+        None,
+    );
+    Arc::new(ListArray::new(
+        campo_item_salto(),
+        OffsetBuffer::new(limites.into()),
+        Arc::new(estructuras),
+        Some(NullBuffer::from(validas)),
+    ))
 }
 
 fn flotante_nulable(valores: impl Iterator<Item = Option<f64>>) -> ArrayRef {
@@ -219,6 +262,7 @@ fn lote_chunks(
         texto(filas.iter().map(|f| f.texto_contenido.as_str())),
         paginas(filas.iter().map(|f| f.pagina_inicio)),
         paginas(filas.iter().map(|f| f.pagina_fin)),
+        saltos_de_pagina(filas.iter().map(|f| f.saltos_pagina.as_deref())),
         listas_texto(filas.iter().map(|f| f.tablas_vinculadas.as_slice())),
         listas_texto(filas.iter().map(|f| f.hitos_vinculados.as_slice())),
         vectores(&vectores_chunk)?,

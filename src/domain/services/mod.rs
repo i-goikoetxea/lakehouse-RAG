@@ -2,4 +2,5 @@
 
 pub mod arbol_secciones;
 pub mod fragmentacion;
+pub mod marcas_pagina;
 pub mod normalizacion;

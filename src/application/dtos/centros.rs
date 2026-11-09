@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use crate::domain::errors::DomainError;
 
 /// Versión del esquema de tablas que escribe esta build (`center_manifest.json`)
-pub const VERSION_ESQUEMA_CENTRO: u32 = 5;
+pub const VERSION_ESQUEMA_CENTRO: u32 = 6;
 
 /// Nombre del manifiesto en la raíz de cada centro
 pub const ARCHIVO_MANIFIESTO: &str = "center_manifest.json";
@@ -72,7 +72,8 @@ impl ManifiestoCentroDisco {
             return Err(DomainError::ValidationError(format!(
                 "El centro '{}' usa schema_version = {} y esta aplicación solo abre la versión {}: \
                  no hay migración. Crea un centro nuevo y reingiere sus documentos; los datos del \
-                 centro anterior no se han modificado.",
+                 centro anterior no se han modificado. (La versión 6 guarda los saltos de página \
+                 de cada fragmento para citar la página exacta.)",
                 self.centro_id, self.schema_version, VERSION_ESQUEMA_CENTRO
             )));
         }
@@ -169,9 +170,9 @@ mod tests {
     }
 
     #[test]
-    fn test_manifiesto_nuevo_usa_schema_version_5() {
+    fn test_manifiesto_nuevo_usa_schema_version_6() {
         let m = ManifiestoCentroDisco::nuevo("obra-a", "Obra A", &e5(), "2026-10-17".into());
-        assert_eq!(m.schema_version, 5);
+        assert_eq!(m.schema_version, 6);
         assert_eq!(m.modelo_embeddings, "MultilingualE5Large");
         assert_eq!(m.dimension_embeddings, 1024);
         assert!(m.validar_compatibilidad(&e5()).is_ok());

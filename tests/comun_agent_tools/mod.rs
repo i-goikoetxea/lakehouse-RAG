@@ -363,6 +363,7 @@ fn fragmento(id: &str, version: i32, texto: &str) -> FragmentoIndexado {
         estado_contenido: None,
         pagina_inicio: None,
         pagina_fin: None,
+        saltos_pagina: None,
         vector: Vec::new(),
     }
 }

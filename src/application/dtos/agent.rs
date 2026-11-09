@@ -159,6 +159,8 @@ pub enum EtapaArnes {
     LlamadaNoObtenida,
     Reintento,
     SalidaSegura,
+    /// La respuesta se entrega con una nota: la página de algún extracto literal no se confirmó
+    VerificacionPagina,
 }
 
 /// Eventos emitidos durante la ejecución reactiva del agente (para TUI y streaming)

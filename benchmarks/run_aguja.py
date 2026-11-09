@@ -19,6 +19,8 @@ sys.path.insert(0, str(RAIZ_BENCHMARKS))
 import run  # noqa: E402
 from evaluacion.aguja import (  # noqa: E402
     agregar_por_profundidad,
+    coste_de_marcas,
+    fragmento_con_ambas,
     fragmentos_con_aguja,
     pagina_exacta,
     pagina_exacta_estricta,
@@ -27,9 +29,19 @@ from evaluacion.aguja import (  # noqa: E402
     resumen_arnes,
     seccion_en_respuesta,
     seccion_real,
+    texto_del_modelo,
+    valor_y_pagina,
 )
 from lakehouse.cli import AislamientoInvalido, ClienteCli, FalloEjecucion, comando_de_binario, valor_admitido  # noqa: E402
-from pistas.aguja import PROFUNDIDADES, generar_aguja, insertar_aguja, preguntas_de, texto_de_pdf  # noqa: E402
+from pistas.aguja import (  # noqa: E402
+    PROFUNDIDADES,
+    generar_aguja,
+    generar_par_de_agujas,
+    insertar_aguja,
+    insertar_agujas,
+    preguntas_de,
+    texto_de_pdf,
+)
 from pistas.base import Documento, Pista  # noqa: E402
 
 MANIFIESTO = RAIZ_BENCHMARKS / "manifiesto_datasets.json"
@@ -63,7 +75,7 @@ def _resumen_de_fragmentos(fragmentos, esperada, seccion):
     }
 
 
-def _consulta(cliente, mcp, centro_id, modelo, tipo, pregunta, aguja, esperado):
+def _consulta(cliente, mcp, centro_id, modelo, tipo, pregunta, aguja, esperado, otra=None):
     registro = {"tipo": tipo, "pregunta": pregunta, "fallo": None, "arnes": []}
     try:
         respuesta = cliente.preguntar(pregunta, centro_id, modelo)
@@ -80,9 +92,13 @@ def _consulta(cliente, mcp, centro_id, modelo, tipo, pregunta, aguja, esperado):
         paginas_citadas_respuesta=sorted(citadas),
         pagina_exacta=float(pagina in citadas),
         pagina_exacta_estricta=pagina_exacta_estricta(respuesta.texto, pagina),
+        pagina_exacta_estricta_modelo=pagina_exacta_estricta(texto_del_modelo(respuesta.texto), pagina),
         seccion_en_respuesta=seccion_en_respuesta(respuesta.texto, seccion),
         tools_del_agente=_resumen_de_fragmentos(fragmentos_con_aguja(respuesta.herramientas, aguja.lote), pagina, seccion),
     )
+    if otra is not None:
+        registro["valor_y_pagina"] = valor_y_pagina(respuesta.texto, aguja, otra, pagina)
+        registro["mismo_chunk"] = float(fragmento_con_ambas(respuesta.herramientas, aguja.lote, otra.lote))
     registro["mcp_directo"] = _recuperacion_directa(mcp, centro_id, pregunta, aguja, esperado)
     return registro
 
@@ -96,31 +112,68 @@ def _recuperacion_directa(mcp, centro_id, pregunta, aguja, esperado):
     except FalloEjecucion as fallo:
         return {"fallo": run._fallo_como_dict(fallo)}
     fragmentos = fragmentos_con_aguja(resultado.contenido, aguja.lote)
-    return _resumen_de_fragmentos(fragmentos, *esperado) | {"latencia_ms": resultado.latencia_ms}
+    marcas, caracteres = coste_de_marcas(resultado.contenido)
+    return _resumen_de_fragmentos(fragmentos, *esperado) | {
+        "latencia_ms": resultado.latencia_ms,
+        "caracteres_salida": caracteres,
+        "caracteres_marcas": marcas,
+    }
 
 
-def _ejecutar_caso(comando, pdf_base, texto_base, repeticion, profundidad, argumentos, sin_seccion):
-    aguja = generar_aguja(argumentos.semilla, repeticion, profundidad, texto_base)
-    documento = insertar_aguja(pdf_base, aguja, profundidad, argumentos.primera_del_cuerpo)
+def _datos_de(aguja):
+    return {"lote": aguja.lote, "valor": aguja.valor, "unidad": aguja.unidad, "frase": aguja.frase}
+
+
+def _caso_base(repeticion, profundidad, documento, pagina, sin_seccion):
     excluida = _clave(profundidad) in sin_seccion
-    seccion = None if excluida else documento.seccion_esperada
-    caso = {
+    return {
         "repeticion": repeticion,
         "profundidad": profundidad,
         "profundidad_real": documento.profundidad_real,
-        "pagina_esperada": documento.pagina_esperada,
-        "seccion_esperada": seccion,
+        "pagina_esperada": pagina,
+        "seccion_esperada": None if excluida else documento.seccion_esperada,
         "seccion_marcador": documento.seccion_esperada,
         "seccion_excluida": excluida,
-        "aguja": {"lote": aguja.lote, "valor": aguja.valor, "unidad": aguja.unidad, "frase": aguja.frase},
         "ingesta": None,
         "consultas": [],
     }
+
+
+def _ejecutar_caso(comando, pdf_base, texto_base, repeticion, profundidad, argumentos, sin_seccion):
+    if argumentos.dos_agujas:
+        return _ejecutar_caso_dos_agujas(comando, pdf_base, texto_base, repeticion, profundidad, argumentos, sin_seccion)
+    aguja = generar_aguja(argumentos.semilla, repeticion, profundidad, texto_base)
+    documento = insertar_aguja(pdf_base, aguja, profundidad, argumentos.primera_del_cuerpo)
+    caso = _caso_base(repeticion, profundidad, documento, documento.pagina_esperada, sin_seccion)
+    caso["aguja"] = _datos_de(aguja)
+    esperado = (documento.pagina_esperada, caso["seccion_esperada"])
+    consultas = [
+        (tipo, pregunta, aguja, esperado, None) for tipo, pregunta in zip(("lexica", "semantica"), preguntas_de(aguja))
+    ]
+    centro_id = f"bench-aguja-r{repeticion}-p{round(profundidad * 100):02d}"
+    return _ejecutar_en_centro(comando, documento.pdf, repeticion, centro_id, argumentos, caso, consultas)
+
+
+def _ejecutar_caso_dos_agujas(comando, pdf_base, texto_base, repeticion, profundidad, argumentos, sin_seccion):
+    """Dos agujas casi iguales en páginas consecutivas; una pregunta léxica por aguja."""
+    par = generar_par_de_agujas(argumentos.semilla, repeticion, profundidad, texto_base)
+    documento = insertar_agujas(pdf_base, par, profundidad, argumentos.primera_del_cuerpo)
+    caso = _caso_base(repeticion, profundidad, documento, documento.paginas_esperadas[0], sin_seccion)
+    caso["paginas_esperadas"] = list(documento.paginas_esperadas)
+    caso["agujas"] = [_datos_de(aguja) for aguja in par]
+    consultas = [
+        (f"aguja_{numero}", preguntas_de(aguja)[0], aguja, (pagina, caso["seccion_esperada"]), otra)
+        for numero, (aguja, otra, pagina) in enumerate(zip(par, reversed(par), documento.paginas_esperadas), start=1)
+    ]
+    centro_id = f"bench-aguja2-r{repeticion}-p{round(profundidad * 100):02d}"
+    return _ejecutar_en_centro(comando, documento.pdf, repeticion, centro_id, argumentos, caso, consultas)
+
+
+def _ejecutar_en_centro(comando, pdf, repeticion, centro_id, argumentos, caso, consultas):
     with tempfile.TemporaryDirectory(prefix="benchmark_", ignore_cleanup_errors=True) as temporal:
         raiz = Path(temporal)
         cliente = ClienteCli(comando, raiz)
-        centro_id = f"bench-aguja-r{repeticion}-p{round(profundidad * 100):02d}"
-        pista = Pista("aguja", "Aguja", False, (Documento(NOMBRE_DOCUMENTO, documento.pdf),), ())
+        pista = Pista("aguja", "Aguja", False, (Documento(NOMBRE_DOCUMENTO, pdf),), ())
         inicio = time.perf_counter()
         try:
             caso["ingesta"] = run._preparar_centro(cliente, pista, raiz, centro_id, repeticion)[0]
@@ -129,9 +182,10 @@ def _ejecutar_caso(comando, pdf_base, texto_base, repeticion, profundidad, argum
             return caso
         mcp = run._abrir_mcp(comando, raiz)
         try:
-            for tipo, pregunta in zip(("lexica", "semantica"), preguntas_de(aguja)):
-                esperado = (documento.pagina_esperada, seccion)
-                caso["consultas"].append(_consulta(cliente, mcp, centro_id, argumentos.modelo, tipo, pregunta, aguja, esperado))
+            for tipo, pregunta, aguja, esperado, otra in consultas:
+                caso["consultas"].append(
+                    _consulta(cliente, mcp, centro_id, argumentos.modelo, tipo, pregunta, aguja, esperado, otra)
+                )
         finally:
             if not isinstance(mcp, FalloEjecucion):
                 mcp.cerrar()
@@ -197,7 +251,7 @@ def _markdown(informe):
         "",
         f"Base `{informe['base']['nombre']}` (sha256 `{informe['base']['sha256'][:12]}…`), binario sha256 "
         f"`{informe['binario']['sha256'][:12]}…`, modelo `{informe['modelo']}`, semilla {informe['semilla']}, "
-        f"{informe['duracion_min']:.1f} min.",
+        f"{informe['duracion_min']:.1f} min. Variante: {informe['variante']}.",
         "",
         f"Detenida: {informe['detenida'] or 'no'}.",
         "",
@@ -208,7 +262,8 @@ def _markdown(informe):
         "## Arnés",
         "",
         f"Intervenciones por etapa: {arnes['por_etapa'] or 'ninguna'}. Consultas con intervención: "
-        f"{arnes['consultas_con_intervencion']}. Falsos bloqueos probables: {arnes['falsos_bloqueos_probables']}.",
+        f"{arnes['consultas_con_intervencion']}. Con verificación de páginas: "
+        f"{arnes['consultas_con_verificacion_pagina']}. Falsos bloqueos probables: {arnes['falsos_bloqueos_probables']}.",
         "",
         "## Casos",
         "",
@@ -234,6 +289,9 @@ def _analizar_argumentos(argv):
     analizador.add_argument("--parar-si-provisional", action="store_true")
     analizador.add_argument("--tiempo-maximo-min", type=float)
     analizador.add_argument("--salida", type=Path, default=RAIZ_BENCHMARKS / "resultados")
+    analizador.add_argument(
+        "--dos-agujas", action="store_true", help="Variante con dos agujas casi iguales en páginas consecutivas"
+    )
     return analizador.parse_args(argv)
 
 
@@ -284,6 +342,7 @@ def _ejecutar(argumentos):
         "duracion_min": (time.perf_counter() - inicio) / 60,
         "semilla": argumentos.semilla,
         "modelo": argumentos.modelo,
+        "variante": "dos_agujas" if argumentos.dos_agujas else "una_aguja",
         "app_commit": run._commit_de_la_app(),
         "binario": {"nombre": argumentos.binario.name, "sha256": run._sha256(argumentos.binario)},
         "base": {"nombre": ruta_base.name, "sha256": run._sha256(ruta_base)},

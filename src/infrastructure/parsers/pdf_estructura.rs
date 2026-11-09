@@ -165,24 +165,24 @@ fn lineas_de(paginas: &[String]) -> Vec<LineaPaginada> {
 
 /// Sección única con todo el texto. `texto_de_respaldo` cubre un PDF sin ninguna línea.
 pub fn seccion_contenido_general(paginas: &[String], texto_de_respaldo: &str) -> ParsedSection {
-    let contenido = lineas_de(paginas)
-        .into_iter()
-        .map(|linea| linea.texto)
-        .collect::<Vec<_>>()
-        .join("\n");
+    let lineas = lineas_de(paginas);
+    let contenido = texto_de(&lineas);
+    // El texto de respaldo no sale de las líneas: sus saltos no se conocen
+    let (contenido, saltos_pagina) = if contenido.trim().is_empty() {
+        (texto_de_respaldo.to_string(), Vec::new())
+    } else {
+        (contenido, saltos_de(&lineas, 0))
+    };
     ParsedSection {
         codigo: CODIGO_CONTENIDO_GENERAL.to_string(),
         titulo: TITULO_CONTENIDO_GENERAL.to_string(),
         nivel: 1,
-        contenido: if contenido.trim().is_empty() {
-            texto_de_respaldo.to_string()
-        } else {
-            contenido
-        },
+        contenido,
         breadcrumb: TITULO_CONTENIDO_GENERAL.to_string(),
         condicion_aplicacion: None,
         pagina_inicio: (!paginas.is_empty()).then_some(1),
         pagina_fin: u32::try_from(paginas.len()).ok().filter(|total| *total > 0),
+        saltos_pagina,
         ..ParsedSection::default()
     }
 }
@@ -1127,6 +1127,40 @@ fn texto_de(lineas: &[LineaPaginada]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_contenido_general_guarda_donde_empieza_cada_pagina() {
+        let paginas = [
+            "uno\ndos".to_string(),
+            "tres".to_string(),
+            "cuatro".to_string(),
+        ];
+        let seccion = seccion_contenido_general(&paginas, "respaldo");
+        assert_eq!(seccion.contenido, "uno\ndos\ntres\ncuatro");
+        let saltos: Vec<(usize, u32)> = seccion
+            .saltos_pagina
+            .iter()
+            .map(|s| (s.desplazamiento, s.pagina))
+            .collect();
+        assert_eq!(saltos, [(0, 1), (8, 2), (13, 3)]);
+        for salto in &seccion.saltos_pagina {
+            let linea = seccion.contenido[salto.desplazamiento..]
+                .lines()
+                .next()
+                .unwrap();
+            assert_eq!(
+                linea,
+                paginas[salto.pagina as usize - 1].lines().next().unwrap()
+            );
+        }
+
+        let vacio = seccion_contenido_general(&["  ".to_string(), String::new()], "respaldo");
+        assert_eq!(vacio.contenido, "respaldo");
+        assert!(
+            vacio.saltos_pagina.is_empty(),
+            "el respaldo no tiene saltos conocidos"
+        );
+    }
 
     fn clave(linea: &str) -> Option<(String, String)> {
         interpretar_numeracion(linea).map(|(codigo, _, titulo)| (codigo, titulo))

@@ -4,7 +4,7 @@ Este documento es el contrato vigente del proyecto STAIR. Si contradice a la esp
 
 **Objetivo:** que la aplicación funcione como RAG general sin perder texto y añada navegación por índice (ToC) sobre los motores de precisión actuales. No hay fine-tuning ni nada preparado para ello.
 
-**Fases:** 1 esquemas · 2 ingesta universal · 3 PDF · 4 búsqueda y tools · 5 aceptación · 6 calidad de datos · 7 hitos, roles e índice largo.
+**Fases:** 1 esquemas · 2 ingesta universal · 3 PDF · 4 búsqueda y tools · 5 aceptación · 6 calidad de datos · 7 hitos, roles e índice largo. Después: §10 umbral de 512 y §11 citas de página exacta (esquema v6).
 
 ## 1. Decisiones consensuadas
 
@@ -56,7 +56,7 @@ Valores: `PREAMBULO`, `NARRATIVA`, `DEFINICION`, `ALCANCE`, `PROCEDIMIENTO`.
 ## 3. Contratos de la Fase 1
 
 ### Versión de esquema y limitación sin migración
-- `VERSION_ESQUEMA_CENTRO = 5` desde la Fase 7 (§9). `schemas::VERSION_ESQUEMA` se deriva de ella.
+- `VERSION_ESQUEMA_CENTRO = 6` desde las citas de página exacta (§11); fue 5 desde la Fase 7 (§9). `schemas::VERSION_ESQUEMA` se deriva de ella.
 - **No hay migración.** Un centro con `schema_version` distinta se rechaza al abrirlo, con un mensaje que indica crear un centro nuevo y reingerir los documentos. Sus datos en disco no se tocan.
 
 ### Tipos
@@ -338,6 +338,7 @@ Autorizados por el usuario con alcance cerrado. `VERSION_ESQUEMA_CENTRO` pasa a 
 - `ParsedSection::saltos_pagina` guarda dónde empieza cada página. `fragmentar_con_posiciones` devuelve la posición de cada fragmento, y `pagina_inicio` y `pagina_fin` de 02 salen de ambos. Un chunk a caballo cita las dos páginas.
 - Markdown sigue con `NULL`. Un título sin texto o el respaldo de un PDF sin líneas heredan el rango de la sección.
 - El subárbol da el rango de la menor a la mayor página de sus chunks.
+- Desde el esquema v6, 02 también guarda los saltos de página **dentro** de cada chunk (`saltos_pagina`, §11).
 
 ## 10. Umbral de chunk único a 512 (2026-11-03)
 
@@ -374,3 +375,13 @@ No se descuenta el contexto (`passage: `, breadcrumb y condición) de la ventana
 - Un documento ya ingerido se reconoce por su sha256 y devuelve `ya_ingerido`, sin volver a fragmentarse. Sus chunks conservan los cortes de 600.
 - `reintentar_destilacion` sobre un documento provisional sí vuelve a parsear y fragmentar con 512. Solo reutiliza el vector de los textos idénticos.
 - No hay operación para quitar un solo documento. Para aplicar los cortes de 512 a un documento definitivo ya ingerido, hay que eliminar el centro, recrearlo y volver a ingerir. Es opcional: solo cambian las secciones de 513 a 600 tokens estimados, y el aviso de truncado de su ingesta ya indicaba si alguna quedó recortada.
+
+## 11. Citas de página exacta: esquema v6 (2026-11-09)
+
+Aprobado por el usuario (§4 de `investigacion_citas_pagina.md`). Contrato completo en `ssd_citas_pagina.md`.
+
+- **02 añade `saltos_pagina`**: `List<Struct<desplazamiento: Int32, pagina: Int32>>` nulable. Desplazamiento en bytes desde el inicio de `texto_contenido` del chunk; el primero siempre es `{0, pagina_inicio}` y el último lleva `pagina_fin`. Nulo en Markdown y en un PDF cuya sección abarca varias páginas sin saltos conocidos.
+- `VERSION_ESQUEMA_CENTRO` pasa a **6**. **Sin migración:** un centro v5 se rechaza al abrirlo y hay que crear un centro nuevo y reingerir. Sus datos en disco no se tocan.
+- `search_normative_context` y `stair_get_subtree_context` intercalan marcas `⟦p. N⟧` en `texto`, solo en la respuesta. No entran en `texto_contenido`, en el vector ni en BM25, así que la recuperación no cambia. `⟦ ⟧` del documento se neutralizan a `[ ]`.
+- `cita` añade `titulo` y, solo si existe, `fecha_vigor`. Nunca se inventa.
+- El arnés anota, sin rechazar, las páginas de extractos literales que no coinciden con los saltos guardados (`VerificadorPaginas`).

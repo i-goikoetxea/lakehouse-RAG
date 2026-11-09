@@ -12,8 +12,8 @@ use crate::application::ports::agent_runner::{AgentRunnerPort, ObservadorTexto};
 use crate::application::ports::reloj::RelojPort;
 use crate::application::ports::tool_server::ToolServerPort;
 use crate::application::use_cases::arnes_turno::{
-    EleccionHerramienta, IntentDetector, PostInferenceGuard, PreInferenceInterceptor,
-    RegistroTurno, ViolacionArnes,
+    CitaRevisada, EleccionHerramienta, IntentDetector, PostInferenceGuard, PreInferenceInterceptor,
+    RegistroTurno, VerificadorPaginas, ViolacionArnes,
 };
 use crate::domain::errors::DomainError;
 use crate::domain::models::center::CenterId;
@@ -170,9 +170,14 @@ impl AgentOrchestrator {
                             MENSAJE_RESPUESTA_NO_VALIDADA.to_string()
                         }
                     };
+                    let nota = nota_de_paginas(&respuesta, &registro, &on_event);
+                    let respuesta = respuesta + nota.as_deref().unwrap_or_default();
                     if let Some(cb) = &on_event {
                         if plan.retener_texto {
                             cb(AgentExecutionEvent::TextDelta(respuesta.clone()));
+                        } else if let Some(nota) = nota {
+                            // El texto del modelo ya se emitió en vivo: la nota es un fragmento más
+                            cb(AgentExecutionEvent::TextDelta(nota));
                         }
                         cb(AgentExecutionEvent::Completed(respuesta.clone()));
                     }
@@ -302,6 +307,23 @@ impl RecordatorioReintento {
             )),
         }
     }
+}
+
+/// Bloque que se añade a la respuesta si la página de algún extracto literal no se confirma con
+/// los textos del turno (`ssd_citas_pagina.md` §5). El mensaje fijo de salida segura no se revisa
+fn nota_de_paginas(
+    respuesta: &str,
+    registro: &RegistroTurno,
+    on_event: &Option<EventCallback>,
+) -> Option<String> {
+    if respuesta == MENSAJE_RESPUESTA_NO_VALIDADA {
+        return None;
+    }
+    let revisadas = VerificadorPaginas::revisar(respuesta, registro);
+    let nota = VerificadorPaginas::nota(&revisadas)?;
+    let motivos: Vec<String> = revisadas.iter().filter_map(CitaRevisada::motivo).collect();
+    notificar_arnes(on_event, EtapaArnes::VerificacionPagina, motivos.join(" "));
+    Some(nota)
 }
 
 /// Lo que ve el modelo: el historial, con el recordatorio en el punto en que se produjo el rechazo
@@ -764,6 +786,98 @@ mod tests {
                 .contains("sesión caducada")
         );
         assert_eq!(runner.pasos_libres(), 0);
+    }
+
+    const FRASE_DEL_DOCUMENTO: &str = "La presion de prueba de las valvulas de alivio es 512.5 kPa";
+
+    /// Turno libre: el modelo busca, recibe un texto con marcas de página y responde
+    async fn turno_con_busqueda(
+        respuesta_del_modelo: &str,
+    ) -> (String, Vec<AgentExecutionEvent>, Vec<AgentMessage>) {
+        let runner = RunnerDelArnes::con_guion(
+            vec![],
+            vec![
+                AgentTurnOutput::ToolCalls(vec![ToolCall {
+                    id: "call_busqueda".to_string(),
+                    name: LakehouseToolName::SearchNormativeContext
+                        .as_str()
+                        .to_string(),
+                    arguments: json!({ "centro_id": "planta_1", "consulta": "presion" }),
+                }]),
+                libre_final(respuesta_del_modelo),
+            ],
+        );
+        let texto = format!("⟦p. 52⟧ Nota previa.\n⟦p. 53⟧ {FRASE_DEL_DOCUMENTO}.");
+        let orquestador = AgentOrchestrator::new(
+            runner,
+            Arc::new(ToolsConSalida {
+                salida: json!({ "grupos": [{ "resultados": [{ "texto": texto }] }] }),
+            }),
+        );
+        let eventos: Eventos = Arc::default();
+        let destino = eventos.clone();
+        let mut historial = vec![AgentMessage::user("Resume la nota sobre las valvulas")];
+        let respuesta = orquestador
+            .procesar_turno(
+                &ClaudeModel::new("haiku").unwrap(),
+                &CenterId::new("planta_1").unwrap(),
+                &mut historial,
+                Some(Arc::new(move |e| destino.lock().unwrap().push(e))),
+            )
+            .await
+            .unwrap();
+        let eventos = eventos.lock().unwrap().clone();
+        (respuesta, eventos, historial)
+    }
+
+    #[tokio::test]
+    async fn test_pagina_equivocada_de_un_extracto_se_anota_sin_reintentar() {
+        use crate::application::use_cases::arnes_turno::ENCABEZADO_VERIFICACION_PAGINAS;
+        let del_modelo = format!("Dice «{FRASE_DEL_DOCUMENTO}» (p. 52).");
+        let (respuesta, eventos, historial) = turno_con_busqueda(&del_modelo).await;
+        assert!(respuesta.starts_with(&del_modelo), "{respuesta}");
+        assert!(
+            respuesta.contains(ENCABEZADO_VERIFICACION_PAGINAS),
+            "{respuesta}"
+        );
+        assert!(respuesta.contains("el texto está en p. 53"), "{respuesta}");
+        assert_eq!(etapas(&eventos), vec![EtapaArnes::VerificacionPagina]);
+        // En streaming el modelo ya emitió su texto: la nota llega como un fragmento más
+        let fragmentos = deltas(&eventos);
+        assert_eq!(fragmentos.concat(), respuesta);
+        assert!(
+            fragmentos
+                .last()
+                .unwrap()
+                .contains(ENCABEZADO_VERIFICACION_PAGINAS)
+        );
+        assert!(
+            matches!(eventos.last(), Some(AgentExecutionEvent::Completed(t)) if *t == respuesta)
+        );
+        assert_eq!(historial.last().unwrap().content, respuesta);
+    }
+
+    #[tokio::test]
+    async fn test_pagina_confirmada_no_anade_nada() {
+        let del_modelo = format!("Dice «{FRASE_DEL_DOCUMENTO}» (p. 53).");
+        let (respuesta, eventos, _) = turno_con_busqueda(&del_modelo).await;
+        assert_eq!(respuesta, del_modelo);
+        assert!(etapas(&eventos).is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_el_mensaje_fijo_de_salida_segura_no_se_verifica() {
+        let runner = RunnerDelArnes::con_guion(
+            vec![Ok(TurnoDirigido::Llamada(llamada_lookup()))],
+            vec![
+                libre_final("«texto literal inventado largo» (p. 9): 777 °C."),
+                libre_final("«texto literal inventado largo» (p. 9): 777 °C."),
+            ],
+        );
+        let mut historial = vec![AgentMessage::user(CRUZABLE)];
+        let (respuesta, eventos) = turno_con_arnes(runner, &mut historial).await;
+        assert_eq!(respuesta.unwrap(), MENSAJE_RESPUESTA_NO_VALIDADA);
+        assert!(!etapas(&eventos).contains(&EtapaArnes::VerificacionPagina));
     }
 
     #[tokio::test]

@@ -249,10 +249,23 @@ async fn test_manifiesto_de_otro_modelo_impide_abrir_e_ingerir() {
             "\"dimension_embeddings\": 1024",
             "\"dimension_embeddings\": 384",
         ),
-        ("\"schema_version\": 5", "\"schema_version\": 4"),
+        ("\"schema_version\": 6", "\"schema_version\": 5"),
     ] {
+        assert!(original.contains(de), "el manifiesto no trae {de}");
         std::fs::write(&ruta_manifiesto, original.replace(de, a)).unwrap();
-        assert!(entorno.app.activar_centro(CENTRO).await.is_err(), "{a}");
+        let error = entorno
+            .app
+            .activar_centro(CENTRO)
+            .await
+            .expect_err(a)
+            .to_string();
+        if a.contains("schema_version") {
+            // Un centro v5 no se migra: el error pide recrearlo
+            assert!(
+                error.contains("Crea un centro nuevo y reingiere") && error.contains("= 5"),
+                "{error}"
+            );
+        }
     }
     std::fs::write(&ruta_manifiesto, "{ corrupto").unwrap();
     let error = entorno

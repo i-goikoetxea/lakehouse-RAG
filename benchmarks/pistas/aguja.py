@@ -103,6 +103,24 @@ def generar_aguja(semilla, repeticion, profundidad, texto_base=""):
     raise ValueError("No se encontró una aguja ausente del texto base")
 
 
+def generar_par_de_agujas(semilla, repeticion, profundidad, texto_base=""):
+    """Dos agujas casi iguales (mismo sujeto y unidad, distinto lote y valor) para páginas consecutivas.
+
+    La primera es la de la pista simple; la segunda sale del mismo generador, así que también es
+    determinista por (semilla, repetición, profundidad).
+    """
+    primera = generar_aguja(semilla, repeticion, profundidad, texto_base)
+    generador = _generador(semilla, repeticion, profundidad + 1)
+    for _ in range(MAX_INTENTOS):
+        lote = PREFIJO_LOTE + "".join(generador.choice(ALFABETO_LOTE) for _ in range(LONGITUD_LOTE))
+        valor = f"{generador.randint(VALOR_MINIMO_DECIMAS, VALOR_MAXIMO_DECIMAS) / 10:.1f}"
+        repetido = lote == primera.lote or valor == primera.valor or primera.valor in valor or valor in primera.valor
+        if not repetido and lote not in texto_base and valor not in texto_base:
+            segunda = Aguja(lote, valor, primera.unidad, primera.plantilla, primera.sujeto, primera.formulacion_semantica)
+            return primera, segunda
+    raise ValueError("No se encontró una segunda aguja ausente del texto base")
+
+
 def preguntas_de(aguja):
     """Léxica, con el lote; semántica, sin él. Hay una sola aguja por centro, así que no es ambigua."""
     lexica = f"According to the documentation, what is the {aguja.sujeto} of batch {aguja.lote}?"
@@ -200,6 +218,37 @@ def insertar_aguja(pdf_base, aguja, profundidad, primera_del_cuerpo=1):
     return DocumentoAguja(
         pdf=salida.getvalue(),
         pagina_esperada=indice + 1,
+        seccion_esperada=seccion_envolvente(lector, indice),
+        profundidad_real=indice / paginas,
+        paginas_originales=paginas,
+    )
+
+
+@dataclass(frozen=True)
+class DocumentoDosAgujas:
+    pdf: bytes
+    paginas_esperadas: tuple
+    seccion_esperada: str | None
+    profundidad_real: float
+    paginas_originales: int
+
+
+def insertar_agujas(pdf_base, agujas, profundidad, primera_del_cuerpo=1):
+    """Inserta una página por aguja, consecutivas, en el punto de la pista simple."""
+    lector = PdfReader(io.BytesIO(pdf_base))
+    if lector.is_encrypted:
+        raise ValueError("El PDF base declara /Encrypt: la app lo rechazaría")
+    paginas = len(lector.pages)
+    indice = indice_de_insercion(paginas, profundidad, primera_del_cuerpo)
+    escritor = PdfWriter(clone_from=lector)
+    for desplazamiento, aguja in enumerate(agujas):
+        pagina = PdfReader(io.BytesIO(pagina_de_texto(lineas_de_aguja(aguja)))).pages[0]
+        escritor.insert_page(pagina, indice + desplazamiento)
+    salida = io.BytesIO()
+    escritor.write(salida)
+    return DocumentoDosAgujas(
+        pdf=salida.getvalue(),
+        paginas_esperadas=tuple(indice + 1 + n for n in range(len(agujas))),
         seccion_esperada=seccion_envolvente(lector, indice),
         profundidad_real=indice / paginas,
         paginas_originales=paginas,

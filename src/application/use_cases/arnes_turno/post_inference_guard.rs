@@ -9,7 +9,9 @@ use serde_json::Value;
 use super::cifras::{extraer_cifras, lecturas_de_fuente};
 use super::intent_detector::IntencionTurno;
 use super::texto_normalizado::plegar_texto;
+use super::verificador_paginas::textos_marcables;
 use crate::application::dtos::tools::{LakehouseToolName, ToolResult};
+use crate::domain::services::marcas_pagina::quitar_marcas;
 
 const LOCUCIONES_DE_RECHAZO: &[&str] = &["no consta", "no declarado", "no declarada"];
 /// Lista cerrada (SSD §3.3): una abstención redactada de otro modo no se detecta.
@@ -70,6 +72,11 @@ const PETICIONES_DE_REFERENCIA: &[&str] = &[
 ];
 /// Valor de `origen_responsable` que la regla 9 del prompt lee como «no consta».
 const IDENTIFICADORES_DE_ABSTENCION: &[(&str, &str)] = &[("no_consta", "no consta")];
+/// Tools cuyos campos `texto` llevan marcas de página
+const HERRAMIENTAS_CON_MARCAS: &[LakehouseToolName] = &[
+    LakehouseToolName::SearchNormativeContext,
+    LakehouseToolName::StairGetSubtreeContext,
+];
 const SENAL_SIN_RESPONSABLE: &str = "sin_responsable_declarado";
 const SENAL_EJES_AMBIGUOS: &str = "ejes_ambiguos";
 /// Palabras de enlace de un nombre de eje: que aparezcan en la respuesta no nombra el eje.
@@ -114,6 +121,18 @@ impl RegistroTurno {
 
     fn matriz_sin_responsable(&self) -> bool {
         self.salidas_validas().any(es_matriz_sin_responsable)
+    }
+
+    /// Textos de las tools que marcan páginas (`⟦p. N⟧`), para comprobar las citas
+    pub(super) fn textos_paginables(&self) -> Vec<&str> {
+        self.salidas_validas()
+            .filter(|r| {
+                HERRAMIENTAS_CON_MARCAS
+                    .iter()
+                    .any(|h| h.as_str() == r.tool_name)
+            })
+            .flat_map(|r| textos_marcables(&r.output))
+            .collect()
     }
 }
 
@@ -326,11 +345,20 @@ fn cita_una_tool(respuesta_plegada: &str, registro: &RegistroTurno) -> bool {
         .salidas_validas()
         .filter(|r| !es_matriz_sin_responsable(r))
     {
-        recorrer_textos(&resultado.output, |texto| fuentes.push(plegar_texto(texto)));
+        // Una cita que cruza un salto de página no contiene la marca `⟦p. N⟧` de la salida ni el
+        // salto de línea que la precede
+        recorrer_textos(&resultado.output, |texto| {
+            fuentes.push(con_espacios_simples(&plegar_texto(&quitar_marcas(texto))))
+        });
     }
-    citas
-        .iter()
-        .any(|cita| fuentes.iter().any(|fuente| fuente.contains(cita.as_str())))
+    citas.iter().any(|cita| {
+        let cita = con_espacios_simples(cita);
+        fuentes.iter().any(|fuente| fuente.contains(&cita))
+    })
+}
+
+fn con_espacios_simples(texto: &str) -> String {
+    texto.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 fn citas_literales(texto: &str) -> Vec<String> {
@@ -727,6 +755,59 @@ mod tests {
                 "{respuesta}"
             );
         }
+    }
+
+    fn busqueda_con_marcas() -> ToolResult {
+        resultado(
+            "search_normative_context",
+            json!({ "grupos": [{ "resultados": [{
+                "texto": "⟦p. 52⟧ El acta de recepción la firma \n⟦p. 53⟧ el inspector de turno del almacén.",
+                "cita": { "pagina_inicio": 52, "pagina_fin": 54, "paginas": "52-54" }
+            }] }] }),
+            false,
+        )
+    }
+
+    #[test]
+    fn test_la_pagina_de_una_marca_queda_anclada_y_la_intermedia_sin_marca_no() {
+        let con_marcas = registro_con(vec![busqueda_con_marcas()]);
+        assert_eq!(
+            primera_cifra_sin_anclar("El dato está en la p. 53.", "¿Quién firma?", &con_marcas),
+            None
+        );
+        let solo_rango = registro_con(vec![resultado(
+            "search_normative_context",
+            json!({ "texto": "El acta la firma el inspector.", "cita": { "paginas": "52-54" } }),
+            false,
+        )]);
+        assert_eq!(
+            primera_cifra_sin_anclar("El dato está en la p. 53.", "¿Quién firma?", &solo_rango),
+            Some("53".to_string())
+        );
+    }
+
+    #[test]
+    fn test_cita_literal_que_cruza_una_marca_de_pagina_respalda_el_rol() {
+        let registro = registro_con(vec![matriz_sin_responsable(), busqueda_con_marcas()]);
+        assert_eq!(
+            validar_responsable(
+                "El documento dice «la firma el inspector de turno del almacén» (pp. 52-53).",
+                &registro
+            ),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn test_abstencion_con_pagina_de_una_marca_no_es_cifra_ajena() {
+        let registro = registro_con(vec![matriz_sin_responsable(), busqueda_con_marcas()]);
+        assert_eq!(
+            validar_responsable(
+                "No consta el responsable; el párrafo de la p. 53 solo nombra al inspector.",
+                &registro
+            ),
+            Ok(())
+        );
     }
 
     #[test]

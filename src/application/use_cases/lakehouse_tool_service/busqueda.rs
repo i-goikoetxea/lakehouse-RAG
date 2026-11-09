@@ -11,8 +11,9 @@ use serde_json::{Value, json};
 
 use super::LakehouseToolService;
 use super::estructura::{
-    NOTA_SEGURIDAD, NodoIndice, RevisionDocumental, campos_de_paginas, explicacion_de_estado,
-    rama_de, ruta_en_rama, seccion_real_de, validar_prefijo_ruta,
+    NOTA_MARCAS_DE_PAGINA, NOTA_SEGURIDAD, NodoIndice, RevisionDocumental, anadir_fecha_vigor,
+    campos_de_paginas, explicacion_de_estado, rama_de, ruta_en_rama, seccion_real_de,
+    validar_prefijo_ruta,
 };
 use crate::application::dtos::tools::{
     LakehouseToolName, ModoBusqueda, SearchNormativeContextParams, parsear_argumentos,
@@ -21,6 +22,7 @@ use crate::application::ports::semantic_index::FragmentoIndexado;
 use crate::domain::errors::DomainError;
 use crate::domain::models::estructura_documental::EstadoContenido;
 use crate::domain::services::arbol_secciones::TITULO_PREAMBULO;
+use crate::domain::services::marcas_pagina::texto_con_marcas;
 use crate::domain::services::normalizacion::plegar_mayusculas;
 
 /// Longitud máxima de la consulta
@@ -40,6 +42,10 @@ const TITULO_CONTENIDO_GENERAL: &str = "Contenido General";
 #[derive(Debug, Clone, Default)]
 pub(crate) struct DatosRevision {
     pub revision: String,
+    /// Título del documento en 01
+    pub titulo: String,
+    /// `AAAA-MM-DD` si 01 la declara; nunca se inventa
+    pub fecha_vigor: Option<String>,
     pub provisional: bool,
     pub vigencia_no_declarada: bool,
 }
@@ -182,6 +188,15 @@ pub(crate) fn fusionar<'a>(
     puntuados
 }
 
+/// Texto de un fragmento para la respuesta: con marcas `⟦p. N⟧` si tiene saltos de página. Las
+/// marcas no existen en el índice, así que no afectan al ranking
+fn texto_de_salida(fragmento: &FragmentoIndexado) -> String {
+    texto_con_marcas(
+        &fragmento.texto,
+        fragmento.saltos_pagina.as_deref().unwrap_or_default(),
+    )
+}
+
 /// Tema de un fragmento: título de su sección más profunda, sin numeración
 pub(crate) fn tema(fragmento: &FragmentoIndexado) -> String {
     let ultimo = fragmento
@@ -258,6 +273,7 @@ pub(crate) fn agrupar_por_tema(
                         .as_str();
                     let mut cita = json!({
                         "doc_id": f.doc_id,
+                        "titulo": revision.titulo,
                         "revision": (!revision.revision.is_empty()).then_some(&revision.revision),
                         "version_num": f.version_num,
                         "chunk_origen_id": f.chunk_origen_id,
@@ -273,10 +289,11 @@ pub(crate) fn agrupar_por_tema(
                     ) {
                         destino.extend(paginas);
                     }
+                    anadir_fecha_vigor(&mut cita, revision.fecha_vigor.as_deref());
                     json!({
                         "id": f.id,
                         "origen": f.origen.as_str(),
-                        "texto": f.texto,
+                        "texto": texto_de_salida(f),
                         "breadcrumb_jerarquia": f.breadcrumb_jerarquia,
                         "condicion_aplicacion": f.condicion_aplicacion,
                         "nivel_prelacion": f.nivel_prelacion,
@@ -393,6 +410,8 @@ impl LakehouseToolService {
                     (r.doc_id.clone(), r.version_num),
                     DatosRevision {
                         revision: r.revision.clone(),
+                        titulo: r.titulo.clone(),
+                        fecha_vigor: r.fecha_vigor.clone(),
                         provisional: r.es_provisional(),
                         vigencia_no_declarada: r.vigencia_no_declarada,
                     },
@@ -489,7 +508,10 @@ impl LakehouseToolService {
             "grupos": agrupar_por_tema(&puntuados, &revision_de),
             "aviso": aviso,
             "documentos_no_definitivos": documentos_no_definitivos(&revisiones, &indexados),
-            "nota": "Incluye siempre la condicion_aplicacion de cada resultado. Si un tema tiene conflicto_prelacion, responde con el resultado prevalece: true y menciona el supletorio. Cita doc_id, revisión, sección y página si existe. Si un resultado trae aviso_contenido, dilo en la respuesta.",
+            "nota": "Incluye siempre la condicion_aplicacion de cada resultado. Si un tema tiene conflicto_prelacion, responde con el resultado prevalece: true y menciona el supletorio. Cita el título o el doc_id, la revisión, la sección y la página si existe. Si un resultado trae aviso_contenido, dilo en la respuesta."
+                .to_string()
+                + " "
+                + NOTA_MARCAS_DE_PAGINA,
             "nota_seguridad": NOTA_SEGURIDAD,
         }))
     }
@@ -523,6 +545,7 @@ mod tests {
             estado_contenido: None,
             pagina_inicio: None,
             pagina_fin: None,
+            saltos_pagina: None,
             vector,
         }
     }
@@ -635,7 +658,7 @@ mod tests {
             DatosRevision {
                 revision: "Provisional".into(),
                 provisional: true,
-                vigencia_no_declarada: false,
+                ..DatosRevision::default()
             },
         );
         let grupos = agrupar_por_tema(&puntuados, &revisiones);
@@ -651,6 +674,105 @@ mod tests {
         assert_eq!(de("PROV")["prevalece"], false);
         assert_eq!(de("PROV")["supletorio"], true);
         assert_eq!(de("PROV")["tiene_capa_2"], false);
+    }
+
+    fn resultado_unico(f: &FragmentoIndexado, datos: DatosRevision) -> Value {
+        let puntuados = fusionar(&[f], "presion", None, true, 5);
+        let mut revisiones = HashMap::new();
+        revisiones.insert((f.doc_id.clone(), 1), datos);
+        agrupar_por_tema(&puntuados, &revisiones)[0]["resultados"][0].clone()
+    }
+
+    #[test]
+    fn test_texto_lleva_marcas_de_pagina_solo_en_la_salida() {
+        use crate::domain::services::marcas_pagina::SaltoPagina;
+        let mut f = fragmento(
+            "c1",
+            "DOC",
+            2,
+            "4. Ensayos",
+            "presion de prueba\nvalor de la presion",
+            vec![],
+        );
+        f.pagina_inicio = Some(52);
+        f.pagina_fin = Some(53);
+        f.saltos_pagina = Some(vec![
+            SaltoPagina {
+                desplazamiento: 0,
+                pagina: 52,
+            },
+            SaltoPagina {
+                desplazamiento: 18,
+                pagina: 53,
+            },
+        ]);
+        let resultado = resultado_unico(&f, DatosRevision::default());
+        assert_eq!(
+            resultado["texto"],
+            "⟦p. 52⟧ presion de prueba\n⟦p. 53⟧ valor de la presion"
+        );
+        assert_eq!(resultado["cita"]["paginas"], "52-53");
+        assert_eq!(f.texto, "presion de prueba\nvalor de la presion");
+        assert!(!texto_buscable(&f).contains('⟦'), "BM25 no ve las marcas");
+    }
+
+    #[test]
+    fn test_sin_saltos_no_hay_marcas_y_las_falsas_se_neutralizan() {
+        let f = fragmento(
+            "c1",
+            "DOC",
+            2,
+            "4. Ensayos",
+            "la presion ⟦p. 99⟧ de prueba",
+            vec![],
+        );
+        let resultado = resultado_unico(&f, DatosRevision::default());
+        assert_eq!(resultado["texto"], "la presion [p. 99] de prueba");
+    }
+
+    #[test]
+    fn test_cita_lleva_titulo_y_fecha_de_vigor_solo_si_existe() {
+        let f = fragmento("c1", "DOC", 2, "4. Ensayos", "presion", vec![]);
+        let con_fecha = resultado_unico(
+            &f,
+            DatosRevision {
+                revision: "Rev. 02".into(),
+                titulo: "Procedimiento de ensayos".into(),
+                fecha_vigor: Some("2026-03-01".into()),
+                ..DatosRevision::default()
+            },
+        );
+        assert_eq!(con_fecha["cita"]["titulo"], "Procedimiento de ensayos");
+        assert_eq!(con_fecha["cita"]["fecha_vigor"], "2026-03-01");
+        let sin_fecha = resultado_unico(
+            &f,
+            DatosRevision {
+                titulo: "Procedimiento de ensayos".into(),
+                ..DatosRevision::default()
+            },
+        );
+        assert_eq!(sin_fecha["cita"]["titulo"], "Procedimiento de ensayos");
+        assert!(
+            sin_fecha["cita"]
+                .as_object()
+                .unwrap()
+                .get("fecha_vigor")
+                .is_none(),
+            "una fecha nula no aparece: {}",
+            sin_fecha["cita"]
+        );
+    }
+
+    #[test]
+    fn test_nota_explica_las_marcas_y_la_pagina_fisica() {
+        for frase in [
+            "⟦p. N⟧",
+            "página física",
+            "cruza una marca",
+            "extracto literal",
+        ] {
+            assert!(NOTA_MARCAS_DE_PAGINA.contains(frase), "{frase}");
+        }
     }
 
     #[test]

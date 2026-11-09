@@ -56,6 +56,8 @@ pub struct FilaChunk {
     /// Páginas de la sección de origen (para citas); `None` en formatos sin páginas
     pub pagina_inicio: Option<u32>,
     pub pagina_fin: Option<u32>,
+    /// Saltos de página dentro de `texto_contenido` (`ssd_citas_pagina.md` §1); `None` si no se conocen
+    pub saltos_pagina: Option<Vec<crate::domain::services::marcas_pagina::SaltoPagina>>,
     pub tablas_vinculadas: Vec<String>,
     pub hitos_vinculados: Vec<String>,
     pub vector: Vec<f32>,

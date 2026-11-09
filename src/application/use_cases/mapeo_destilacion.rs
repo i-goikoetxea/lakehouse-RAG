@@ -19,7 +19,7 @@ use chrono::Utc;
 
 use crate::application::dtos::ingestion::{
     AristaDestilada, CatalogoDestilado, CeldaDestilada, DistilledDocumentPackage, EjeDestilado,
-    HitoDestilado, LimitesDestilados, ParsedDocument, ParsedSection, ParsedTableRaw,
+    HitoDestilado, LimitesDestilados, ParsedDocument, ParsedSection, ParsedTableRaw, SaltoPagina,
     TablaDestilada,
 };
 use crate::application::dtos::lakehouse_filas::{
@@ -43,6 +43,7 @@ use crate::domain::services::arbol_secciones::{
     resumen_extractivo,
 };
 use crate::domain::services::fragmentacion::fragmentar_con_posiciones;
+use crate::domain::services::marcas_pagina::saltos_del_tramo;
 use crate::domain::services::normalizacion::{
     codigo_canonico, normalizar_token, plegar_mayusculas, separar_revision,
 };
@@ -113,6 +114,7 @@ struct SeccionIndexable {
     texto: String,
     pagina_inicio: Option<u32>,
     pagina_fin: Option<u32>,
+    saltos_pagina: Option<Vec<SaltoPagina>>,
 }
 
 /// Clave de la revisión: `doc_id` canónico sin revisión y versión resuelta
@@ -432,8 +434,8 @@ fn estructura_universal(
             fragmentar_con_posiciones(origen)
                 .into_iter()
                 .map(|fragmento| {
-                    let (pagina_inicio, pagina_fin) = if solo_titulo {
-                        (seccion.pagina_inicio, seccion.pagina_fin)
+                    let paginas = if solo_titulo {
+                        PaginasFragmento::de_la_seccion(seccion)
                     } else {
                         paginas_del_fragmento(seccion, fragmento.inicio, fragmento.fin)
                     };
@@ -444,8 +446,9 @@ fn estructura_universal(
                         breadcrumb: seccion.breadcrumb.clone(),
                         condicion: seccion.condicion_aplicacion.clone(),
                         texto: fragmento.texto,
-                        pagina_inicio,
-                        pagina_fin,
+                        pagina_inicio: paginas.inicio,
+                        pagina_fin: paginas.fin,
+                        saltos_pagina: paginas.saltos,
                     }
                 }),
         );
@@ -467,26 +470,46 @@ fn estructura_universal(
     (nodos, textos_nodos, fragmentos)
 }
 
-/// Páginas reales del tramo `inicio..fin` del contenido. Sin saltos (formatos sin páginas o texto
-/// de respaldo) vale el rango de la sección.
-fn paginas_del_fragmento(
-    seccion: &ParsedSection,
-    inicio: usize,
-    fin: usize,
-) -> (Option<u32>, Option<u32>) {
-    if seccion.saltos_pagina.is_empty() {
-        return (seccion.pagina_inicio, seccion.pagina_fin);
+/// Páginas de un fragmento y los saltos de página dentro de su texto
+struct PaginasFragmento {
+    inicio: Option<u32>,
+    fin: Option<u32>,
+    /// `None` si no se sabe dónde cambia la página (`ssd_citas_pagina.md` §1)
+    saltos: Option<Vec<SaltoPagina>>,
+}
+
+impl PaginasFragmento {
+    /// Rango de la sección. Solo si cabe en una página se sabe que todo el texto está en ella
+    fn de_la_seccion(seccion: &ParsedSection) -> Self {
+        let saltos = seccion
+            .pagina_inicio
+            .filter(|inicio| seccion.pagina_fin == Some(*inicio))
+            .map(|pagina| {
+                vec![SaltoPagina {
+                    desplazamiento: 0,
+                    pagina,
+                }]
+            });
+        Self {
+            inicio: seccion.pagina_inicio,
+            fin: seccion.pagina_fin,
+            saltos,
+        }
     }
-    let pagina_en = |posicion: usize| {
-        let siguientes = seccion
-            .saltos_pagina
-            .partition_point(|salto| salto.desplazamiento <= posicion);
-        seccion.saltos_pagina[siguientes.saturating_sub(1)].pagina
-    };
-    (
-        Some(pagina_en(inicio)),
-        Some(pagina_en(fin.saturating_sub(1).max(inicio))),
-    )
+}
+
+/// Páginas reales del tramo `inicio..fin` del contenido y sus saltos, relativos a `inicio`. Sin
+/// saltos (formatos sin páginas o texto de respaldo) vale el rango de la sección.
+fn paginas_del_fragmento(seccion: &ParsedSection, inicio: usize, fin: usize) -> PaginasFragmento {
+    if seccion.saltos_pagina.is_empty() {
+        return PaginasFragmento::de_la_seccion(seccion);
+    }
+    let saltos = saltos_del_tramo(&seccion.saltos_pagina, inicio, fin);
+    PaginasFragmento {
+        inicio: saltos.first().map(|salto| salto.pagina),
+        fin: saltos.last().map(|salto| salto.pagina),
+        saltos: Some(saltos),
+    }
 }
 
 /// Texto que se vectoriza para un chunk: `breadcrumb + condición + texto` (problema 7)
@@ -540,6 +563,7 @@ fn filas_chunks_sin_vector(
             texto_contenido: seccion.texto.clone(),
             pagina_inicio: seccion.pagina_inicio,
             pagina_fin: seccion.pagina_fin,
+            saltos_pagina: seccion.saltos_pagina.clone(),
             tablas_vinculadas: Vec::new(),
             hitos_vinculados: Vec::new(),
             vector: Vec::new(),
@@ -1438,6 +1462,76 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn test_saltos_de_cada_chunk_son_relativos_a_su_texto() {
+        use crate::domain::services::marcas_pagina::{texto_con_marcas, tramos_paginados};
+        let parsed = ParsedDocument {
+            secciones: vec![con_paginas(&[(7, 400), (8, 400), (9, 400)])],
+            ..ParsedDocument::default()
+        };
+        let revision = mapear_revision(&clave(), &parsed, &paquete_vacio(), "h").unwrap();
+        assert!(revision.chunks.len() >= 2);
+        for chunk in &revision.chunks {
+            let saltos = chunk
+                .saltos_pagina
+                .as_ref()
+                .expect("un PDF guarda sus saltos");
+            assert_eq!(saltos[0].desplazamiento, 0);
+            assert_eq!(Some(saltos[0].pagina), chunk.pagina_inicio);
+            assert_eq!(saltos.last().map(|s| s.pagina), chunk.pagina_fin);
+            let marcado = texto_con_marcas(&chunk.texto_contenido, saltos);
+            let tramos = tramos_paginados(&marcado);
+            assert_eq!(tramos.len(), saltos.len());
+            for tramo in tramos {
+                let pagina = tramo.pagina.expect("todo el texto queda tras una marca");
+                assert!(
+                    tramo
+                        .texto
+                        .split_whitespace()
+                        .all(|p| p == format!("pag{pagina}")),
+                    "p. {pagina}: {}",
+                    tramo.texto
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_saltos_nulos_si_no_se_sabe_donde_cambia_la_pagina() {
+        let de = |seccion: ParsedSection| {
+            let parsed = ParsedDocument {
+                secciones: vec![seccion],
+                ..ParsedDocument::default()
+            };
+            mapear_revision(&clave(), &parsed, &paquete_vacio(), "h")
+                .unwrap()
+                .chunks
+        };
+        let markdown = de(seccion("2.1", "2.1 Texto", None, "sin paginas"));
+        assert!(markdown.iter().all(|c| c.saltos_pagina.is_none()));
+
+        let una_pagina = de(ParsedSection {
+            pagina_inicio: Some(5),
+            pagina_fin: Some(5),
+            ..seccion("2.1", "2.1 Texto", None, "respaldo en una pagina")
+        });
+        assert_eq!(
+            una_pagina[0].saltos_pagina,
+            Some(vec![SaltoPagina {
+                desplazamiento: 0,
+                pagina: 5
+            }])
+        );
+
+        let varias = de(ParsedSection {
+            pagina_inicio: Some(3),
+            pagina_fin: Some(5),
+            ..seccion("2.1", "2.1 Texto", None, "respaldo de tres paginas")
+        });
+        assert_eq!(varias[0].saltos_pagina, None);
+        assert_eq!(varias[0].pagina_fin, Some(5));
     }
 
     #[test]

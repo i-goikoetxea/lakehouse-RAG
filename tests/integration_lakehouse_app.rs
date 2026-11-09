@@ -39,7 +39,7 @@ async fn test_crear_centro_genera_estructura_y_manifiesto_v2_inactivo() {
     let manifiesto: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(ruta.join(ARCHIVO_MANIFIESTO)).unwrap())
             .unwrap();
-    assert_eq!(manifiesto["schema_version"], 5);
+    assert_eq!(manifiesto["schema_version"], 6);
     assert_eq!(manifiesto["modelo_embeddings"], MODELO_E5);
     assert_eq!(manifiesto["dimension_embeddings"], 1024);
     assert_eq!(manifiesto["centro_id"], CENTRO);

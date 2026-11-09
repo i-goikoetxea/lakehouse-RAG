@@ -33,15 +33,11 @@ pub struct ParsedDocument {
     pub requiere_ocr: bool,
 }
 
-/// Sección documental con su código, su linaje jerárquico y la condición heredada (H7)
-/// Punto del contenido de una sección donde empieza una página
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SaltoPagina {
-    /// Bytes desde el inicio de `ParsedSection::contenido`
-    pub desplazamiento: usize,
-    pub pagina: u32,
-}
+/// Punto del contenido de una sección donde empieza una página (en una sección, el
+/// desplazamiento cuenta desde el inicio de `ParsedSection::contenido`)
+pub use crate::domain::services::marcas_pagina::SaltoPagina;
 
+/// Sección documental con su código, su linaje jerárquico y la condición heredada (H7)
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ParsedSection {
     pub codigo: String,

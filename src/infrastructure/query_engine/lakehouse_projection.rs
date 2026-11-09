@@ -18,8 +18,8 @@ use std::path::Path;
 use std::sync::Arc;
 
 use arrow_array::{
-    Array, BooleanArray, FixedSizeListArray, Float32Array, Int8Array, Int32Array, RecordBatch,
-    StringArray,
+    Array, BooleanArray, FixedSizeListArray, Float32Array, Int8Array, Int32Array, ListArray,
+    RecordBatch, StringArray, StructArray,
 };
 use arrow_schema::{DataType, SchemaRef};
 use async_trait::async_trait;
@@ -42,8 +42,12 @@ use crate::application::ports::semantic_index::{
 use crate::domain::errors::DomainError;
 use crate::domain::models::center::CenterId;
 use crate::domain::models::estructura_documental::{EstadoContenido, TipoBloque};
+use crate::domain::services::marcas_pagina::SaltoPagina;
 use crate::infrastructure::query_engine::datafusion_engine::DataFusionEngine;
-use crate::infrastructure::storage::schemas::obtener_esquema_por_nombre;
+use crate::infrastructure::storage::schemas::{
+    CAMPO_SALTO_DESPLAZAMIENTO, CAMPO_SALTO_PAGINA, COLUMNA_SALTOS_PAGINA,
+    obtener_esquema_por_nombre,
+};
 
 /// Archivo del inventario exportado para el LLM
 pub const ARCHIVO_INVENTARIO_GLUE: &str = "inventario_tablas.json";
@@ -148,6 +152,32 @@ fn pagina_en(lote: &RecordBatch, nombre: &str, fila: usize) -> Option<i32> {
         .map(|c| c.value(fila))
 }
 
+/// Saltos de página de un chunk; `None` si la fila es nula o algún valor es negativo
+fn saltos_en(lote: &RecordBatch, fila: usize) -> Option<Vec<SaltoPagina>> {
+    let lista = lote
+        .column_by_name(COLUMNA_SALTOS_PAGINA)?
+        .as_any()
+        .downcast_ref::<ListArray>()
+        .filter(|l| l.is_valid(fila))?;
+    let valores = lista.value(fila);
+    let estructuras = valores.as_any().downcast_ref::<StructArray>()?;
+    let columna = |nombre: &str| {
+        estructuras
+            .column_by_name(nombre)
+            .and_then(|c| c.as_any().downcast_ref::<Int32Array>())
+    };
+    let desplazamientos = columna(CAMPO_SALTO_DESPLAZAMIENTO)?;
+    let paginas = columna(CAMPO_SALTO_PAGINA)?;
+    (0..estructuras.len())
+        .map(|i| {
+            Some(SaltoPagina {
+                desplazamiento: usize::try_from(desplazamientos.value(i)).ok()?,
+                pagina: u32::try_from(paginas.value(i)).ok()?,
+            })
+        })
+        .collect()
+}
+
 fn vector_en(lote: &RecordBatch, nombre: &str, fila: usize) -> Vec<f32> {
     let Some(lista) = lote
         .column_by_name(nombre)
@@ -186,6 +216,7 @@ fn fragmento_base(
         estado_contenido: None,
         pagina_inicio: None,
         pagina_fin: None,
+        saltos_pagina: None,
         vector: Vec::new(),
     }
 }
@@ -205,6 +236,7 @@ fn fragmentos_de_chunks(lotes: &[RecordBatch]) -> Vec<FragmentoIndexado> {
                 .and_then(|t| EstadoContenido::parse(&t).ok());
             f.pagina_inicio = pagina_en(lote, "pagina_inicio", fila);
             f.pagina_fin = pagina_en(lote, "pagina_fin", fila);
+            f.saltos_pagina = saltos_en(lote, fila);
             f.vector = vector_en(lote, "vector", fila);
             fragmentos.push(f);
         }
@@ -477,6 +509,7 @@ mod tests {
         let chunk = FilaChunk {
             pagina_inicio: Some(3),
             pagina_fin: Some(4),
+            saltos_pagina: None,
             chunk_id: "DOC-c0".to_string(),
             clave,
             nodo_id: NodoId::new("DOC#sec-1").unwrap(),
@@ -502,6 +535,56 @@ mod tests {
         );
         assert_eq!(fragmentos[0].pagina_inicio, Some(3));
         assert_eq!(fragmentos[0].pagina_fin, Some(4));
+        assert_eq!(fragmentos[0].saltos_pagina, None, "sin saltos guardados");
+    }
+
+    #[test]
+    fn test_saltos_de_pagina_van_y_vuelven_por_arrow() {
+        use crate::domain::services::marcas_pagina::SaltoPagina;
+        let salto = |desplazamiento, pagina| SaltoPagina {
+            desplazamiento,
+            pagina,
+        };
+        let chunk = |id: &str, saltos: Option<Vec<SaltoPagina>>| FilaChunk {
+            pagina_inicio: Some(3),
+            pagina_fin: Some(4),
+            saltos_pagina: saltos,
+            chunk_id: id.to_string(),
+            clave: ClaveDocumental {
+                centro_id: CenterId::new("obra-a").unwrap(),
+                doc_id: DocId::new("DOC").unwrap(),
+                version_num: 1,
+            },
+            nodo_id: NodoId::new("DOC#sec-1").unwrap(),
+            tipo_bloque: TipoBloque::Alcance,
+            estado_contenido: EstadoContenido::Completo,
+            nivel_prelacion: TipoDocumento::ProcedimientoObra.nivel_prelacion(),
+            breadcrumb_jerarquia: "1".to_string(),
+            condicion_aplicacion: None,
+            texto_contenido: "texto de dos paginas".to_string(),
+            tablas_vinculadas: Vec::new(),
+            hitos_vinculados: Vec::new(),
+            vector: vec![0.5; DIMENSION_EMBEDDINGS as usize],
+        };
+        let filas = vec![
+            chunk("DOC-c0", Some(vec![salto(0, 3), salto(9, 4)])),
+            chunk("DOC-c1", None),
+            chunk("DOC-c2", Some(vec![salto(0, 4)])),
+            chunk("DOC-c3", Some(vec![salto(0, u32::MAX)])),
+        ];
+        let transaccion = ColumnasTransaccionales::staged(&IngestId::new("ING").unwrap());
+        let lote = lote_a_record_batch(&LoteIngesta::Chunks(filas), &transaccion).unwrap();
+        let fragmentos = fragmentos_de_chunks(&[lote]);
+        assert_eq!(
+            fragmentos[0].saltos_pagina,
+            Some(vec![salto(0, 3), salto(9, 4)])
+        );
+        assert_eq!(fragmentos[1].saltos_pagina, None);
+        assert_eq!(fragmentos[2].saltos_pagina, Some(vec![salto(0, 4)]));
+        assert_eq!(
+            fragmentos[3].saltos_pagina, None,
+            "fuera de Int32 queda nulo"
+        );
     }
 
     #[test]

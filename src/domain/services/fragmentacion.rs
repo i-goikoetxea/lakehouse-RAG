@@ -6,6 +6,11 @@
 //! dependería del modelo activo. La estimación solo decide dónde cortar; quien vectoriza comprueba
 //! el truncado real con `EmbeddingEnginePort::contar_truncados`.
 
+use super::marcas_pagina::{SaltoPagina, empujar_si_cambia, saltos_del_tramo, saltos_validos};
+
+/// Separador entre dos ventanas consecutivas que no comparten solape
+const SEPARADOR_SIN_SOLAPE: &str = "\n\n";
+
 /// Una sección de hasta este número de tokens es un único chunk. Coincide con la ventana: E5
 /// trunca a 512 tokens reales y un chunk único no tiene solape que cubra su cola
 pub const UMBRAL_CHUNK_UNICO: usize = TOKENS_VENTANA;
@@ -164,20 +169,49 @@ pub fn fragmentar_con_posiciones(texto: &str) -> Vec<FragmentoSeccion> {
 /// `TOKENS_SOLAPE` tokens, el máximo que genera `fragmentar_seccion`; así un texto repetitivo no
 /// pierde contenido real. Sin solape, las une con un salto de párrafo.
 pub fn reconstruir_sin_solape<S: AsRef<str>>(ventanas: &[S]) -> String {
+    let sin_saltos: Vec<(&str, Option<&[SaltoPagina]>)> = ventanas
+        .iter()
+        .map(|ventana| (ventana.as_ref(), None))
+        .collect();
+    reconstruir_con_saltos(&sin_saltos).0
+}
+
+/// `reconstruir_sin_solape` que además traslada al texto unido los saltos de página de cada
+/// ventana. Si alguna ventana no trae saltos, el resultado tampoco: no se sabe dónde cambia.
+pub fn reconstruir_con_saltos(
+    ventanas: &[(&str, Option<&[SaltoPagina]>)],
+) -> (String, Option<Vec<SaltoPagina>>) {
     let mut texto = String::new();
-    for ventana in ventanas {
-        let ventana = ventana.as_ref();
-        if texto.is_empty() {
-            texto.push_str(ventana);
-            continue;
+    let mut saltos: Option<Vec<SaltoPagina>> = (!ventanas.is_empty()).then(Vec::new);
+    for (ventana, saltos_ventana) in ventanas {
+        let solape = if texto.is_empty() {
+            0
+        } else {
+            longitud_de_solape(&texto, ventana)
+        };
+        if solape == 0 && !texto.is_empty() {
+            texto.push_str(SEPARADOR_SIN_SOLAPE);
         }
-        let solape = longitud_de_solape(&texto, ventana);
-        if solape == 0 {
-            texto.push_str("\n\n");
-        }
+        let base = texto.len();
         texto.push_str(&ventana[solape..]);
+        match (saltos.as_mut(), saltos_ventana) {
+            (Some(unidos), Some(propios))
+                if saltos_validos(ventana, propios) && solape < ventana.len().max(1) =>
+            {
+                for salto in saltos_del_tramo(propios, solape, ventana.len()) {
+                    empujar_si_cambia(
+                        unidos,
+                        SaltoPagina {
+                            desplazamiento: base + salto.desplazamiento,
+                            pagina: salto.pagina,
+                        },
+                    );
+                }
+            }
+            _ => saltos = None,
+        }
     }
-    texto
+    (texto, saltos)
 }
 
 /// Bytes del prefijo más largo de `siguiente` que termina `previo`, dentro del solape admitido
@@ -196,6 +230,54 @@ fn longitud_de_solape(previo: &str, siguiente: &str) -> usize {
 #[cfg(test)]
 mod tests_posiciones {
     use super::*;
+    use crate::domain::services::marcas_pagina::saltos_del_tramo;
+
+    fn salto(desplazamiento: usize, pagina: u32) -> SaltoPagina {
+        SaltoPagina {
+            desplazamiento,
+            pagina,
+        }
+    }
+
+    #[test]
+    fn test_reconstruir_con_saltos_recupera_texto_y_saltos_de_la_seccion() {
+        let mut texto = String::new();
+        let mut saltos = Vec::new();
+        for pagina in 7..=9 {
+            if !texto.is_empty() {
+                texto.push('\n');
+            }
+            saltos.push(salto(texto.len(), pagina));
+            texto.push_str(&vec![format!("pag{pagina}"); 400].join(" "));
+        }
+        let fragmentos = fragmentar_con_posiciones(&texto);
+        assert!(fragmentos.len() > 2);
+        let por_ventana: Vec<Vec<SaltoPagina>> = fragmentos
+            .iter()
+            .map(|f| saltos_del_tramo(&saltos, f.inicio, f.fin))
+            .collect();
+        let ventanas: Vec<(&str, Option<&[SaltoPagina]>)> = fragmentos
+            .iter()
+            .zip(&por_ventana)
+            .map(|(f, s)| (f.texto.as_str(), Some(s.as_slice())))
+            .collect();
+        let (unido, unidos) = reconstruir_con_saltos(&ventanas);
+        assert_eq!(unido, texto);
+        assert_eq!(unidos, Some(saltos));
+    }
+
+    #[test]
+    fn test_reconstruir_con_saltos_sin_solape_y_sin_saltos() {
+        let a = [salto(0, 3)];
+        let b = [salto(0, 3), salto(2, 4)];
+        let (unido, unidos) = reconstruir_con_saltos(&[("uno", Some(&a)), ("dos", Some(&b))]);
+        assert_eq!(unido, "uno\n\ndos");
+        assert_eq!(unidos, Some(vec![salto(0, 3), salto(7, 4)]));
+        let (unido, unidos) = reconstruir_con_saltos(&[("uno", Some(&a)), ("dos", None)]);
+        assert_eq!(unido, "uno\n\ndos");
+        assert_eq!(unidos, None);
+        assert_eq!(reconstruir_con_saltos(&[]), (String::new(), None));
+    }
 
     #[test]
     fn test_posiciones_recuperan_cada_fragmento_del_texto() {

@@ -100,6 +100,7 @@ pub fn fila_chunk(doc_id: &str, version: u32, idx: usize) -> FilaChunk {
     FilaChunk {
         pagina_inicio: None,
         pagina_fin: None,
+        saltos_pagina: None,
         chunk_id: id_versionado(&c.doc_id, version, TipoEntidad::Chunk, idx),
         nivel_prelacion: TipoDocumento::ProcedimientoObra.nivel_prelacion(),
         nodo_id: NodoId::new(nodo_de(doc_id, idx)).unwrap(),

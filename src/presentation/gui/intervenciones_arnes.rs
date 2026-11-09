@@ -30,6 +30,9 @@ pub fn explicar_intervencion(etapa: EtapaArnes, motivo: &str) -> String {
             "La segunda respuesta tampoco se mostró porque {}. Lo que sí se consultó queda en el Studio.",
             causa_del_rechazo(motivo)
         ),
+        EtapaArnes::VerificacionPagina => {
+            "Se comprobó la página de las citas literales y alguna no coincide con el documento: el detalle está al final de la respuesta.".to_string()
+        }
     }
 }
 
@@ -85,6 +88,17 @@ mod tests {
         for termino in TERMINOS_INTERNOS {
             assert!(!texto.contains(termino), "«{termino}» en: {texto}");
         }
+    }
+
+    #[test]
+    fn test_la_verificacion_de_paginas_se_explica_sin_repetir_el_extracto() {
+        let texto = explicar_intervencion(
+            EtapaArnes::VerificacionPagina,
+            "«valor_interno»: la respuesta cita p. 52, pero el texto está en p. 53.",
+        );
+        assert!(texto.contains("página"), "{texto}");
+        assert!(!texto.contains("valor_interno"), "{texto}");
+        sin_jerga(&texto);
     }
 
     #[test]

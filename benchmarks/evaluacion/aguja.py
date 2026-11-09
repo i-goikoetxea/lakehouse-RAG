@@ -17,6 +17,10 @@ _CITA_DE_PAGINAS = re.compile(
     re.IGNORECASE,
 )
 _RANGO = re.compile(r"(\d+)\s*[-–]\s*(\d+)|(\d+)")
+# Bloque que añade la app tras la respuesta del modelo (`ssd_citas_pagina.md` §5.4)
+ENCABEZADO_VERIFICACION = "**Verificación automática de páginas**"
+ETAPA_VERIFICACION = "verificacion_pagina"
+_MARCA_DE_PAGINA = re.compile(r"⟦p\. [1-9]\d{0,5}⟧ ?")
 
 
 def recall_aguja(respuesta, aguja):
@@ -107,13 +111,67 @@ def paginas_citadas(texto):
     return paginas
 
 
+def paginas_estrictas_citadas(texto):
+    """Páginas citadas solas: un rango o una lista no cuentan."""
+    paginas = set()
+    for cita in _CITA_DE_PAGINAS.finditer(texto):
+        numeros = re.findall(r"\d+", cita.group(1))
+        if len(numeros) == 1:
+            paginas.add(int(numeros[0]))
+    return paginas
+
+
 def pagina_exacta_estricta(respuesta, esperada):
     """1.0 solo si la respuesta cita la página esperada sola: un rango o una lista no cuentan."""
-    for cita in _CITA_DE_PAGINAS.finditer(respuesta):
-        numeros = re.findall(r"\d+", cita.group(1))
-        if len(numeros) == 1 and int(numeros[0]) == esperada:
-            return 1.0
-    return 0.0
+    return 1.0 if esperada in paginas_estrictas_citadas(respuesta) else 0.0
+
+
+def texto_del_modelo(respuesta):
+    """La respuesta sin el bloque de verificación que añade la app: lo que escribió el modelo."""
+    return respuesta.split(ENCABEZADO_VERIFICACION, 1)[0]
+
+
+def valor_y_pagina(respuesta, aguja, otra, esperada):
+    """Métrica conjunta (a la manera de la SAA de CiteVQA): el valor de esta aguja, no el de la otra, y
+    como única página citada sola la suya. Se mide sobre el texto del modelo."""
+    texto = texto_del_modelo(respuesta)
+    acierta = (
+        recall_aguja(texto, aguja) == 1.0
+        and recall_aguja(texto, otra) == 0.0
+        and paginas_estrictas_citadas(texto) == {esperada}
+    )
+    return 1.0 if acierta else 0.0
+
+
+def fragmento_con_ambas(contenido, lote, otro_lote):
+    """`True` si algún texto devuelto por las tools contiene los dos lotes: las agujas comparten chunk."""
+    pendientes = [contenido]
+    while pendientes:
+        nodo = _como_estructura(pendientes.pop())
+        if isinstance(nodo, str):
+            if lote in nodo and otro_lote in nodo:
+                return True
+        elif isinstance(nodo, list):
+            pendientes.extend(nodo)
+        elif isinstance(nodo, dict):
+            pendientes.extend(nodo.values())
+    return False
+
+
+def coste_de_marcas(salida):
+    """Caracteres de las marcas `⟦p. N⟧` (con su espacio) y de toda la salida serializada."""
+    serializada = json.dumps(salida, ensure_ascii=False)
+    marcas = 0
+    pendientes = [salida]
+    while pendientes:
+        nodo = _como_estructura(pendientes.pop())
+        if isinstance(nodo, str):
+            marcas += sum(len(m) for m in _MARCA_DE_PAGINA.findall(nodo))
+        elif isinstance(nodo, list):
+            pendientes.extend(nodo)
+        elif isinstance(nodo, dict):
+            pendientes.extend(nodo.values())
+    return marcas, len(serializada)
 
 
 def _de_tools(clave, origen):
@@ -134,6 +192,9 @@ METRICAS_DE_CONSULTA = (
     ("recall_semantica", _recall_de_tipo("semantica")),
     ("pagina_exacta", lambda c: c.get("pagina_exacta")),
     ("pagina_exacta_estricta", lambda c: c.get("pagina_exacta_estricta")),
+    ("pagina_exacta_estricta_modelo", lambda c: c.get("pagina_exacta_estricta_modelo")),
+    ("valor_y_pagina", lambda c: c.get("valor_y_pagina")),
+    ("mismo_chunk", lambda c: c.get("mismo_chunk")),
     ("pagina_tool_agente", _de_tools("pagina_exacta", "tools_del_agente")),
     ("seccion_real", _de_tools("seccion_real", "tools_del_agente")),
     ("pagina_mcp", _de_tools("pagina_exacta", "mcp_directo")),
@@ -169,9 +230,15 @@ def agregar_por_profundidad(casos):
     return filas
 
 
+def _bloqueantes(consulta):
+    """Intervenciones que rechazan o dirigen; la verificación de páginas solo anota."""
+    return [i for i in consulta.get("arnes") or [] if i.get("etapa") != ETAPA_VERIFICACION]
+
+
 def resumen_arnes(casos):
     """Intervenciones del arnés. Un reintento con la aguja bien dada al final es un falso bloqueo probable:
-    el dato es único e inequívoco, aunque el texto rechazado no se conserva."""
+    el dato es único e inequívoco, aunque el texto rechazado no se conserva. La verificación de páginas
+    se cuenta aparte, porque no bloquea."""
     consultas = [c for caso in casos for c in caso["consultas"]]
     por_etapa = {}
     for consulta in consultas:
@@ -180,7 +247,10 @@ def resumen_arnes(casos):
             por_etapa[etapa] = por_etapa.get(etapa, 0) + 1
     return {
         "por_etapa": por_etapa,
-        "consultas_con_intervencion": sum(1 for c in consultas if c.get("arnes")),
+        "consultas_con_intervencion": sum(1 for c in consultas if _bloqueantes(c)),
+        "consultas_con_verificacion_pagina": sum(
+            1 for c in consultas if any(i.get("etapa") == ETAPA_VERIFICACION for i in c.get("arnes") or [])
+        ),
         "falsos_bloqueos_probables": sum(
             1
             for c in consultas

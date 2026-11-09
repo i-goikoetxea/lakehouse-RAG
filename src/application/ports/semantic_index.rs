@@ -48,6 +48,8 @@ pub struct FragmentoIndexado {
     /// Páginas de la sección en el original, si el formato las tiene (los hitos las heredan)
     pub pagina_inicio: Option<i32>,
     pub pagina_fin: Option<i32>,
+    /// Saltos de página dentro de `texto` (solo chunks de formatos con páginas)
+    pub saltos_pagina: Option<Vec<crate::domain::services::marcas_pagina::SaltoPagina>>,
     /// Vector del fragmento; vacío si la fila no tenía vector
     pub vector: Vec<f32>,
 }
