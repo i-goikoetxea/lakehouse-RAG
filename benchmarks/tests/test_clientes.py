@@ -42,6 +42,14 @@ class ClienteCliContrato(BaseCliente):
         self.assertEqual(respuesta.herramientas[0]["nombre"], "search_normative_context")
         self.assertGreaterEqual(respuesta.latencia_ms, 0)
 
+    def test_la_telemetria_del_arnes_llega_con_la_respuesta(self):
+        self.centro_activo()
+        sin_intervencion = self.cliente.preguntar("¿Cuál es la presión de L-7?", "bench-a", "haiku")
+        self.assertEqual(sin_intervencion.arnes, [])
+        with en_modo("arnes_reintento"):
+            respuesta = self.cliente.preguntar("¿Cuál es la presión de L-7?", "bench-a", "haiku")
+        self.assertEqual(respuesta.arnes, [{"etapa": "reintento", "motivo": "cifra sin anclar"}])
+
     def test_comillas_y_metacaracteres_no_pasan_por_shell(self):
         self.centro_activo()
         centinela = self.raiz / "inyectado"

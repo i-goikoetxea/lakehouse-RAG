@@ -3,7 +3,7 @@
 import json
 import os
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from lakehouse.proceso import ejecutar_proceso
@@ -34,6 +34,8 @@ class RespuestaAsk:
     modelo: str | None
     herramientas: list
     latencia_ms: float
+    # Intervenciones del arnés del turno (`etapa`, `motivo`); vacía si no intervino
+    arnes: list = field(default_factory=list)
 
 
 def comando_de_binario(ruta):
@@ -108,7 +110,14 @@ class ClienteCli:
         if es_fallo_de_sesion(respuesta):
             raise FalloEjecucion("sesion_claude", respuesta)
         herramientas = salida.get("herramientas")
-        return RespuestaAsk(respuesta, salida.get("modelo"), herramientas if isinstance(herramientas, list) else [], latencia_ms)
+        arnes = salida.get("arnes")
+        return RespuestaAsk(
+            respuesta,
+            salida.get("modelo"),
+            herramientas if isinstance(herramientas, list) else [],
+            latencia_ms,
+            arnes if isinstance(arnes, list) else [],
+        )
 
     def _invocar(self, argumentos, timeout_s):
         comando = [*self._comando_base, *argumentos, "--json"]

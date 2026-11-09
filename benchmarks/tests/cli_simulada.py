@@ -162,6 +162,7 @@ def preguntar(argumentos):
             "modelo": modelo,
             "respuesta": respuesta,
             "herramientas": [{"nombre": "search_normative_context", "argumentos": {}, "es_error": False, "resultado": []}],
+            "arnes": [{"etapa": "reintento", "motivo": "cifra sin anclar"}] if MODO == "arnes_reintento" else [],
         }
     )
 

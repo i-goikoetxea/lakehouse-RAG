@@ -105,3 +105,85 @@ def paginas_citadas(texto):
             else:
                 paginas.update((inicio, fin))
     return paginas
+
+
+def pagina_exacta_estricta(respuesta, esperada):
+    """1.0 solo si la respuesta cita la página esperada sola: un rango o una lista no cuentan."""
+    for cita in _CITA_DE_PAGINAS.finditer(respuesta):
+        numeros = re.findall(r"\d+", cita.group(1))
+        if len(numeros) == 1 and int(numeros[0]) == esperada:
+            return 1.0
+    return 0.0
+
+
+def _de_tools(clave, origen):
+    return lambda consulta: (consulta.get(origen) or {}).get(clave)
+
+
+def _recall_de_tipo(tipo):
+    return lambda consulta: consulta.get("recall_aguja") if consulta.get("tipo") == tipo else None
+
+
+def _segundos(milisegundos):
+    return None if milisegundos is None else milisegundos / 1000
+
+
+METRICAS_DE_CONSULTA = (
+    ("recall_aguja", lambda c: c.get("recall_aguja")),
+    ("recall_lexica", _recall_de_tipo("lexica")),
+    ("recall_semantica", _recall_de_tipo("semantica")),
+    ("pagina_exacta", lambda c: c.get("pagina_exacta")),
+    ("pagina_exacta_estricta", lambda c: c.get("pagina_exacta_estricta")),
+    ("pagina_tool_agente", _de_tools("pagina_exacta", "tools_del_agente")),
+    ("seccion_real", _de_tools("seccion_real", "tools_del_agente")),
+    ("pagina_mcp", _de_tools("pagina_exacta", "mcp_directo")),
+    ("seccion_mcp", _de_tools("seccion_real", "mcp_directo")),
+    ("latencia_respuesta_s", lambda c: _segundos(c.get("latencia_respuesta_ms"))),
+)
+
+
+def _estadisticos(profundidad, metrica, valores):
+    valores = [v for v in valores if v is not None]
+    if not valores:
+        return {"profundidad": profundidad, "metrica": metrica, "n": 0, "media": None, "min": None, "max": None}
+    return {
+        "profundidad": profundidad,
+        "metrica": metrica,
+        "n": len(valores),
+        "media": sum(valores) / len(valores),
+        "min": min(valores),
+        "max": max(valores),
+    }
+
+
+def agregar_por_profundidad(casos):
+    """Media, mínimo y máximo de cada métrica por profundidad; los nulos no cuentan como cero."""
+    filas = []
+    for profundidad in sorted({caso["profundidad"] for caso in casos}):
+        propios = [caso for caso in casos if caso["profundidad"] == profundidad]
+        consultas = [c for caso in propios for c in caso["consultas"] if not c.get("fallo")]
+        for metrica, extraer in METRICAS_DE_CONSULTA:
+            filas.append(_estadisticos(profundidad, metrica, [extraer(c) for c in consultas]))
+        ingestas = [_segundos((caso.get("ingesta") or {}).get("latencia_ms")) for caso in propios]
+        filas.append(_estadisticos(profundidad, "ingesta_s", ingestas))
+    return filas
+
+
+def resumen_arnes(casos):
+    """Intervenciones del arnés. Un reintento con la aguja bien dada al final es un falso bloqueo probable:
+    el dato es único e inequívoco, aunque el texto rechazado no se conserva."""
+    consultas = [c for caso in casos for c in caso["consultas"]]
+    por_etapa = {}
+    for consulta in consultas:
+        for intervencion in consulta.get("arnes") or []:
+            etapa = intervencion.get("etapa", "desconocida")
+            por_etapa[etapa] = por_etapa.get(etapa, 0) + 1
+    return {
+        "por_etapa": por_etapa,
+        "consultas_con_intervencion": sum(1 for c in consultas if c.get("arnes")),
+        "falsos_bloqueos_probables": sum(
+            1
+            for c in consultas
+            if any(i.get("etapa") == "reintento" for i in c.get("arnes") or []) and c.get("recall_aguja") == 1.0
+        ),
+    }

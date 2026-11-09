@@ -3,6 +3,7 @@
 import io
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -15,10 +16,13 @@ RAIZ_BENCHMARKS = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(RAIZ_BENCHMARKS))
 
 from evaluacion.aguja import (  # noqa: E402
+    agregar_por_profundidad,
     fragmentos_con_aguja,
     pagina_exacta,
+    pagina_exacta_estricta,
     paginas_citadas,
     recall_aguja,
+    resumen_arnes,
     seccion_real,
 )
 from pistas.aguja import (  # noqa: E402
@@ -79,6 +83,20 @@ class GenerarAguja(unittest.TestCase):
         self.assertIn(aguja.lote, lexica)
         self.assertNotIn(aguja.lote, semantica)
         self.assertNotIn(aguja.valor, lexica + semantica)
+
+    def test_la_pregunta_semantica_no_comparte_palabras_con_el_titulo(self):
+        for repeticion in range(1, 6):
+            for profundidad in PROFUNDIDADES:
+                aguja = generar_aguja(42, repeticion, profundidad)
+                titulo = {p for p in re.findall(r"[a-z]{3,}", aguja.titulo.casefold())}
+                semantica = set(re.findall(r"[a-z]{3,}", preguntas_de(aguja)[1].casefold()))
+                self.assertFalse(titulo & semantica, (aguja.titulo, preguntas_de(aguja)[1]))
+
+    def test_la_pregunta_semantica_rota_entre_varias_formulaciones(self):
+        formulaciones = {
+            preguntas_de(generar_aguja(42, r, p))[1].split(" the ")[0] for r in range(1, 6) for p in PROFUNDIDADES
+        }
+        self.assertGreaterEqual(len(formulaciones), 3)
 
 
 class IndiceDeInsercion(unittest.TestCase):
@@ -195,6 +213,55 @@ class Metricas(unittest.TestCase):
         texto = "See page 54 (pp. 53-55) and p. 7; también la página 12 y págs. 3 y 4."
         self.assertEqual(paginas_citadas(texto), {54, 53, 55, 7, 12, 3, 4})
 
+    def test_pagina_exacta_estricta_no_acepta_rangos_ni_listas(self):
+        self.assertEqual(pagina_exacta_estricta("Apartado X, páginas 52-54.", 54), 0.0)
+        self.assertEqual(pagina_exacta_estricta("Véanse las págs. 53 y 54.", 54), 0.0)
+        self.assertEqual(pagina_exacta_estricta("Está en la página 54.", 54), 1.0)
+        self.assertEqual(pagina_exacta_estricta("p. 54 (también pp. 52-54)", 54), 1.0)
+        self.assertEqual(pagina_exacta_estricta("Sin cita de página.", 54), 0.0)
+
+
+def consulta_de(tipo, recall, arnes=(), **metricas):
+    return {"tipo": tipo, "recall_aguja": recall, "arnes": list(arnes), "fallo": None, **metricas}
+
+
+class Agregados(unittest.TestCase):
+    def casos(self):
+        return [
+            {"profundidad": 0.5, "ingesta": {"latencia_ms": 180000}, "consultas": [
+                consulta_de("lexica", 1.0, pagina_exacta=1.0),
+                consulta_de("semantica", 0.0, pagina_exacta=0.0),
+            ]},
+            {"profundidad": 0.5, "ingesta": {"latencia_ms": 200000}, "consultas": [
+                consulta_de("lexica", 1.0, pagina_exacta=1.0),
+                consulta_de("semantica", 1.0, pagina_exacta=None),
+            ]},
+        ]
+
+    def test_media_minimo_y_maximo_por_profundidad_y_metrica_ignorando_nulos(self):
+        filas = {(f["profundidad"], f["metrica"]): f for f in agregar_por_profundidad(self.casos())}
+        recall = filas[(0.5, "recall_aguja")]
+        self.assertEqual((recall["n"], recall["media"], recall["min"], recall["max"]), (4, 0.75, 0.0, 1.0))
+        self.assertEqual(filas[(0.5, "recall_semantica")]["media"], 0.5)
+        self.assertEqual(filas[(0.5, "pagina_exacta")]["n"], 3)
+        self.assertEqual(filas[(0.5, "ingesta_s")]["media"], 190.0)
+
+    def test_metrica_sin_valores_queda_nula_y_no_cero(self):
+        filas = {(f["profundidad"], f["metrica"]): f for f in agregar_por_profundidad(self.casos())}
+        self.assertIsNone(filas[(0.5, "seccion_real")]["media"])
+        self.assertEqual(filas[(0.5, "seccion_real")]["n"], 0)
+
+    def test_resumen_del_arnes_cuenta_etapas_y_falsos_bloqueos(self):
+        casos = [{"consultas": [
+            consulta_de("lexica", 1.0, [{"etapa": "reintento", "motivo": "m"}]),
+            consulta_de("semantica", 0.0, [{"etapa": "reintento", "motivo": "m"}, {"etapa": "salida_segura", "motivo": "m"}]),
+            consulta_de("lexica", 1.0, [{"etapa": "directiva", "motivo": "m"}]),
+        ]}]
+        resumen = resumen_arnes(casos)
+        self.assertEqual(resumen["por_etapa"], {"reintento": 2, "salida_segura": 1, "directiva": 1})
+        self.assertEqual(resumen["consultas_con_intervencion"], 3)
+        self.assertEqual(resumen["falsos_bloqueos_probables"], 1)
+
 
 class ClienteQueAnota:
     def __init__(self):
@@ -261,7 +328,53 @@ class RunAgujaExtremoAExtremo(unittest.TestCase):
             self.assertEqual(por_tipo["semantica"]["recall_aguja"], 0.0)
             self.assertIn(11, por_tipo["lexica"]["paginas_citadas_respuesta"])
             self.assertEqual(len(informe["base"]["sha256"]), 64)
+            self.assertEqual(por_tipo["lexica"]["pagina_exacta_estricta"], 1.0)
+            self.assertEqual(por_tipo["lexica"]["arnes"], [])
+            self.assertIn("agregados", informe)
+            self.assertIn("arnes", informe)
+            self.assertIsNone(informe["detenida"])
             self.assertTrue(list(salida.glob("aguja_report_*.md")))
+            self.assertTrue(list(salida.glob("aguja_crudas_*.jsonl")))
+
+    def ejecutar(self, carpeta, *extra, modo="normal"):
+        base = carpeta / "base.pdf"
+        base.write_bytes(pdf_sintetico())
+        salida = carpeta / "salida"
+        resultado = subprocess.run(
+            [sys.executable, str(RUN_AGUJA), "--binario", str(CLI_SIMULADA), "--base", str(base), "--repeticiones", "1",
+             "--semilla", "42", "--modelo", "haiku", "--salida", str(salida), *extra],
+            capture_output=True, text=True, encoding="utf-8", timeout=120, cwd=carpeta,
+            env=dict(os.environ, CLI_SIMULADA_MODO=modo),
+        )
+        return resultado, json.loads(next(salida.glob("aguja_report_*.json")).read_text(encoding="utf-8"))
+
+    def test_profundidad_sin_seccion_fiable_no_puntua_seccion(self):
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temporal:
+            _, informe = self.ejecutar(Path(temporal), "--profundidad", "0.5", "--sin-seccion", "0.5")
+            caso = informe["casos"][0]
+            self.assertIsNone(caso["seccion_esperada"])
+            self.assertEqual(caso["seccion_marcador"], "Bravo requirements")
+            self.assertTrue(caso["seccion_excluida"])
+            self.assertTrue(all(c["tools_del_agente"]["seccion_real"] is None for c in caso["consultas"]))
+
+    def test_una_ingesta_provisional_detiene_la_campana(self):
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temporal:
+            resultado, informe = self.ejecutar(
+                Path(temporal), "--profundidad", "0.25", "--profundidad", "0.75", "--parar-si-provisional",
+                modo="ingesta_provisional",
+            )
+            self.assertEqual(resultado.returncode, 3, resultado.stderr)
+            self.assertEqual(len(informe["casos"]), 1)
+            self.assertIn("provisional", informe["detenida"])
+
+    def test_superar_el_tiempo_maximo_detiene_la_campana(self):
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temporal:
+            resultado, informe = self.ejecutar(
+                Path(temporal), "--profundidad", "0.25", "--profundidad", "0.75", "--tiempo-maximo-min", "0.0001",
+            )
+            self.assertEqual(resultado.returncode, 3, resultado.stderr)
+            self.assertEqual(len(informe["casos"]), 1)
+            self.assertIn("tiempo", informe["detenida"])
 
 
 if __name__ == "__main__":

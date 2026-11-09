@@ -48,6 +48,15 @@ PLANTILLAS = (
 )
 
 
+# Sin lote ni palabras del título de la página insertada («supplementary», «technical», «note»)
+FORMULACIONES_SEMANTICAS = (
+    "What value is required for the {sujeto}?",
+    "Which limit applies to the {sujeto}?",
+    "How much is specified as the {sujeto}?",
+    "What figure must be used for the {sujeto}?",
+)
+
+
 @dataclass(frozen=True)
 class Aguja:
     lote: str
@@ -55,6 +64,7 @@ class Aguja:
     unidad: str
     plantilla: str
     sujeto: str
+    formulacion_semantica: int = 0
 
     @property
     def titulo(self):
@@ -87,14 +97,16 @@ def generar_aguja(semilla, repeticion, profundidad, texto_base=""):
         lote = PREFIJO_LOTE + "".join(generador.choice(ALFABETO_LOTE) for _ in range(LONGITUD_LOTE))
         valor = f"{generador.randint(VALOR_MINIMO_DECIMAS, VALOR_MAXIMO_DECIMAS) / 10:.1f}"
         if lote not in texto_base and valor not in texto_base:
-            return Aguja(lote, valor, plantilla.unidad, plantilla.clave, plantilla.sujeto)
+            # Se sortea al final: el lote y el valor no cambian respecto a la versión sin rotación
+            formulacion = generador.randrange(len(FORMULACIONES_SEMANTICAS))
+            return Aguja(lote, valor, plantilla.unidad, plantilla.clave, plantilla.sujeto, formulacion)
     raise ValueError("No se encontró una aguja ausente del texto base")
 
 
 def preguntas_de(aguja):
     """Léxica, con el lote; semántica, sin él. Hay una sola aguja por centro, así que no es ambigua."""
     lexica = f"According to the documentation, what is the {aguja.sujeto} of batch {aguja.lote}?"
-    semantica = f"What {aguja.sujeto} does the supplementary technical note specify?"
+    semantica = FORMULACIONES_SEMANTICAS[aguja.formulacion_semantica].format(sujeto=aguja.sujeto)
     return lexica, semantica
 
 

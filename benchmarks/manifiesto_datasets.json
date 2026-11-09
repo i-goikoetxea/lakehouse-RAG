@@ -16,6 +16,9 @@
       "reproducibilidad": "Cada descarga sale con bytes distintos: cambian los identificadores internos y el sello 'Source: https://assist.dla.mil -- Downloaded: <fecha>' de cada página. El sha256 identifica esta copia. Una descarga nueva se valida por sha256_texto_sin_sello: texto de pypdf por página, sin la línea del sello, unido con \\f.",
       "licencia": "DISTRIBUTION A: Approved for public release: distribution unlimited (portada). Obra del Gobierno federal de EE. UU., sin copyright en EE. UU. (17 U.S.C. §105).",
       "licencia_fuente": "https://assist.dla.mil/Online/help/dist_stmt.cfm",
+      "profundidades": [0.10, 0.28, 0.50, 0.72, 0.90],
+      "profundidades_sin_seccion_fiable": [0.10],
+      "profundidades_motivo": "Los marcadores del PDF no cubren los apartados 1-6 del cuerpo (págs. 8-28) y tienen entradas espurias ('PARAGRAPH PAGE', 'TABLE ...', 'FIGURE B-1' repetida en las págs. 69, 78 y 80-82). 0.25 caería tras la pág. 26 (apartado 5, sin marcador) y 0.75 tras la 80 (marcador de figura): se desplazan a 0.28 (tras la pág. 30, TASK 101) y 0.72 (tras la 76, TASK 208). 0.50 (TASK 201) y 0.90 (TASK 401) ya caían en una TASK con marcador propio. Cerca del 10 % no hay ninguna sección con marcador: 0.10 se mantiene para recall y página, pero se excluye de seccion_real.",
       "verificacion": {
         "encrypt": false,
         "outlines": true,
