@@ -17,10 +17,12 @@
 
 use chrono::NaiveDate;
 use lakehouse_rag::application::dtos::tools::{ToolCall, ToolResult};
+use lakehouse_rag::application::use_cases::agent_orchestrator::AgentOrchestrator;
 use lakehouse_rag::application::use_cases::arnes_turno::{
     ENCABEZADO_VERIFICACION_PAGINAS, IntentDetector, PostInferenceGuard, RegistroTurno,
     VerificadorPaginas,
 };
+use lakehouse_rag::domain::models::center::CenterId;
 use serde_json::{Value, json};
 
 struct RespuestaGuardada {
@@ -117,6 +119,16 @@ fn fecha_de_la_ejecucion(ruta: &str) -> Option<NaiveDate> {
     NaiveDate::parse_from_str(&sello[..8], "%Y%m%d").ok()
 }
 
+/// Lo que hace el orquestador con cada turno: vocabulario de sus instrucciones y fecha de hoy
+fn preparar(registro: &mut RegistroTurno, hoy: Option<NaiveDate>) {
+    registro.fijar_vocabulario_de_la_app(&AgentOrchestrator::build_system_prompt(
+        &CenterId::new("centro-repetido").unwrap(),
+    ));
+    if let Some(hoy) = hoy {
+        registro.fijar_fecha_de_hoy(hoy);
+    }
+}
+
 fn leer(ruta: &str) -> Vec<RespuestaGuardada> {
     let hoy = fecha_de_la_ejecucion(ruta);
     let contenido = std::fs::read_to_string(ruta).expect("crudas");
@@ -128,9 +140,7 @@ fn leer(ruta: &str) -> Vec<RespuestaGuardada> {
         let fila: Value = serde_json::from_str(texto).expect("línea JSON");
         if let Some(consultas) = fila["consultas"].as_array() {
             let mut registro = registro_aguja(&fila);
-            if let Some(hoy) = hoy {
-                registro.fijar_fecha_de_hoy(hoy);
-            }
+            preparar(&mut registro, hoy);
             for (indice, consulta) in consultas.iter().enumerate() {
                 if !consulta["fallo"].is_null() {
                     continue;
@@ -150,9 +160,7 @@ fn leer(ruta: &str) -> Vec<RespuestaGuardada> {
             }
             let herramientas = fila["herramientas"].as_array().cloned().unwrap_or_default();
             let mut registro = registro_de_herramientas(&herramientas);
-            if let Some(hoy) = hoy {
-                registro.fijar_fecha_de_hoy(hoy);
-            }
+            preparar(&mut registro, hoy);
             respuestas.push(RespuestaGuardada {
                 origen: ruta.to_string(),
                 id: format!(

@@ -114,6 +114,7 @@ impl AgentOrchestrator {
         let plan = PreInferenceInterceptor::plan(&intencion);
         let mut eleccion = plan.primer_paso;
         let mut registro = RegistroTurno::default();
+        registro.fijar_vocabulario_de_la_app(&system_prompt);
         if let Some(reloj) = &self.reloj {
             registro.fijar_fecha_de_hoy(reloj.hoy());
         }
@@ -1086,6 +1087,39 @@ mod tests {
             assert!(!mensaje.content.contains("RECORDATORIO"));
             assert!(!mensaje.content.contains("7,5"));
         }
+    }
+
+    #[tokio::test]
+    async fn test_negacion_sin_busqueda_reintenta_y_si_insiste_acaba_en_el_mensaje_fijo() {
+        let corregida = "La presión de la línea no consta en lo consultado.";
+        let runner = RunnerDelArnes::con_guion(
+            vec![],
+            vec![
+                libre_final("No hay excepción para esa línea."),
+                libre_final(corregida),
+            ],
+        );
+        let mut historial = vec![AgentMessage::user(DATO_CONCRETO)];
+        let (respuesta, eventos) = turno_con_arnes(runner.clone(), &mut historial).await;
+        assert_eq!(respuesta.unwrap(), corregida);
+        assert_eq!(etapas(&eventos), vec![EtapaArnes::Reintento]);
+        let vista = runner.vistas_libres.lock().unwrap()[1].clone();
+        assert!(vista.last().unwrap().content.contains("excepcion"));
+
+        let runner = RunnerDelArnes::con_guion(
+            vec![],
+            vec![
+                libre_final("No hay excepción para esa línea."),
+                libre_final("No existe prórroga alguna."),
+            ],
+        );
+        let mut historial = vec![AgentMessage::user(DATO_CONCRETO)];
+        let (respuesta, eventos) = turno_con_arnes(runner, &mut historial).await;
+        assert_eq!(respuesta.unwrap(), MENSAJE_RESPUESTA_NO_VALIDADA);
+        assert_eq!(
+            etapas(&eventos),
+            vec![EtapaArnes::Reintento, EtapaArnes::SalidaSegura]
+        );
     }
 
     #[tokio::test]

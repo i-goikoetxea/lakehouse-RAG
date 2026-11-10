@@ -4,6 +4,7 @@
 mod cifras;
 mod fechas;
 mod intent_detector;
+mod negaciones;
 mod post_inference_guard;
 mod pre_inference_interceptor;
 mod texto_normalizado;

@@ -8,6 +8,7 @@ use serde_json::Value;
 
 use super::cifras::{extraer_cifras, lecturas_de_fuente};
 use super::intent_detector::IntencionTurno;
+use super::negaciones::{LoConsultado, negacion_sin_busqueda};
 use super::texto_normalizado::plegar_texto;
 use super::verificador_paginas::{textos_de_metadatos, textos_marcables};
 use crate::application::dtos::tools::{LakehouseToolName, ToolCall, ToolResult};
@@ -78,6 +79,11 @@ const HERRAMIENTAS_CON_MARCAS: &[LakehouseToolName] = &[
     LakehouseToolName::StairGetSubtreeContext,
     LakehouseToolName::LookupDoubleEntryTable,
 ];
+/// Tools que leen texto del documento: si el turno usó alguna, una negación no es «sin buscar»
+const HERRAMIENTAS_DE_TEXTO: &[LakehouseToolName] = &[
+    LakehouseToolName::SearchNormativeContext,
+    LakehouseToolName::StairGetSubtreeContext,
+];
 const SENAL_SIN_RESPONSABLE: &str = "sin_responsable_declarado";
 const SENAL_EJES_AMBIGUOS: &str = "ejes_ambiguos";
 /// Palabras de enlace de un nombre de eje: que aparezcan en la respuesta no nombra el eje.
@@ -94,11 +100,18 @@ const LONGITUD_MAXIMA_CIFRA_INFORMADA: usize = 64;
 #[derive(Debug, Default, Clone)]
 pub struct RegistroTurno {
     llamadas: Vec<ToolCall>,
+    /// Instrucciones de la app al modelo: su vocabulario describe campos, no el mundo
+    vocabulario_de_la_app: String,
     resultados: Vec<ToolResult>,
     fecha_de_hoy: Option<NaiveDate>,
 }
 
 impl RegistroTurno {
+    /// Las palabras de las instrucciones cuentan como consultadas al juzgar una negación
+    pub fn fijar_vocabulario_de_la_app(&mut self, instrucciones: &str) {
+        self.vocabulario_de_la_app = instrucciones.to_string();
+    }
+
     /// Lo que pidió el modelo en el turno (argumentos incluidos), haya ido bien o no
     pub fn registrar_llamada(&mut self, llamada: &ToolCall) {
         self.llamadas.push(llamada.clone());
@@ -142,6 +155,22 @@ impl RegistroTurno {
             .collect()
     }
 
+    /// Argumentos de las llamadas y textos (y claves) de las salidas válidas del turno
+    fn lo_consultado(&self) -> LoConsultado {
+        let mut textos: Vec<String> = vec![self.vocabulario_de_la_app.clone()];
+        for llamada in &self.llamadas {
+            recorrer_textos(&llamada.arguments, |texto| textos.push(texto.to_string()));
+        }
+        for resultado in self.salidas_validas() {
+            recorrer_textos(&resultado.output, |texto| textos.push(texto.to_string()));
+        }
+        let consulto = !self.llamadas.is_empty() || !self.resultados.is_empty();
+        let es_de_texto = |nombre: &str| HERRAMIENTAS_DE_TEXTO.iter().any(|h| h.as_str() == nombre);
+        let leyo_texto = self.llamadas.iter().any(|l| es_de_texto(&l.name))
+            || self.resultados.iter().any(|r| es_de_texto(&r.tool_name));
+        LoConsultado::nuevo(textos.iter().map(String::as_str), consulto, leyo_texto)
+    }
+
     /// Títulos, breadcrumbs y demás cadenas de las salidas que no son texto del documento
     pub(super) fn metadatos(&self) -> Vec<&str> {
         self.salidas_validas()
@@ -162,6 +191,7 @@ pub enum ViolacionArnes {
     RolSinRespaldo,
     EjesAmbiguosSinAclarar,
     CifraEnAbstencion { cifra: String },
+    NegacionSinBusqueda { aspecto: String },
 }
 
 impl ViolacionArnes {
@@ -180,6 +210,9 @@ impl ViolacionArnes {
             Self::EjesAmbiguosSinAclarar => {
                 "lookup_double_entry_table devolvió ejes_ambiguos y la respuesta da un único valor sin aclarar los ejes: nombra qué valor corresponde a cada eje (nombre o unidad), muestra ambos valores o pregunta".to_string()
             }
+            Self::NegacionSinBusqueda { aspecto } => format!(
+                "la respuesta afirma que no hay «{aspecto}» (o que no se aplica) sin haberlo buscado en este turno: búscalo con search_normative_context o lee el apartado con stair_get_subtree_context y responde con lo que conste; si no aparece, di que no consta en lo consultado, sin afirmar que no existe"
+            ),
             Self::CifraEnAbstencion { cifra } => format!(
                 "la respuesta declara que algo no consta y añade «{cifra}», que no aparece en la pregunta ni en ninguna salida de herramienta de este turno: di que no consta, sin ofrecer valores de referencia"
             ),
@@ -204,6 +237,7 @@ impl PostInferenceGuard {
             return Err(ViolacionArnes::CapaDosNoIntentada);
         }
         comprobar_abstencion_sin_cifras_ajenas(respuesta, pregunta, registro)?;
+        comprobar_negaciones_buscadas(respuesta, pregunta, registro)?;
         if herramientas.is_none() {
             return Ok(());
         }
@@ -252,6 +286,19 @@ fn comprobar_abstencion_sin_cifras_ajenas(
     }
     match primera_cifra_sin_anclar(respuesta, pregunta, registro) {
         Some(cifra) => Err(ViolacionArnes::CifraEnAbstencion { cifra }),
+        None => Ok(()),
+    }
+}
+
+/// Una ausencia afirmada con rotundidad exige haber buscado ese aspecto en el turno
+/// (`ssd_arnes_negaciones.md`). Las abstenciones sobre la búsqueda no cuentan
+fn comprobar_negaciones_buscadas(
+    respuesta: &str,
+    pregunta: &str,
+    registro: &RegistroTurno,
+) -> Result<(), ViolacionArnes> {
+    match negacion_sin_busqueda(respuesta, pregunta, || registro.lo_consultado()) {
+        Some(aspecto) => Err(ViolacionArnes::NegacionSinBusqueda { aspecto }),
         None => Ok(()),
     }
 }
@@ -1216,6 +1263,116 @@ mod tests {
         assert_eq!(
             PostInferenceGuard::validar(
                 "No consta; suele ser 7,5 bar.",
+                "¿Qué es el refuerzo?",
+                &IntencionTurno::Ninguna,
+                &RegistroTurno::default()
+            ),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn test_negacion_sin_busqueda_se_rechaza_en_turnos_retenidos() {
+        let negacion =
+            "Para 30 mm y CE 0,42 % corresponden 150 °C. No hay ampliación de ese límite.";
+        assert_eq!(
+            validar_cruzable(negacion, &lookup_resuelto()),
+            Err(ViolacionArnes::NegacionSinBusqueda {
+                aspecto: "ampliacion".to_string()
+            })
+        );
+        assert_eq!(
+            PostInferenceGuard::validar(
+                "No existe excepción alguna.",
+                "¿Cuál es el plazo de acopio?",
+                &IntencionTurno::DatoConcreto,
+                &registro_con(vec![resultado(
+                    "execute_athena_sql",
+                    json!({ "filas": [{ "plazo_acopio_dias": 7 }] }),
+                    false
+                )])
+            ),
+            Err(ViolacionArnes::NegacionSinBusqueda {
+                aspecto: "excepcion".to_string()
+            })
+        );
+        assert!(
+            ViolacionArnes::NegacionSinBusqueda {
+                aspecto: "ampliacion".to_string()
+            }
+            .motivo()
+            .contains("search_normative_context")
+        );
+    }
+
+    #[test]
+    fn test_negacion_respaldada_o_no_consta_tras_buscar_se_aceptan() {
+        let con_regla = registro_con(vec![resultado(
+            "lookup_double_entry_table",
+            json!({ "estado": "resuelto", "valor_salida": 150, "contexto_apartado": {
+                    "texto": "El límite no admite ampliación alguna."
+                } }),
+            false,
+        )]);
+        assert_eq!(
+            validar_cruzable("Son 150 °C. No hay ampliación posible.", &con_regla),
+            Ok(())
+        );
+        let mut tras_buscar = RegistroTurno::default();
+        tras_buscar.registrar_llamada(&ToolCall {
+            id: "b".into(),
+            name: "search_normative_context".into(),
+            arguments: json!({ "consulta": "plazo de garantía de la bomba P-12" }),
+        });
+        tras_buscar.registrar(resultado(
+            "search_normative_context",
+            json!({ "grupos": [], "total": 0 }),
+            false,
+        ));
+        for respuesta in [
+            "No consta el plazo de garantía de la bomba P-12.",
+            "No hay plazo de garantía declarado para la P-12.",
+        ] {
+            assert_eq!(
+                PostInferenceGuard::validar(
+                    respuesta,
+                    "¿Qué plazo de garantía tiene la bomba P-12?",
+                    &IntencionTurno::DatoConcreto,
+                    &tras_buscar
+                ),
+                Ok(()),
+                "{respuesta}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_negacion_tras_leer_texto_o_con_vocabulario_de_la_app_se_acepta() {
+        assert_eq!(
+            PostInferenceGuard::validar(
+                "No hay ampliación de ese plazo.",
+                "¿Cuál es el plazo de acopio?",
+                &IntencionTurno::DatoConcreto,
+                &busqueda("El plazo de acopio es de 7 días.")
+            ),
+            Ok(())
+        );
+        let mut registro = lookup_resuelto();
+        registro.fijar_vocabulario_de_la_app("Ante un conflicto prevalece el nivel menor.");
+        assert_eq!(
+            validar_cruzable(
+                "Son 150 °C. No hay conflicto con otro documento.",
+                &registro
+            ),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn test_negacion_en_turno_sin_intencion_no_se_valida() {
+        assert_eq!(
+            PostInferenceGuard::validar(
+                "No hay ampliación.",
                 "¿Qué es el refuerzo?",
                 &IntencionTurno::Ninguna,
                 &RegistroTurno::default()

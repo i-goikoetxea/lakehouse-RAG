@@ -46,6 +46,8 @@ fn causa_del_rechazo(motivo: &str) -> &'static str {
         "incluía una cifra que no aparece en los datos consultados"
     } else if motivo.contains("sin_responsable_declarado") {
         "nombraba un responsable que no consta en los datos consultados"
+    } else if motivo.contains("sin haberlo buscado") {
+        "afirmaba que algo no existe o no se aplica sin haberlo buscado en los documentos"
     } else if motivo.contains("ejes_ambiguos") {
         "daba un único valor de la tabla sin aclarar a qué eje corresponde cada dato"
     } else {
@@ -79,6 +81,9 @@ mod tests {
             ViolacionArnes::EjesAmbiguosSinAclarar,
             ViolacionArnes::CifraEnAbstencion {
                 cifra: "999".to_string(),
+            },
+            ViolacionArnes::NegacionSinBusqueda {
+                aspecto: "ampliacion".to_string(),
             },
         ]
     }
