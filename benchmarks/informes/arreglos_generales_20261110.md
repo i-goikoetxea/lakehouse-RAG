@@ -99,3 +99,29 @@ Referencias: Aguja y dos agujas, [`aguja_citas_pagina_20261110.md`](aguja_citas_
 ## 5. Sesgo y alcance
 
 Los tests usan documentos sintéticos de tres dominios y dos idiomas (tarifas en español, dosis en inglés, distancias de normativa técnica), ninguno del set oculto. Las respuestas guardadas y la ejecución real son de nuestros benchmarks (un documento militar en inglés, fixtures industriales en español): un 100 % aquí significa «funciona en los casos conocidos», no «funciona en general». Las listas de locuciones de la mejora 4 y el detector de la mejora 5 son de español (y algo de inglés).
+
+## 6. Anexo: la bajada de `rechazo_estricto` en RGB, clasificada (sin Claude)
+
+Las 15 respuestas de rechazo de cada ejecución se vuelven a puntuar con `puntuar_rechazo` sin cambiarlo. Cada cifra ajena a la pregunta se clasifica en una de dos clases:
+
+- **(a)** está literal en la salida de alguna tool de ese turno (fecha de vigor, códigos o parámetros hermanos);
+- **(b)** no aparece en ninguna salida, así que es una posible invención.
+
+La extracción es la de `puntuar.py`: `extraer_cantidades` sobre la respuesta sin identificadores, y sobre cada cadena y clave de las salidas válidas de las tools.
+
+| Medida (15 respuestas de rechazo) | Referencia (`8f2440b7`) | Ahora (`f845d65d`) |
+| :- | -: | -: |
+| Respuestas con abstención explícita | 15 | 15 |
+| Notas 1 de `rechazo_estricto` | 8 | 5 |
+| Notas 0 de clase (a): todas sus cifras están en las salidas del turno | 7 | 10 |
+| Notas 0 de clase (b): alguna cifra sin fuente | **0** | **0** |
+| Cifras ajenas de clase (a) | 62 | 77 |
+| Cifras ajenas de clase (b) | **0** | **0** |
+
+**Conclusión: no es un retroceso real.** La clase (b) no sube: es 0 en las dos ejecuciones. Ninguna abstención correcta pasa a incorrecta: las 15 se abstienen en las dos, y `rechazo_semantico` sigue en 1,000. La bajada es de eco: el modelo repite más cifras que sí le devolvieron las tools, sobre todo la fecha de vigor que ahora trae la `cita` de la búsqueda.
+
+Queda sin medir (supuesto) por qué hay más eco: el campo de la base, la variación del modelo con n = 15 o `tablas_vinculadas` en la búsqueda.
+
+Herramienta: `clasifica_rechazos.py`, en el scratchpad de esta sesión. Solo lee las crudas y las funciones de `puntuar.py`.
+
+**Propuesta, sin implementar:** una métrica complementaria `rechazo_sin_invencion`, aparte de la oficial. Valdría 1,0 si la respuesta se abstiene y toda cifra ajena a la pregunta está en las salidas de las tools del turno, y 0,0 si alguna cifra no tiene fuente. Distinguiría el eco (a), que es ruido de redacción, de la invención (b), que es el fallo que importa. `rechazo_estricto` seguiría sin cambios.
