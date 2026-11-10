@@ -23,7 +23,7 @@ GRAVEDAD = {
     "abstencion_indebida": 3, "no_se_abstiene": 3, "incorrecta": 4, "respuesta_de_memoria": 4,
     "fallo_ejecucion": 5,
 }
-GRAVEDAD_PAGINA = {"correcta": 0, "no_aplica": 0, "parcial": 1, "sin_pagina": 2, "incorrecta": 2}
+GRAVEDAD_PAGINA = {"correcta": 0, "no_aplica": 0, "parcial": 1, "sin_pagina": 2, "incorrecta": 3}  # una página falsa engaña más que ninguna
 
 
 def etapa(r):
