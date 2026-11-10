@@ -10,6 +10,7 @@ empeora: cualquier empeoramiento es un retroceso que bloquea el merge (CLAUDE.md
 
 import argparse
 import json
+import re
 import statistics
 from collections import Counter, defaultdict
 from pathlib import Path
@@ -29,6 +30,10 @@ def etapa(r):
     """Dónde se rompió una respuesta fallida: ¿llegó el extracto esperado al modelo?"""
     if r["veredicto"] in ACIERTO:
         return None
+    if r.get("causa"):
+        return r["causa"]
+    if any(i.get("etapa") == "salida_segura" for i in r.get("arnes", [])):
+        return "arnes_bloqueo"
     if r.get("extracto_llego_al_modelo"):
         return "respuesta"
     return "busqueda_o_anterior" if r.get("paginas_esperadas") else "sin_extracto"
@@ -43,7 +48,11 @@ def resumir_pasada(preguntas, res):
     arnes = Counter()
     for r in res:
         for i in r.get("arnes", []):
-            arnes[f'{i.get("etapa", "?")}: {str(i.get("motivo", "?"))[:60]}'] += 1
+            # Agrupa por clase de motivo: sin valores citados ni números de página
+            motivo = re.sub(r"«[^»]*»", "«…»", str(i.get("motivo", "?")))
+            motivo = re.sub(r"p\. \d+( y en p\. \d+)*", "p. N", motivo)
+            motivo = re.split(r"[;.] ", motivo)[0]
+            arnes[f'{i.get("etapa", "?")}: {motivo[:80]}'] += 1
     fallos = [
         {"id": r["id"], "tipo": preguntas[r["id"]]["tipo"], "veredicto": r["veredicto"], "etapa": etapa(r)}
         for r in res if r["veredicto"] not in ACIERTO
