@@ -95,12 +95,11 @@ fn cita_de_hito(fila: &Map<String, Value>) -> Value {
         "breadcrumb": texto_opcional(fila, "breadcrumb_jerarquia"),
     });
     let (inicio, fin) = (entero(fila, "pagina_inicio"), entero(fila, "pagina_fin"));
-    if inicio.is_some() {
-        if let (Some(destino), Value::Object(paginas)) =
+    if inicio.is_some()
+        && let (Some(destino), Value::Object(paginas)) =
             (cita.as_object_mut(), campos_de_paginas(inicio, fin))
-        {
-            destino.extend(paginas);
-        }
+    {
+        destino.extend(paginas);
     }
     if let Some(pagina) = inicio
         .filter(|i| fin.is_none_or(|f| f == *i))

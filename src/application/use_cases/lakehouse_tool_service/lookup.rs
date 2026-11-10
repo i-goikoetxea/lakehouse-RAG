@@ -218,13 +218,13 @@ fn cita_de_celda(celda: &Map<String, Value>, apartados: &ApartadosDeTabla) -> Va
         "tabla_id": texto(celda, "tabla_id"),
         "celda_id": texto(celda, "celda_id"),
     });
-    if let Some((primera, ultima)) = apartados.de_celda(celda).and_then(ApartadoTabla::paginas) {
-        if let (Some(destino), Value::Object(paginas)) = (
+    if let Some((primera, ultima)) = apartados.de_celda(celda).and_then(ApartadoTabla::paginas)
+        && let (Some(destino), Value::Object(paginas)) = (
             cita.as_object_mut(),
             campos_de_paginas(Some(i64::from(primera)), Some(i64::from(ultima))),
-        ) {
-            destino.extend(paginas);
-        }
+        )
+    {
+        destino.extend(paginas);
     }
     if let Some(pagina) = apartados.pagina_de_celda(celda) {
         cita["pagina"] = json!(marca_de_pagina(pagina));
