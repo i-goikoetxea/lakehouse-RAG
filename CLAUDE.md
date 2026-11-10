@@ -27,3 +27,9 @@ Complementa `AGENTS.md`, que sigue siendo el contrato de desarrollo. Estas regla
 ## 5. Laboratorio
 - Es un laboratorio de aprendizaje sin uso comercial. Los documentos públicos se usan para pruebas sin hacer hincapié en licencias.
 - Sigue vigente: no versionar texto de documentos reales ni evidencia con datos reales (`docs/validacion/` está ignorado).
+
+## 6. Guardián de lo que funciona: sin retrocesos
+- Lo que ya funciona se protege. Ninguna corrección puede empeorar otra cosa a cambio de arreglar un caso concreto.
+- Antes de cambiar, fija una línea base: suites existentes y repuntuación de respuestas guardadas. Después, compara con ella. Cualquier empeoramiento bloquea el merge, aunque el caso objetivo mejore.
+- Nada de parches: cada cambio es una regla general que suma hacia un RAG que sabe extraer conocimiento y expresarlo. Si un cambio solo arregla el caso que lo motivó, no vale.
+- Un cambio que añade ruido (avisos falsos, reintentos inútiles) también es un retroceso.
