@@ -15,8 +15,27 @@ use super::estructura::seccion_real_de;
 use super::texto;
 use crate::domain::services::arbol_secciones::comparar_natural;
 use crate::domain::services::fragmentacion::reconstruir_con_saltos;
-use crate::domain::services::marcas_pagina::{SaltoPagina, pagina_en, saltos_validos};
+use crate::domain::services::marcas_pagina::{
+    SaltoPagina, marca_de_pagina, neutralizar_corchetes, pagina_en, saltos_validos,
+};
 use crate::domain::services::normalizacion::plegar_mayusculas;
+
+/// Caracteres del documento que se entregan como contexto del apartado, como mucho
+pub(super) const LIMITE_CONTEXTO_APARTADO: usize = 2_000;
+/// Sustituye a un tramo de filas de la tabla en el contexto
+pub(super) const OMISION_DE_FILAS: &str = "[…]";
+/// Una fila de tabla tiene al menos tantas palabras con cifras
+const MINIMO_CIFRAS_DE_UNA_FILA: usize = 2;
+/// Letras desde las que una palabra cuenta como palabra de prosa (no unidad ni enlace corto)
+const LETRAS_DE_PALABRA_DE_PROSA: usize = 4;
+
+/// Párrafos del apartado de una tabla sin sus filas: lo que puede modificar el valor de una celda
+#[derive(Debug, Clone, PartialEq)]
+pub(super) struct ContextoApartado {
+    /// Con marcas `⟦p. N⟧` si el apartado tiene saltos
+    pub texto: String,
+    pub recortado: bool,
+}
 
 /// Columnas de 02 que necesita la localización
 pub(super) const COLUMNAS_CHUNK_APARTADO: &str =
@@ -168,6 +187,53 @@ impl ApartadoTabla {
         lineas
     }
 
+    /// Prosa del apartado en orden de documento, sin las filas de la tabla (cada tramo de filas
+    /// se sustituye por `OMISION_DE_FILAS`) y con una marca `⟦p. N⟧` al empezar y en cada cambio
+    /// de página. Como mucho `limite` caracteres del documento; `None` si no hay prosa
+    pub(super) fn contexto(&self, limite: usize) -> Option<ContextoApartado> {
+        let mut texto = String::new();
+        let mut usados = 0usize;
+        let mut recortado = false;
+        let mut omision_pendiente = false;
+        let mut ultima_pagina: Option<u32> = None;
+        for linea in self.lineas() {
+            if es_linea_de_tabla(linea.texto) {
+                omision_pendiente = true;
+                continue;
+            }
+            let caracteres = linea.texto.chars().count();
+            if usados + caracteres > limite {
+                recortado = true;
+                if usados > 0 {
+                    break;
+                }
+            }
+            if omision_pendiente {
+                texto.push_str(OMISION_DE_FILAS);
+                texto.push('\n');
+                omision_pendiente = false;
+            }
+            if let Some(pagina) = linea.pagina.filter(|p| Some(*p) != ultima_pagina) {
+                texto.push_str(&marca_de_pagina(pagina));
+                texto.push(' ');
+                ultima_pagina = Some(pagina);
+            }
+            let visible: String = linea
+                .texto
+                .chars()
+                .take(limite.saturating_sub(usados))
+                .collect();
+            texto.push_str(&neutralizar_corchetes(&visible));
+            texto.push('\n');
+            usados += visible.chars().count();
+            if recortado {
+                break;
+            }
+        }
+        let texto = texto.trim_end().to_string();
+        (usados > 0).then_some(ContextoApartado { texto, recortado })
+    }
+
     /// Primera y última página del apartado, si tiene saltos
     pub(super) fn paginas(&self) -> Option<(u32, u32)> {
         let saltos = self.saltos.as_deref()?;
@@ -236,6 +302,25 @@ impl ApartadosDeTabla {
         self.de_celda(celda)?
             .pagina_de_valor(&texto(celda, "valor_resultado_texto"), &etiquetas)
     }
+}
+
+/// Fila de tabla: al menos dos palabras con cifras y más que palabras de prosa (cuatro letras o
+/// más). Las unidades y los enlaces cortos (`kg`, `mg`, `de`, `up to`) no cuentan. Independiente
+/// del idioma; en la duda la línea es prosa y se conserva
+pub(super) fn es_linea_de_tabla(linea: &str) -> bool {
+    let palabras: Vec<&str> = linea.split_whitespace().collect();
+    let con_cifras = palabras
+        .iter()
+        .filter(|p| p.chars().any(|l| l.is_ascii_digit()))
+        .count();
+    let de_prosa = palabras
+        .iter()
+        .filter(|p| {
+            p.chars().all(|l| !l.is_ascii_digit())
+                && p.chars().filter(|l| l.is_alphabetic()).count() >= LETRAS_DE_PALABRA_DE_PROSA
+        })
+        .count();
+    con_cifras >= MINIMO_CIFRAS_DE_UNA_FILA && con_cifras > de_prosa
 }
 
 /// Palabras de un texto en mayúsculas y sin tildes: letras y dígitos (`0,42` son dos palabras)
@@ -408,6 +493,118 @@ mod tests {
         assert_eq!(apartado.nodo_id, "D#2");
         assert!(apartado.texto.contains("temporada alta"));
         assert_eq!(apartado.paginas(), Some((2, 3)));
+    }
+
+    #[test]
+    fn test_contexto_lleva_la_prosa_del_apartado_con_marcas_y_sin_las_filas() {
+        let apartado =
+            ApartadoTabla::localizar(&seccion_tarifas(), "D@v1-TAB-0000", &valores()).unwrap();
+        let contexto = apartado.contexto(LIMITE_CONTEXTO_APARTADO).unwrap();
+        assert!(!contexto.recortado);
+        assert!(
+            contexto.texto.starts_with("⟦p. 2⟧ 2 Tarifas"),
+            "{}",
+            contexto.texto
+        );
+        let regla = contexto.texto.find("En temporada alta").unwrap();
+        assert!(
+            contexto.texto[..regla].ends_with("⟦p. 3⟧ "),
+            "{}",
+            contexto.texto
+        );
+        assert!(!contexto.texto.contains("4,50"), "{}", contexto.texto);
+        assert!(!contexto.texto.contains("9,90"), "{}", contexto.texto);
+        assert!(
+            contexto.texto.contains(OMISION_DE_FILAS),
+            "{}",
+            contexto.texto
+        );
+    }
+
+    #[test]
+    fn test_contexto_en_otro_dominio_e_idioma() {
+        // Normativa técnica en español y una pauta de dosis en inglés
+        let normativa = "5 Distancias\nTabla 5. Separación mínima por tensión\n\
+             Hasta 1 kV 0,5 m 1,0 m\nDe 1 a 30 kV 1,5 m 3,0 m\n\
+             Para tensiones superiores a 30 kV la separación se duplica.\n";
+        let dosis = "2 Dose\nWeight Child Adult\nup to 20 kg 5 mg 10 mg\n\
+             Patients with renal impairment must not exceed half of these doses.\n";
+        for (texto, regla) in [
+            (normativa, "la separación se duplica"),
+            (dosis, "renal impairment"),
+        ] {
+            let chunks = vec![vinculado(chunk("D@v1-C-0001", "D#5", texto, None), "T")];
+            let apartado =
+                ApartadoTabla::localizar(&chunks, "T", &["1,5 m".into(), "5 mg".into()]).unwrap();
+            let contexto = apartado.contexto(LIMITE_CONTEXTO_APARTADO).unwrap();
+            assert!(contexto.texto.contains(regla), "{}", contexto.texto);
+            assert!(!contexto.texto.contains('⟦'), "sin saltos no hay marcas");
+            assert!(
+                !contexto.texto.contains("1,5 m 3,0 m") && !contexto.texto.contains("5 mg 10 mg"),
+                "{}",
+                contexto.texto
+            );
+        }
+    }
+
+    #[test]
+    fn test_contexto_acotado_y_recortado_por_caracteres_del_documento() {
+        let largo = (0..200)
+            .map(|i| format!("Regla general número {i} del apartado sin cifras de tabla."))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let chunks = vec![vinculado(
+            chunk(
+                "D@v1-C-0001",
+                "D#2",
+                &format!("Hasta 5 kg 4,50 6,20\n{largo}"),
+                Some(vec![salto(0, 2)]),
+            ),
+            "T",
+        )];
+        let apartado = ApartadoTabla::localizar(&chunks, "T", &valores()).unwrap();
+        let contexto = apartado.contexto(500).unwrap();
+        assert!(contexto.recortado);
+        let sin_marcas = crate::domain::services::marcas_pagina::quitar_marcas(&contexto.texto);
+        assert!(sin_marcas.chars().count() <= 500 + OMISION_DE_FILAS.len() + 2);
+        assert!(contexto.texto.contains("número 0 "));
+    }
+
+    #[test]
+    fn test_apartado_que_solo_tiene_filas_no_aporta_contexto() {
+        let chunks = vec![vinculado(
+            chunk(
+                "D@v1-C-0001",
+                "D#2",
+                "Hasta 5 kg 4,50 6,20\nMás de 5 kg 7,80 9,90",
+                None,
+            ),
+            "T",
+        )];
+        let apartado = ApartadoTabla::localizar(&chunks, "T", &valores()).unwrap();
+        assert!(apartado.contexto(LIMITE_CONTEXTO_APARTADO).is_none());
+    }
+
+    #[test]
+    fn test_linea_de_prosa_con_una_cifra_no_es_una_fila() {
+        for prosa in [
+            "En temporada alta se incrementan un 20 %.",
+            "2 Tarifas de envío",
+            "Tabla 1. Tarifa por peso y zona",
+            "For loads above 30 kN the factor in this table is multiplied by 1,5 and rounded up.",
+            "Válido desde 2020 hasta 2025.",
+            "Máximo 2 veces cada 24 h.",
+        ] {
+            assert!(!es_linea_de_tabla(prosa), "{prosa}");
+        }
+        for fila in [
+            "Hasta 5 kg 4,50 6,20",
+            "over 20 kg 8 mg 15 mg",
+            "Clase II 150 250",
+            "10 20 30",
+        ] {
+            assert!(es_linea_de_tabla(fila), "{fila}");
+        }
     }
 
     #[test]

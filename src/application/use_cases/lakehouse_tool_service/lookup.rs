@@ -7,8 +7,10 @@ use serde_json::{Map, Value, json};
 
 use super::apartado_tabla::{
     ApartadoTabla, ApartadosDeTabla, COLUMNAS_CHUNK_APARTADO, ChunkApartado,
+    LIMITE_CONTEXTO_APARTADO,
 };
 use super::estructura::campos_de_paginas;
+use super::estructura::{NOTA_SEGURIDAD, seccion_real_de};
 use super::{
     ContextoConsulta, LakehouseToolService, booleano, decimal, entero, literal_sql, texto,
     texto_opcional,
@@ -189,6 +191,21 @@ fn tabla_contiene_texto(fila: &Map<String, Value>, busqueda: &str) -> bool {
     plegar_mayusculas(busqueda)
         .split_whitespace()
         .all(|palabra| pajar.contains(palabra))
+}
+
+/// Nota del contexto del apartado para el agente
+const NOTA_CONTEXTO_APARTADO: &str = "Texto del mismo apartado que la tabla, sin sus filas ([…] marca las filas omitidas). Puede fijar excepciones, ampliaciones, condiciones o notas que modifican el valor de la celda: tenlo en cuenta antes de responder y cítalo si aplica. Si recortado es true, lee el apartado completo con stair_get_subtree_context y este nodo_id. Las marcas ⟦p. N⟧ indican la página física.";
+
+/// Prosa del apartado de la tabla que acompaña al cruce (mejora 3 del SSD de Capa 2)
+fn contexto_del_apartado(apartado: &ApartadoTabla) -> Option<Value> {
+    let contexto = apartado.contexto(LIMITE_CONTEXTO_APARTADO)?;
+    Some(json!({
+        "nodo_id": seccion_real_de(&apartado.nodo_id),
+        "texto": contexto.texto,
+        "recortado": contexto.recortado,
+        "nota": NOTA_CONTEXTO_APARTADO,
+        "nota_seguridad": NOTA_SEGURIDAD,
+    }))
 }
 
 /// Cita de una celda: su revisión y, si se conocen, las páginas del apartado de la tabla y la
@@ -472,6 +489,17 @@ impl LakehouseToolService {
             .await?;
         let candidatas = celdas_candidatas(&celdas, &x, &y, params.eje_z.as_deref());
         let mut salida = base;
+        let clave_tabla = (
+            texto(tabla, "doc_id"),
+            entero(tabla, "version_num").unwrap_or_default(),
+        );
+        if let Some(contexto) = apartados
+            .por_revision
+            .get(&clave_tabla)
+            .and_then(contexto_del_apartado)
+        {
+            salida["contexto_apartado"] = contexto;
+        }
         salida["tabla"] = json!({
             "tabla_id": texto(tabla, "tabla_id"),
             "titulo_tabla": texto(tabla, "titulo_tabla"),

@@ -72,10 +72,11 @@ const PETICIONES_DE_REFERENCIA: &[&str] = &[
 ];
 /// Valor de `origen_responsable` que la regla 9 del prompt lee como «no consta».
 const IDENTIFICADORES_DE_ABSTENCION: &[(&str, &str)] = &[("no_consta", "no consta")];
-/// Tools cuyos campos `texto` llevan marcas de página
+/// Tools cuyos campos `texto` llevan marcas de página (en el cruce, el contexto del apartado)
 const HERRAMIENTAS_CON_MARCAS: &[LakehouseToolName] = &[
     LakehouseToolName::SearchNormativeContext,
     LakehouseToolName::StairGetSubtreeContext,
+    LakehouseToolName::LookupDoubleEntryTable,
 ];
 const SENAL_SIN_RESPONSABLE: &str = "sin_responsable_declarado";
 const SENAL_EJES_AMBIGUOS: &str = "ejes_ambiguos";

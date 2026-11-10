@@ -275,6 +275,46 @@ async fn test_celda_resuelta_trae_la_pagina_de_su_fila_con_marca() {
 }
 
 #[tokio::test]
+async fn test_cruce_trae_las_reglas_generales_de_su_apartado() {
+    let e = escenario().await;
+    let tarifa = cruce(&e, "Tarifa por peso", json!("Hasta 5 kg"), json!("Zona B")).await;
+    let contexto = &tarifa["contexto_apartado"];
+    let texto = contexto["texto"].as_str().unwrap_or_default();
+    assert!(texto.contains(REGLA_TEMPORADA), "{tarifa}");
+    assert!(texto.contains(EXCLUSION_ISLAS), "{tarifa}");
+    let regla = texto.find(REGLA_TEMPORADA).unwrap();
+    assert!(texto[..regla].contains("⟦p. 3⟧"), "{texto}");
+    assert!(!texto.contains("4,50 6,20"), "sin las filas: {texto}");
+    assert!(!texto.contains("plazo de entrega"), "otra sección: {texto}");
+    assert_eq!(contexto["recortado"], false);
+    assert!(
+        contexto["nota"]
+            .as_str()
+            .unwrap()
+            .contains("stair_get_subtree_context")
+    );
+    assert!(contexto["nota_seguridad"].is_string());
+
+    let dosis = cruce(&e, "Daily dose", json!(35), json!("Adult")).await;
+    let texto = dosis["contexto_apartado"]["texto"]
+        .as_str()
+        .unwrap_or_default();
+    assert!(texto.contains(EXCEPCION_RENAL), "{dosis}");
+    assert!(!texto.contains("Keep the product"), "{texto}");
+}
+
+#[tokio::test]
+async fn test_cruce_sin_celda_tambien_trae_el_contexto() {
+    let e = escenario().await;
+    let salida = cruce(&e, "Tarifa por peso", json!("Hasta 50 kg"), json!("Zona B")).await;
+    assert_eq!(salida["estado"], "sin_coincidencia", "{salida}");
+    let texto = salida["contexto_apartado"]["texto"]
+        .as_str()
+        .unwrap_or_default();
+    assert!(texto.contains(EXCLUSION_ISLAS), "{salida}");
+}
+
+#[tokio::test]
 async fn test_fila_de_la_matriz_trae_la_pagina_de_su_seccion() {
     let e = escenario().await;
     let matriz = invocar(

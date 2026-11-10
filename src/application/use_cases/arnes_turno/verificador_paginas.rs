@@ -676,6 +676,31 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_el_contexto_del_apartado_de_un_cruce_es_fuente_con_paginas() {
+        let mut registro = RegistroTurno::default();
+        registro.registrar(ToolResult {
+            call_id: "1".into(),
+            tool_name: LakehouseToolName::LookupDoubleEntryTable.as_str().into(),
+            output: json!({
+                "estado": "resuelto",
+                "cita": { "pagina": "⟦p. 52⟧" },
+                "contexto_apartado": { "texto": fuente_52_53() },
+            }),
+            is_error: false,
+        });
+        assert_eq!(
+            unico(&format!("«{FRASE}» (p. 53)"), &registro).resultado,
+            ResultadoCita::Confirmada
+        );
+        assert_eq!(
+            unico(&format!("«{FRASE}» (p. 52)"), &registro).resultado,
+            ResultadoCita::Discrepante {
+                verificadas: paginas(&[53])
+            }
+        );
+    }
+
     fn busqueda_con_metadatos() -> RegistroTurno {
         let mut registro = RegistroTurno::default();
         registro.registrar(ToolResult {
