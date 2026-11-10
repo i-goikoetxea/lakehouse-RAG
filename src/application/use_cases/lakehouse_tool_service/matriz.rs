@@ -2,6 +2,7 @@
 
 use serde_json::{Map, Value, json};
 
+use super::estructura::campos_de_paginas;
 use super::{LakehouseToolService, entero, texto, texto_opcional};
 use crate::application::dtos::tools::{
     LakehouseToolName, QueryOperationalMatrixParams, RolBuscado, parsear_argumentos,
@@ -9,6 +10,7 @@ use crate::application::dtos::tools::{
 use crate::application::ports::lakehouse_store::{TABLA_CHUNKS_NORMATIVA, TABLA_MATRIZ_OPERATIVA};
 use crate::domain::errors::DomainError;
 use crate::domain::models::operational_matrix::{FaseOperativa, OrigenResponsable};
+use crate::domain::services::marcas_pagina::marca_de_pagina;
 use crate::domain::services::normalizacion::{
     codigo_canonico, normalizar_token, plegar_mayusculas,
 };
@@ -80,6 +82,36 @@ impl FiltrosMatriz {
     }
 }
 
+/// Cita de un hito: su revisión, su chunk de origen y las páginas de ese chunk. La página exacta
+/// (`⟦p. N⟧`) solo si el chunk está entero en una página: el texto del hito es una destilación y
+/// no se puede situar dentro del chunk
+fn cita_de_hito(fila: &Map<String, Value>) -> Value {
+    let mut cita = json!({
+        "doc_id": texto(fila, "doc_id"),
+        "revision": texto(fila, "revision"),
+        "version_num": entero(fila, "version_num"),
+        "origen_responsable": texto(fila, "origen_responsable"),
+        "chunk_origen_id": texto_opcional(fila, "chunk_origen_id"),
+        "breadcrumb": texto_opcional(fila, "breadcrumb_jerarquia"),
+    });
+    let (inicio, fin) = (entero(fila, "pagina_inicio"), entero(fila, "pagina_fin"));
+    if inicio.is_some() {
+        if let (Some(destino), Value::Object(paginas)) =
+            (cita.as_object_mut(), campos_de_paginas(inicio, fin))
+        {
+            destino.extend(paginas);
+        }
+    }
+    if let Some(pagina) = inicio
+        .filter(|i| fin.is_none_or(|f| f == *i))
+        .and_then(|i| u32::try_from(i).ok())
+        .filter(|p| *p > 0)
+    {
+        cita["pagina"] = json!(marca_de_pagina(pagina));
+    }
+    cita
+}
+
 fn fila_salida(fila: &Map<String, Value>) -> Value {
     json!({
         "hito_id": texto(fila, "hito_id"),
@@ -96,14 +128,7 @@ fn fila_salida(fila: &Map<String, Value>) -> Value {
         "condicion_aplicacion": texto_opcional(fila, "condicion_aplicacion"),
         "nivel_prelacion": entero(fila, "nivel_prelacion"),
         "calidad_extraccion": texto(fila, "calidad_extraccion"),
-        "cita": {
-            "doc_id": texto(fila, "doc_id"),
-            "revision": texto(fila, "revision"),
-            "version_num": entero(fila, "version_num"),
-            "origen_responsable": texto(fila, "origen_responsable"),
-            "chunk_origen_id": texto_opcional(fila, "chunk_origen_id"),
-            "breadcrumb": texto_opcional(fila, "breadcrumb_jerarquia"),
-        },
+        "cita": cita_de_hito(fila),
     })
 }
 
@@ -158,7 +183,7 @@ impl LakehouseToolService {
         let filtros = FiltrosMatriz::desde(&params)?;
 
         let sql = format!(
-            "SELECT m.hito_id, m.doc_id, m.version_num, m.orden_secuencia, m.fase_operativa, m.objeto_alcance, m.rol_ejecutor, m.rol_responsable, m.origen_responsable, m.registro_codigo, m.registro_nombre, m.criterio_aceptacion, m.condicion_aplicacion, m.nivel_prelacion, m.calidad_extraccion, m.chunk_origen_id, d.revision, c.breadcrumb_jerarquia, {} AS vigencia_no_declarada FROM {} m {} LEFT JOIN {} c ON c.chunk_id = m.chunk_origen_id WHERE {} ORDER BY m.nivel_prelacion ASC, m.doc_id ASC, m.orden_secuencia ASC, m.hito_id ASC",
+            "SELECT m.hito_id, m.doc_id, m.version_num, m.orden_secuencia, m.fase_operativa, m.objeto_alcance, m.rol_ejecutor, m.rol_responsable, m.origen_responsable, m.registro_codigo, m.registro_nombre, m.criterio_aceptacion, m.condicion_aplicacion, m.nivel_prelacion, m.calidad_extraccion, m.chunk_origen_id, d.revision, c.breadcrumb_jerarquia, c.pagina_inicio, c.pagina_fin, {} AS vigencia_no_declarada FROM {} m {} LEFT JOIN {} c ON c.chunk_id = m.chunk_origen_id WHERE {} ORDER BY m.nivel_prelacion ASC, m.doc_id ASC, m.orden_secuencia ASC, m.hito_id ASC",
             contexto.marca_no_declarada("d"),
             contexto.vista(TABLA_MATRIZ_OPERATIVA),
             contexto.union_catalogo("m", "d"),

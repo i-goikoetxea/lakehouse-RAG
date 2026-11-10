@@ -5,15 +5,23 @@ use std::collections::BTreeSet;
 
 use serde_json::{Map, Value, json};
 
-use super::{LakehouseToolService, booleano, decimal, entero, literal_sql, texto, texto_opcional};
+use super::apartado_tabla::{
+    ApartadoTabla, ApartadosDeTabla, COLUMNAS_CHUNK_APARTADO, ChunkApartado,
+};
+use super::estructura::campos_de_paginas;
+use super::{
+    ContextoConsulta, LakehouseToolService, booleano, decimal, entero, literal_sql, texto,
+    texto_opcional,
+};
 use crate::application::dtos::tools::{
     LakehouseToolName, LookupDoubleEntryTableParams, ValorEje, parsear_argumentos,
 };
 use crate::application::ports::lakehouse_store::{
-    TABLA_CATALOGO_TABLAS, TABLA_CELDAS_DOBLE_ENTRADA,
+    TABLA_CATALOGO_TABLAS, TABLA_CELDAS_DOBLE_ENTRADA, TABLA_CHUNKS_NORMATIVA,
 };
 use crate::domain::errors::DomainError;
 use crate::domain::models::double_entry_table::{LimiteRango, RangoNumerico};
+use crate::domain::services::marcas_pagina::marca_de_pagina;
 use crate::domain::services::normalizacion::{codigo_canonico, plegar_mayusculas};
 
 /// Valor de entrada ya validado: número finito y/o su forma textual normalizada
@@ -183,7 +191,31 @@ fn tabla_contiene_texto(fila: &Map<String, Value>, busqueda: &str) -> bool {
         .all(|palabra| pajar.contains(palabra))
 }
 
-fn celda_salida(celda: &Map<String, Value>) -> Value {
+/// Cita de una celda: su revisión y, si se conocen, las páginas del apartado de la tabla y la
+/// página de su fila (`⟦p. N⟧`, como las marcas de las demás tools)
+fn cita_de_celda(celda: &Map<String, Value>, apartados: &ApartadosDeTabla) -> Value {
+    let mut cita = json!({
+        "doc_id": texto(celda, "doc_id"),
+        "revision": texto(celda, "revision"),
+        "version_num": entero(celda, "version_num"),
+        "tabla_id": texto(celda, "tabla_id"),
+        "celda_id": texto(celda, "celda_id"),
+    });
+    if let Some((primera, ultima)) = apartados.de_celda(celda).and_then(ApartadoTabla::paginas) {
+        if let (Some(destino), Value::Object(paginas)) = (
+            cita.as_object_mut(),
+            campos_de_paginas(Some(i64::from(primera)), Some(i64::from(ultima))),
+        ) {
+            destino.extend(paginas);
+        }
+    }
+    if let Some(pagina) = apartados.pagina_de_celda(celda) {
+        cita["pagina"] = json!(marca_de_pagina(pagina));
+    }
+    cita
+}
+
+fn celda_salida(celda: &Map<String, Value>, apartados: &ApartadosDeTabla) -> Value {
     let nota = texto_opcional(celda, "nota_pie_condicion");
     let valor_texto = texto(celda, "valor_resultado_texto");
     let llamada_sin_nota = nota.is_none() && valor_texto.contains('(');
@@ -200,18 +232,15 @@ fn celda_salida(celda: &Map<String, Value>) -> Value {
         "rango_y": describir_eje(celda, "y"),
         "eje_z": texto_opcional(celda, "eje_z_filtro_adicional"),
         "nivel_prelacion": entero(celda, "nivel_prelacion"),
-        "cita": {
-            "doc_id": texto(celda, "doc_id"),
-            "revision": texto(celda, "revision"),
-            "version_num": entero(celda, "version_num"),
-            "tabla_id": texto(celda, "tabla_id"),
-            "celda_id": texto(celda, "celda_id"),
-        },
+        "cita": cita_de_celda(celda, apartados),
     })
 }
 
 /// Marca `prevalece` en las candidatas del nivel de prelación más bajo si hay varios niveles
-fn marcar_prelacion(candidatas: &[&Map<String, Value>]) -> Vec<Value> {
+fn marcar_prelacion(
+    candidatas: &[&Map<String, Value>],
+    apartados: &ApartadosDeTabla,
+) -> Vec<Value> {
     let niveles: BTreeSet<i64> = candidatas
         .iter()
         .filter_map(|c| entero(c, "nivel_prelacion"))
@@ -221,7 +250,7 @@ fn marcar_prelacion(candidatas: &[&Map<String, Value>]) -> Vec<Value> {
     candidatas
         .iter()
         .map(|c| {
-            let mut salida = celda_salida(c);
+            let mut salida = celda_salida(c, apartados);
             salida["prevalece"] = json!(hay_conflicto && entero(c, "nivel_prelacion") == minimo);
             salida
         })
@@ -241,11 +270,16 @@ fn identidades(candidatas: &[&Map<String, Value>]) -> BTreeSet<(String, Option<i
         .collect()
 }
 
-fn lado_del_aviso(x: &ValorEntrada, y: &ValorEntrada, candidatas: &[&Map<String, Value>]) -> Value {
+fn lado_del_aviso(
+    x: &ValorEntrada,
+    y: &ValorEntrada,
+    candidatas: &[&Map<String, Value>],
+    apartados: &ApartadosDeTabla,
+) -> Value {
     json!({
         "valor_x": x.a_json(),
         "valor_y": y.a_json(),
-        "celdas": marcar_prelacion(candidatas),
+        "celdas": marcar_prelacion(candidatas, apartados),
     })
 }
 
@@ -258,6 +292,7 @@ fn anotar_orden_invertido(
     x: &ValorEntrada,
     y: &ValorEntrada,
     eje_z: Option<&str>,
+    apartados: &ApartadosDeTabla,
 ) {
     let invertidas = celdas_candidatas(celdas, y, x, eje_z);
     if invertidas.is_empty() || identidades(recibidas) == identidades(&invertidas) {
@@ -276,12 +311,53 @@ fn anotar_orden_invertido(
         "mensaje": "Los dos órdenes de los ejes resuelven con celdas distintas. Decide por las unidades o los nombres de los ejes; si no lo distinguen, muestra ambos valores o pregunta. Nunca elijas uno en silencio.",
         "eje_x": salida["tabla"]["eje_x"].clone(),
         "eje_y": salida["tabla"]["eje_y"].clone(),
-        "orden_recibido": lado_del_aviso(x, y, recibidas),
-        "orden_invertido": lado_del_aviso(y, x, &invertidas),
+        "orden_recibido": lado_del_aviso(x, y, recibidas, apartados),
+        "orden_invertido": lado_del_aviso(y, x, &invertidas, apartados),
     });
 }
 
 impl LakehouseToolService {
+    /// Apartado de la tabla en cada revisión elegida (puede no haberlo: tabla sin vínculos)
+    async fn apartados_de_tabla(
+        &self,
+        contexto: &ContextoConsulta,
+        elegidas: &[&Map<String, Value>],
+        celdas: &[Map<String, Value>],
+    ) -> Result<ApartadosDeTabla, DomainError> {
+        let mut apartados = ApartadosDeTabla::default();
+        for tabla in elegidas {
+            let doc_id = texto(tabla, "doc_id");
+            let version = entero(tabla, "version_num").unwrap_or_default();
+            let chunks: Vec<ChunkApartado> = self
+                .consultar(
+                    contexto,
+                    &format!(
+                        "SELECT {COLUMNAS_CHUNK_APARTADO} FROM {} c WHERE c.doc_id = {} AND c.version_num = {version}",
+                        contexto.vista(TABLA_CHUNKS_NORMATIVA),
+                        literal_sql(&doc_id),
+                    ),
+                )
+                .await?
+                .iter()
+                .map(ChunkApartado::desde_fila)
+                .collect();
+            let valores: Vec<String> = celdas
+                .iter()
+                .filter(|c| {
+                    texto(c, "doc_id") == doc_id
+                        && entero(c, "version_num").unwrap_or_default() == version
+                })
+                .map(|c| texto(c, "valor_resultado_texto"))
+                .collect();
+            if let Some(apartado) =
+                ApartadoTabla::localizar(&chunks, &texto(tabla, "tabla_id"), &valores)
+            {
+                apartados.por_revision.insert((doc_id, version), apartado);
+            }
+        }
+        Ok(apartados)
+    }
+
     pub(super) async fn cruzar_tabla(&self, argumentos: &Value) -> Result<Value, DomainError> {
         let params: LookupDoubleEntryTableParams =
             parsear_argumentos(LakehouseToolName::LookupDoubleEntryTable, argumentos)?;
@@ -391,6 +467,9 @@ impl LakehouseToolService {
             })
             .collect();
 
+        let apartados = self
+            .apartados_de_tabla(&contexto, &elegidas, &celdas)
+            .await?;
         let candidatas = celdas_candidatas(&celdas, &x, &y, params.eje_z.as_deref());
         let mut salida = base;
         salida["tabla"] = json!({
@@ -413,7 +492,7 @@ impl LakehouseToolService {
                 salida["rangos_disponibles"] = json!(rangos);
             }
             [unica] => {
-                let celda = celda_salida(unica);
+                let celda = celda_salida(unica, &apartados);
                 for (clave, valor) in celda.as_object().into_iter().flatten() {
                     salida[clave] = valor.clone();
                 }
@@ -425,7 +504,7 @@ impl LakehouseToolService {
                     "{} celdas candidatas: no elijas una arbitrariamente. Si difieren en eje_z, pide ese dato; si difieren en prelación, prevalece la marcada.",
                     varias.len()
                 ));
-                salida["candidatas"] = json!(marcar_prelacion(varias));
+                salida["candidatas"] = json!(marcar_prelacion(varias, &apartados));
             }
         }
         anotar_orden_invertido(
@@ -435,6 +514,7 @@ impl LakehouseToolService {
             &x,
             &y,
             params.eje_z.as_deref(),
+            &apartados,
         );
         Ok(salida)
     }
@@ -559,7 +639,15 @@ mod tests {
             "eje_x": { "nombre": "espesor", "unidad": unidades.0 },
             "eje_y": { "nombre": "ancho", "unidad": unidades.1 },
         }});
-        anotar_orden_invertido(&mut salida, celdas, &recibidas, &x, &y, eje_z);
+        anotar_orden_invertido(
+            &mut salida,
+            celdas,
+            &recibidas,
+            &x,
+            &y,
+            eje_z,
+            &ApartadosDeTabla::default(),
+        );
         salida
     }
 

@@ -5,6 +5,7 @@
 //! `01_documentos_catalogo` y el aislamiento de centro con la lista de vistas permitidas.
 //! Los filtros que escribe el agente nunca se interpolan en SQL: se aplican en Rust.
 
+mod apartado_tabla;
 mod busqueda;
 mod catalogo;
 mod estructura;
