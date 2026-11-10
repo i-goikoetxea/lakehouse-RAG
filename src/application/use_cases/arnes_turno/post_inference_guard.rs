@@ -10,7 +10,7 @@ use super::cifras::{extraer_cifras, lecturas_de_fuente};
 use super::intent_detector::IntencionTurno;
 use super::texto_normalizado::plegar_texto;
 use super::verificador_paginas::{textos_de_metadatos, textos_marcables};
-use crate::application::dtos::tools::{LakehouseToolName, ToolResult};
+use crate::application::dtos::tools::{LakehouseToolName, ToolCall, ToolResult};
 use crate::domain::services::marcas_pagina::quitar_marcas;
 
 const LOCUCIONES_DE_RECHAZO: &[&str] = &["no consta", "no declarado", "no declarada"];
@@ -92,11 +92,17 @@ const LONGITUD_MAXIMA_CIFRA_INFORMADA: usize = 64;
 /// Tools y salidas del turno actual. El historial no entra aquí: es la pereza que se quiere evitar.
 #[derive(Debug, Default, Clone)]
 pub struct RegistroTurno {
+    llamadas: Vec<ToolCall>,
     resultados: Vec<ToolResult>,
     fecha_de_hoy: Option<NaiveDate>,
 }
 
 impl RegistroTurno {
+    /// Lo que pidió el modelo en el turno (argumentos incluidos), haya ido bien o no
+    pub fn registrar_llamada(&mut self, llamada: &ToolCall) {
+        self.llamadas.push(llamada.clone());
+    }
+
     /// Claude Code da la fecha de hoy al modelo: citarla entera no es inventar una cifra. Sus
     /// partes sueltas siguen sin anclar.
     pub fn fijar_fecha_de_hoy(&mut self, hoy: NaiveDate) {

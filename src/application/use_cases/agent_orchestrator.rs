@@ -203,6 +203,7 @@ impl AgentOrchestrator {
                             });
                         }
 
+                        registro.registrar_llamada(call);
                         let result = self.tools.ejecutar_herramienta(call).await?;
 
                         if let Some(cb) = &on_event {
