@@ -50,6 +50,8 @@ pub struct FragmentoIndexado {
     pub pagina_fin: Option<i32>,
     /// Saltos de página dentro de `texto` (solo chunks de formatos con páginas)
     pub saltos_pagina: Option<Vec<crate::domain::services::marcas_pagina::SaltoPagina>>,
+    /// Tablas de Capa 2 vinculadas al chunk (su sección o una cita); vacío en hitos
+    pub tablas_vinculadas: Vec<String>,
     /// Vector del fragmento; vacío si la fila no tenía vector
     pub vector: Vec<f32>,
 }

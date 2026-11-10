@@ -186,6 +186,11 @@ pub enum IntencionTurno {
 pub struct IntentDetector;
 
 impl IntentDetector {
+    /// El mensaje nombra una tabla («tabla», «tablas»), como palabra completa
+    pub fn menciona_tabla(mensaje: &str) -> bool {
+        trocear(mensaje).iter().any(es_palabra_tabla)
+    }
+
     pub fn clasificar(mensaje: &str) -> IntencionTurno {
         let palabras = trocear(mensaje);
         if pide_agregacion(&palabras) {
@@ -729,6 +734,16 @@ mod tests {
         ] {
             assert_eq!(clasificar(mensaje), IntencionTurno::Ninguna, "{mensaje}");
         }
+    }
+
+    #[test]
+    fn test_menciona_tabla_por_palabra_completa() {
+        assert!(IntentDetector::menciona_tabla(
+            "Según la Tabla 4-A, ¿qué valor?"
+        ));
+        assert!(IntentDetector::menciona_tabla("¿Qué dicen las TABLAS?"));
+        assert!(!IntentDetector::menciona_tabla("¿Qué tablazón se usa?"));
+        assert!(!IntentDetector::menciona_tabla("¿Qué temperatura a 30 mm?"));
     }
 
     #[test]

@@ -315,6 +315,46 @@ async fn test_cruce_sin_celda_tambien_trae_el_contexto() {
 }
 
 #[tokio::test]
+async fn test_la_busqueda_dice_si_el_fragmento_esta_vinculado_a_una_tabla() {
+    let e = escenario().await;
+    let buscar = |consulta: &'static str| {
+        invocar(
+            &e,
+            "search_normative_context",
+            json!({ "consulta": consulta, "modo": "EXACT_BM25", "doc_id": TARIFAS }),
+        )
+    };
+    let con_tabla = buscar("temporada").await;
+    let resultado = &con_tabla["grupos"][0]["resultados"][0];
+    let tablas = resultado["tablas_vinculadas"].as_array().unwrap();
+    assert_eq!(tablas.len(), 1, "{resultado}");
+    assert!(tablas[0].as_str().unwrap().contains("TAB"), "{resultado}");
+
+    let sin_tabla = buscar("laborables").await;
+    let resultado = &sin_tabla["grupos"][0]["resultados"][0];
+    assert!(resultado["texto"].as_str().unwrap().contains("laborables"));
+    assert!(resultado.get("tablas_vinculadas").is_none(), "{resultado}");
+
+    // El subárbol de la sección de la tabla también lo dice
+    let nodo = con_tabla["grupos"][0]["resultados"][0]["cita"]["nodo_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let subarbol = invocar(
+        &e,
+        "stair_get_subtree_context",
+        json!({ "doc_id": TARIFAS, "nodo_id": nodo }),
+    )
+    .await;
+    let seccion = &subarbol["secciones"][0];
+    assert_eq!(
+        seccion["tablas_vinculadas"].as_array().unwrap().len(),
+        1,
+        "{seccion}"
+    );
+}
+
+#[tokio::test]
 async fn test_fila_de_la_matriz_trae_la_pagina_de_su_seccion() {
     let e = escenario().await;
     let matriz = invocar(

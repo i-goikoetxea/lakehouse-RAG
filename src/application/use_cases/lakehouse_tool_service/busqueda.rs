@@ -290,7 +290,7 @@ pub(crate) fn agrupar_por_tema(
                         destino.extend(paginas);
                     }
                     anadir_fecha_vigor(&mut cita, revision.fecha_vigor.as_deref());
-                    json!({
+                    let mut resultado = json!({
                         "id": f.id,
                         "origen": f.origen.as_str(),
                         "texto": texto_de_salida(f),
@@ -307,7 +307,12 @@ pub(crate) fn agrupar_por_tema(
                         "vigencia_no_declarada": revision.vigencia_no_declarada,
                         "aviso_contenido": explicacion_de_estado(estado, revision.provisional),
                         "cita": cita,
-                    })
+                    });
+                    // Solo si las hay: dice al agente (y al arnés) que el texto tiene Capa 2
+                    if !f.tablas_vinculadas.is_empty() {
+                        resultado["tablas_vinculadas"] = json!(f.tablas_vinculadas);
+                    }
+                    resultado
                 })
                 .collect();
             json!({ "tema": clave, "conflicto_prelacion": conflicto, "resultados": resultados })
@@ -546,6 +551,7 @@ mod tests {
             pagina_inicio: None,
             pagina_fin: None,
             saltos_pagina: None,
+            tablas_vinculadas: Vec::new(),
             vector,
         }
     }

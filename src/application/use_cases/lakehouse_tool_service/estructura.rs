@@ -261,6 +261,8 @@ struct ContenidoSeccion {
     texto: String,
     /// Saltos de página dentro de `texto`; `None` si algún chunk no los tiene
     saltos: Option<Vec<SaltoPagina>>,
+    /// Tablas de Capa 2 vinculadas a algún chunk de la sección, sin repetir
+    tablas_vinculadas: Vec<String>,
 }
 
 /// Texto de un chunk de la sección con sus saltos de página
@@ -288,6 +290,17 @@ fn contenidos_por_seccion(
             });
         let contenido = contenidos.entry(nodo).or_default();
         contenido.chunks.push(texto(fila, "chunk_id"));
+        for tabla in fila
+            .get("tablas_vinculadas")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+        {
+            if !contenido.tablas_vinculadas.iter().any(|t| t == tabla) {
+                contenido.tablas_vinculadas.push(tabla.to_string());
+            }
+        }
         contenido.tipo_bloque = texto_opcional(fila, "tipo_bloque");
         contenido.breadcrumb = texto_opcional(fila, "breadcrumb_jerarquia");
         contenido.condicion = texto_opcional(fila, "condicion_aplicacion");
@@ -631,7 +644,7 @@ impl LakehouseToolService {
             .consultar(
                 &contexto,
                 &format!(
-                    "SELECT c.chunk_id, c.nodo_id, c.tipo_bloque, c.breadcrumb_jerarquia, c.condicion_aplicacion, c.texto_contenido, c.pagina_inicio, c.pagina_fin, c.saltos_pagina FROM {} c WHERE {}",
+                    "SELECT c.chunk_id, c.nodo_id, c.tipo_bloque, c.breadcrumb_jerarquia, c.condicion_aplicacion, c.texto_contenido, c.pagina_inicio, c.pagina_fin, c.saltos_pagina, c.tablas_vinculadas FROM {} c WHERE {}",
                     contexto.vista(TABLA_CHUNKS_NORMATIVA),
                     Self::predicado_revision(&contexto, "c", &revision)
                 ),
@@ -702,6 +715,9 @@ impl LakehouseToolService {
                 "texto_recortado": false,
                 "cita": cita,
             });
+            if !contenido.tablas_vinculadas.is_empty() {
+                seccion["tablas_vinculadas"] = json!(contenido.tablas_vinculadas);
+            }
             // Lo que se serializa también consume el límite, salvo el primer texto, que siempre
             // avanza al menos un cuarto del límite aunque sus metadatos lo agoten
             let metadatos = seccion.to_string().chars().count() + 1;

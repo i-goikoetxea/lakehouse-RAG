@@ -7,7 +7,7 @@ use chrono::NaiveDate;
 use serde_json::Value;
 
 use super::cifras::{extraer_cifras, lecturas_de_fuente};
-use super::intent_detector::IntencionTurno;
+use super::intent_detector::{IntencionTurno, IntentDetector};
 use super::negaciones::{LoConsultado, negacion_sin_busqueda};
 use super::texto_normalizado::plegar_texto;
 use super::verificador_paginas::{textos_de_metadatos, textos_marcables};
@@ -155,6 +155,26 @@ impl RegistroTurno {
             .collect()
     }
 
+    fn es_de_texto(nombre: &str) -> bool {
+        HERRAMIENTAS_DE_TEXTO.iter().any(|h| h.as_str() == nombre)
+    }
+
+    /// El turno llamó a una tool que lee texto del documento (búsqueda o subárbol)
+    fn leyo_texto(&self) -> bool {
+        self.llamadas.iter().any(|l| Self::es_de_texto(&l.name))
+            || self
+                .resultados
+                .iter()
+                .any(|r| Self::es_de_texto(&r.tool_name))
+    }
+
+    /// Algún fragmento o sección leído trae `tablas_vinculadas` con alguna tabla
+    fn texto_vinculado_a_tabla(&self) -> bool {
+        self.salidas_validas()
+            .filter(|r| Self::es_de_texto(&r.tool_name))
+            .any(|r| tiene_tablas_vinculadas(&r.output))
+    }
+
     /// Argumentos de las llamadas y textos (y claves) de las salidas válidas del turno
     fn lo_consultado(&self) -> LoConsultado {
         let mut textos: Vec<String> = vec![self.vocabulario_de_la_app.clone()];
@@ -165,10 +185,11 @@ impl RegistroTurno {
             recorrer_textos(&resultado.output, |texto| textos.push(texto.to_string()));
         }
         let consulto = !self.llamadas.is_empty() || !self.resultados.is_empty();
-        let es_de_texto = |nombre: &str| HERRAMIENTAS_DE_TEXTO.iter().any(|h| h.as_str() == nombre);
-        let leyo_texto = self.llamadas.iter().any(|l| es_de_texto(&l.name))
-            || self.resultados.iter().any(|r| es_de_texto(&r.tool_name));
-        LoConsultado::nuevo(textos.iter().map(String::as_str), consulto, leyo_texto)
+        LoConsultado::nuevo(
+            textos.iter().map(String::as_str),
+            consulto,
+            self.leyo_texto(),
+        )
     }
 
     /// Títulos, breadcrumbs y demás cadenas de las salidas que no son texto del documento
@@ -177,6 +198,31 @@ impl RegistroTurno {
             .flat_map(|r| textos_de_metadatos(&r.output))
             .collect()
     }
+}
+
+/// Campo que las tools de texto añaden a un fragmento o sección vinculado a tablas de Capa 2
+const CLAVE_TABLAS_VINCULADAS: &str = "tablas_vinculadas";
+
+/// Busca la clave en cualquier anidamiento, con pila propia
+fn tiene_tablas_vinculadas(salida: &Value) -> bool {
+    let mut pendientes = vec![salida];
+    while let Some(valor) = pendientes.pop() {
+        match valor {
+            Value::Array(elementos) => pendientes.extend(elementos),
+            Value::Object(campos) => {
+                if campos
+                    .get(CLAVE_TABLAS_VINCULADAS)
+                    .and_then(Value::as_array)
+                    .is_some_and(|tablas| !tablas.is_empty())
+                {
+                    return true;
+                }
+                pendientes.extend(campos.values());
+            }
+            _ => {}
+        }
+    }
+    false
 }
 
 fn es_matriz_sin_responsable(resultado: &ToolResult) -> bool {
@@ -233,7 +279,9 @@ impl PostInferenceGuard {
             return Ok(());
         }
         let herramientas = herramientas_de_capa_dos(intencion);
-        if herramientas.is_some_and(|exigidas| !registro.intento_alguna(exigidas)) {
+        if herramientas.is_some_and(|exigidas| !registro.intento_alguna(exigidas))
+            && exige_capa_dos(intencion, pregunta, registro)
+        {
             return Err(ViolacionArnes::CapaDosNoIntentada);
         }
         comprobar_abstencion_sin_cifras_ajenas(respuesta, pregunta, registro)?;
@@ -244,6 +292,19 @@ impl PostInferenceGuard {
         comprobar_respaldo_de_rol(respuesta, registro)?;
         comprobar_cifras_ancladas(respuesta, pregunta, registro)?;
         comprobar_ejes_aclarados(respuesta, registro)
+    }
+}
+
+/// Una pregunta incompleta que no nombra una tabla (magnitud y un valor) también puede ser
+/// narrativa: si el turno leyó texto y nada de lo leído está vinculado a una tabla, no se exige la
+/// Capa 2. Con la tabla nombrada, sin texto leído o con texto vinculado a una tabla, sí
+/// (`ssd_arnes_capa2_intencion.md`)
+fn exige_capa_dos(intencion: &IntencionTurno, pregunta: &str, registro: &RegistroTurno) -> bool {
+    match intencion {
+        IntencionTurno::TabularIncompleta if !IntentDetector::menciona_tabla(pregunta) => {
+            !registro.leyo_texto() || registro.texto_vinculado_a_tabla()
+        }
+        _ => true,
     }
 }
 
@@ -639,6 +700,85 @@ mod tests {
                 &RegistroTurno::default()
             ),
             Err(ViolacionArnes::CapaDosNoIntentada)
+        );
+    }
+
+    const NARRATIVA_CON_MAGNITUD: &str = "¿Qué medidas se toman si la temperatura supera 40 °C?";
+
+    fn busqueda_con_tablas(tablas: Value) -> RegistroTurno {
+        registro_con(vec![resultado(
+            "search_normative_context",
+            json!({ "grupos": [{ "resultados": [{
+                "texto": "Si la temperatura supera 40 °C se detiene la obra.",
+                "tablas_vinculadas": tablas,
+            }] }] }),
+            false,
+        )])
+    }
+
+    fn validar_incompleta(pregunta: &str, registro: &RegistroTurno) -> Result<(), ViolacionArnes> {
+        PostInferenceGuard::validar(
+            "Se detiene la obra por encima de 40 °C.",
+            pregunta,
+            &IntencionTurno::TabularIncompleta,
+            registro,
+        )
+    }
+
+    #[test]
+    fn test_incompleta_sin_tabla_respondida_desde_texto_sin_tablas_no_exige_capa_dos() {
+        assert_eq!(
+            validar_incompleta(NARRATIVA_CON_MAGNITUD, &busqueda_con_tablas(json!(null))),
+            Ok(())
+        );
+        assert_eq!(
+            validar_incompleta(NARRATIVA_CON_MAGNITUD, &busqueda_con_tablas(json!([]))),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn test_incompleta_sigue_exigiendo_capa_dos_si_hay_indicio_de_tabla() {
+        // El texto leído está vinculado a una tabla
+        assert_eq!(
+            validar_incompleta(
+                NARRATIVA_CON_MAGNITUD,
+                &busqueda_con_tablas(json!(["DOC@v1-TAB-0000"]))
+            ),
+            Err(ViolacionArnes::CapaDosNoIntentada)
+        );
+        // La pregunta nombra una tabla
+        assert_eq!(
+            validar_incompleta(
+                "Según la Tabla 3, ¿qué temperatura corresponde a 40 °C?",
+                &busqueda_con_tablas(json!(null))
+            ),
+            Err(ViolacionArnes::CapaDosNoIntentada)
+        );
+        // No leyó ningún texto
+        assert_eq!(
+            validar_incompleta(NARRATIVA_CON_MAGNITUD, &RegistroTurno::default()),
+            Err(ViolacionArnes::CapaDosNoIntentada)
+        );
+        // La cruzable no cambia
+        assert_eq!(
+            validar_cruzable("Son 150 °C.", &busqueda_con_tablas(json!(null))),
+            Err(ViolacionArnes::CapaDosNoIntentada)
+        );
+    }
+
+    #[test]
+    fn test_incompleta_sin_capa_dos_mantiene_el_anclaje_de_cifras() {
+        assert_eq!(
+            PostInferenceGuard::validar(
+                "Se detiene a partir de 45 °C.",
+                NARRATIVA_CON_MAGNITUD,
+                &IntencionTurno::TabularIncompleta,
+                &busqueda_con_tablas(json!(null))
+            ),
+            Err(ViolacionArnes::CifraSinAnclar {
+                cifra: "45".to_string()
+            })
         );
     }
 

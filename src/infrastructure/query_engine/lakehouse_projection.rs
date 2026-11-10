@@ -152,6 +152,23 @@ fn pagina_en(lote: &RecordBatch, nombre: &str, fila: usize) -> Option<i32> {
         .map(|c| c.value(fila))
 }
 
+/// Lista de textos de una fila (`tablas_vinculadas`); vacía si es nula o no tiene esa forma
+fn textos_de_lista_en(lote: &RecordBatch, nombre: &str, fila: usize) -> Vec<String> {
+    let Some(lista) = lote
+        .column_by_name(nombre)
+        .and_then(|c| c.as_any().downcast_ref::<ListArray>())
+        .filter(|l| l.is_valid(fila))
+    else {
+        return Vec::new();
+    };
+    let valores = lista.value(fila);
+    valores
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .map(|textos| textos.iter().flatten().map(str::to_string).collect())
+        .unwrap_or_default()
+}
+
 /// Saltos de página de un chunk; `None` si la fila es nula o algún valor es negativo
 fn saltos_en(lote: &RecordBatch, fila: usize) -> Option<Vec<SaltoPagina>> {
     let lista = lote
@@ -217,6 +234,7 @@ fn fragmento_base(
         pagina_inicio: None,
         pagina_fin: None,
         saltos_pagina: None,
+        tablas_vinculadas: Vec::new(),
         vector: Vec::new(),
     }
 }
@@ -237,6 +255,7 @@ fn fragmentos_de_chunks(lotes: &[RecordBatch]) -> Vec<FragmentoIndexado> {
             f.pagina_inicio = pagina_en(lote, "pagina_inicio", fila);
             f.pagina_fin = pagina_en(lote, "pagina_fin", fila);
             f.saltos_pagina = saltos_en(lote, fila);
+            f.tablas_vinculadas = textos_de_lista_en(lote, "tablas_vinculadas", fila);
             f.vector = vector_en(lote, "vector", fila);
             fragmentos.push(f);
         }

@@ -65,6 +65,7 @@ mod tests {
             pagina_inicio: None,
             pagina_fin: None,
             saltos_pagina: None,
+            tablas_vinculadas: Vec::new(),
             vector: vec![1.0, 0.0],
         }
     }
