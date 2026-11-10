@@ -1,5 +1,6 @@
 //! Comprueba la página de cada extracto literal que cita la respuesta
-//! (`docs/arquitectura/ssd_citas_pagina.md` §5). No rechaza ni reintenta: anota.
+//! (`docs/arquitectura/ssd_citas_pagina.md` §5). No rechaza ni reintenta: anota, y solo con
+//! evidencia positiva de error. En caso de duda guarda silencio.
 //!
 //! El extracto se normaliza a su esqueleto (letras y dígitos, en minúsculas y sin tildes ni
 //! ligaduras), se busca en los textos marcados con `⟦p. N⟧` de las tools del turno y su página
@@ -33,11 +34,21 @@ const PALABRAS_DE_PAGINA: &[&str] = &[
 /// Páginas, ordenadas
 pub type Paginas = BTreeSet<u32>;
 
+/// Solo `Discrepante` es evidencia positiva de error y genera nota (SSD §5.3): el resto son
+/// casos de duda o de acierto y el verificador guarda silencio.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ResultadoCita {
+    /// Alguna aparición del extracto cae en una página citada (también si se cita el rango que la
+    /// contiene o una de las páginas de un extracto a caballo)
     Confirmada,
-    Discrepante { verificadas: Paginas },
-    Ambigua { apariciones: Vec<Paginas> },
+    /// El extracto aparece en un único lugar de lo consultado y ninguna de sus páginas es la citada
+    Discrepante {
+        verificadas: Paginas,
+    },
+    /// Aparece en varias páginas distintas y ninguna es la citada: puede ser un texto repetido
+    Ambigua {
+        apariciones: Vec<Paginas>,
+    },
     SinPagina,
     NoEncontrada,
 }
@@ -51,32 +62,17 @@ pub struct CitaRevisada {
 }
 
 impl CitaRevisada {
-    /// Explicación para el operador; `None` si la página quedó confirmada
+    /// Explicación para el operador; `None` salvo que haya evidencia positiva de error
     pub fn motivo(&self) -> Option<String> {
-        let extracto = extracto_mostrado(&self.extracto);
-        let citadas = formatear_paginas(&self.citadas);
-        let explicacion = match &self.resultado {
-            ResultadoCita::Confirmada => return None,
-            ResultadoCita::Discrepante { verificadas } => format!(
-                "la respuesta cita {citadas}, pero el texto está en {}",
-                formatear_paginas(verificadas)
-            ),
-            ResultadoCita::Ambigua { apariciones } => format!(
-                "aparece en {}; no se puede confirmar si es {citadas}",
-                apariciones
-                    .iter()
-                    .map(formatear_paginas)
-                    .collect::<Vec<_>>()
-                    .join(" y en ")
-            ),
-            ResultadoCita::SinPagina => format!(
-                "el texto consultado no tiene páginas registradas (por ejemplo, un documento Markdown); {citadas} no se puede comprobar"
-            ),
-            ResultadoCita::NoEncontrada => format!(
-                "no aparece literalmente en lo consultado en este turno; {citadas} no está verificada"
-            ),
+        let ResultadoCita::Discrepante { verificadas } = &self.resultado else {
+            return None;
         };
-        Some(format!("«{extracto}»: {explicacion}."))
+        Some(format!(
+            "«{}»: la respuesta cita {}, pero el texto está en {}.",
+            extracto_mostrado(&self.extracto),
+            formatear_paginas(&self.citadas),
+            formatear_paginas(verificadas)
+        ))
     }
 }
 
@@ -122,7 +118,7 @@ impl VerificadorPaginas {
         revisadas
     }
 
-    /// Bloque que se añade a la respuesta si algún extracto no quedó confirmado
+    /// Bloque que se añade a la respuesta si algún extracto tiene evidencia positiva de error
     pub fn nota(revisadas: &[CitaRevisada]) -> Option<String> {
         let lineas: Vec<String> = revisadas
             .iter()
@@ -159,10 +155,15 @@ fn comprobar(esqueleto: &str, citadas: &Paginas, fuentes: &[FuentePaginada]) -> 
             }
         }
     }
+    if apariciones
+        .iter()
+        .any(|paginas| !paginas.is_disjoint(citadas))
+    {
+        return ResultadoCita::Confirmada;
+    }
     match apariciones.len() {
         0 if sin_pagina => ResultadoCita::SinPagina,
         0 => ResultadoCita::NoEncontrada,
-        1 if apariciones[0] == *citadas => ResultadoCita::Confirmada,
         1 => ResultadoCita::Discrepante {
             verificadas: apariciones.remove(0),
         },
@@ -507,9 +508,9 @@ mod tests {
     }
 
     #[test]
-    fn test_pagina_equivocada_o_rango_del_chunk_se_corrige() {
+    fn test_pagina_que_no_contiene_el_extracto_se_corrige() {
         let registro = busqueda(&[&fuente_52_53()]);
-        for citada in ["p. 52", "pp. 52-53", "págs. 52 y 53", "page 54"] {
+        for citada in ["p. 52", "page 54", "págs. 50 y 51"] {
             let cita = unico(&format!("«{FRASE}» ({citada})"), &registro);
             assert_eq!(
                 cita.resultado,
@@ -525,18 +526,32 @@ mod tests {
     }
 
     #[test]
-    fn test_extracto_que_cruza_el_salto_exige_las_dos_paginas() {
-        let fuente =
-            "⟦p. 52⟧ The limit applies to every hoist frame \n⟦p. 53⟧ listed in the annex.";
+    fn test_rango_que_contiene_la_pagina_del_extracto_no_es_un_error() {
+        let registro = busqueda(&[&fuente_52_53()]);
+        for citada in ["pp. 52-53", "págs. 52 y 53", "pp. 50-60"] {
+            let cita = unico(&format!("«{FRASE}» ({citada})"), &registro);
+            assert_eq!(cita.resultado, ResultadoCita::Confirmada, "{citada}");
+            assert!(VerificadorPaginas::nota(&[cita]).is_none());
+        }
+    }
+
+    #[test]
+    fn test_extracto_que_cruza_el_salto_y_cita_una_de_sus_paginas_no_se_anota() {
+        let fuente = "⟦p. 52⟧ The limit applies to every hoist frame 
+⟦p. 53⟧ listed in the annex.";
         let registro = busqueda(&[fuente]);
-        let respuesta = "«applies to every hoist frame listed in the annex» (pp. 52-53)";
+        for citada in ["pp. 52-53", "p. 52", "p. 53"] {
+            let respuesta =
+                format!("«applies to every hoist frame listed in the annex» ({citada})");
+            assert_eq!(
+                unico(&respuesta, &registro).resultado,
+                ResultadoCita::Confirmada,
+                "{citada}"
+            );
+        }
+        let ajena = "«applies to every hoist frame listed in the annex» (p. 60)";
         assert_eq!(
-            unico(respuesta, &registro).resultado,
-            ResultadoCita::Confirmada
-        );
-        let solo_una = "«applies to every hoist frame listed in the annex» (p. 52)";
-        assert_eq!(
-            unico(solo_una, &registro).resultado,
+            unico(ajena, &registro).resultado,
             ResultadoCita::Discrepante {
                 verificadas: paginas(&[52, 53])
             }
@@ -570,29 +585,44 @@ mod tests {
     }
 
     #[test]
-    fn test_ambigua_no_encontrada_y_sin_pagina() {
+    fn test_en_caso_de_duda_se_guarda_silencio() {
         let repetida = busqueda(&[&format!(
-            "⟦p. 52⟧ {FRASE}.\n⟦p. 53⟧ Other.\n⟦p. 54⟧ {FRASE}."
+            "⟦p. 52⟧ {FRASE}.
+⟦p. 53⟧ Other.
+⟦p. 54⟧ {FRASE}."
         )]);
+        // Una de sus apariciones está en la página citada: no hay error que señalar
         let cita = unico(&format!("«{FRASE}» (p. 52)"), &repetida);
+        assert_eq!(cita.resultado, ResultadoCita::Confirmada);
+        // En varias páginas y ninguna citada: puede ser un texto repetido en todas; no se sabe
+        let cita = unico(&format!("«{FRASE}» (p. 60)"), &repetida);
         assert_eq!(
             cita.resultado,
             ResultadoCita::Ambigua {
                 apariciones: vec![paginas(&[52]), paginas(&[54])]
             }
         );
-        assert!(cita.motivo().unwrap().contains("no se puede confirmar"));
+        assert!(cita.motivo().is_none());
 
         let otra = busqueda(&["⟦p. 9⟧ Nothing related here at all."]);
-        assert_eq!(
-            unico(&format!("«{FRASE}» (p. 9)"), &otra).resultado,
-            ResultadoCita::NoEncontrada
-        );
+        let no_encontrada = unico(&format!("«{FRASE}» (p. 9)"), &otra);
+        assert_eq!(no_encontrada.resultado, ResultadoCita::NoEncontrada);
+        assert!(no_encontrada.motivo().is_none());
 
         let markdown = busqueda(&[&format!("{FRASE}.")]);
-        assert_eq!(
-            unico(&format!("«{FRASE}» (p. 1)"), &markdown).resultado,
-            ResultadoCita::SinPagina
+        let sin_pagina = unico(&format!("«{FRASE}» (p. 1)"), &markdown);
+        assert_eq!(sin_pagina.resultado, ResultadoCita::SinPagina);
+        assert!(VerificadorPaginas::nota(&[cita, no_encontrada, sin_pagina]).is_none());
+    }
+
+    #[test]
+    fn test_parafrasis_no_se_anota() {
+        let registro = busqueda(&[&fuente_52_53()]);
+        let parafrasis = "«The batch AGJ-7K3M test pressure is limited to 512.5 kPa» (p. 52)";
+        let revisadas = VerificadorPaginas::revisar(parafrasis, &registro);
+        assert!(
+            VerificadorPaginas::nota(&revisadas).is_none(),
+            "{revisadas:?}"
         );
     }
 

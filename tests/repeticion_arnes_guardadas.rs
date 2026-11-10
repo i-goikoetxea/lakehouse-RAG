@@ -15,12 +15,12 @@
 //! `$env:CRUDAS_GUARDADAS="a.jsonl;b.jsonl"; $env:SALIDA_REPETICION="salida.json";
 //!  cargo test --test repeticion_arnes_guardadas -- --ignored --nocapture`
 
+use chrono::NaiveDate;
 use lakehouse_rag::application::dtos::tools::{ToolCall, ToolResult};
 use lakehouse_rag::application::use_cases::arnes_turno::{
     ENCABEZADO_VERIFICACION_PAGINAS, IntentDetector, PostInferenceGuard, RegistroTurno,
     VerificadorPaginas,
 };
-use chrono::NaiveDate;
 use serde_json::{Value, json};
 
 struct RespuestaGuardada {
@@ -50,7 +50,10 @@ fn sin_bloque_de_verificacion(respuesta: &str) -> (String, usize) {
 fn registro_de_herramientas(herramientas: &[Value]) -> RegistroTurno {
     let mut registro = RegistroTurno::default();
     for (indice, herramienta) in herramientas.iter().enumerate() {
-        let nombre = herramienta["nombre"].as_str().unwrap_or_default().to_string();
+        let nombre = herramienta["nombre"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string();
         registro.registrar_llamada(&ToolCall {
             id: format!("guardada_{indice}"),
             name: nombre.clone(),
@@ -108,7 +111,9 @@ fn registro_aguja(caso: &Value) -> RegistroTurno {
 /// inyectó entonces como fecha de hoy
 fn fecha_de_la_ejecucion(ruta: &str) -> Option<NaiveDate> {
     let nombre = ruta.rsplit(['/', '\\']).next()?;
-    let sello = nombre.split('_').find(|parte| parte.len() > 8 && parte.as_bytes()[8] == b'T')?;
+    let sello = nombre
+        .split('_')
+        .find(|parte| parte.len() > 8 && parte.as_bytes()[8] == b'T')?;
     NaiveDate::parse_from_str(&sello[..8], "%Y%m%d").ok()
 }
 

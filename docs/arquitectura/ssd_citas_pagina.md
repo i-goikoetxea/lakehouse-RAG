@@ -89,27 +89,32 @@ Se aplica igual al extracto y a las fuentes (estas, tras quitar las marcas y rec
 
 ### 5.3 Resultado por extracto
 
-Con C = páginas citadas y V = páginas que cubre cada aparición del esqueleto en las fuentes con página:
+Con C = páginas citadas y V = páginas que cubre cada aparición del esqueleto en las fuentes con página.
+
+**Regla (2026-11-10, `arreglos_generales_20261110.md`): solo se anota con evidencia positiva de error. En caso de duda, silencio.**
 
 | Caso | Condición | Qué hace |
 | :- | :- | :- |
-| Confirmada | Todas las apariciones dan el mismo V y V = C | Nada |
-| Discrepante | Todas dan el mismo V y V ≠ C (incluye citar el rango del chunk cuando el extracto está en una página) | Corrige: «la respuesta cita C; el extracto está en V» |
-| Ambigua | Dos o más V distintos | Lo dice: «aparece en V1 y V2: no se puede confirmar la página» |
-| Sin página | Solo aparece en fuentes sin marcas | «el texto no tiene página registrada (p. ej., Markdown): la página citada no se puede comprobar» |
-| No encontrada | No aparece | «no aparece literalmente en lo consultado en este turno: la página no está verificada» |
+| Confirmada | Alguna aparición comparte página con C (V ∩ C ≠ ∅): la página exacta, el rango que la contiene o una de las páginas de un extracto a caballo | Nada |
+| Discrepante | El extracto aparece en un solo lugar (un único V) y V ∩ C = ∅ | Corrige: «la respuesta cita C, pero el texto está en V» |
+| Ambigua | Dos o más V distintos y ninguno toca C | Nada: un texto repetido (leyenda, encabezado) puede estar también en C sin haberse consultado |
+| Sin página | Solo aparece en fuentes sin marcas | Nada |
+| No encontrada | No aparece (paráfrasis, título, texto no consultado) | Nada |
 
 Dos apariciones con el mismo V (el solape entre chunks, o el mismo texto en la búsqueda y en el subárbol) son una sola.
 
+Antes de esta regla se anotaban también Ambigua, Sin página, No encontrada y la cita de un rango que contiene la página (V ⊂ C): eran falsas alarmas sobre citas correctas. Citar el rango del chunk es impreciso, pero no erróneo; `pagina_exacta_estricta` lo sigue midiendo en los benchmarks.
+
 ### 5.4 Salida
 
-- Si algún extracto no está confirmado, se **añade** al final de la respuesta un bloque fijo que empieza por `ENCABEZADO_VERIFICACION_PAGINAS` («**Verificación automática de páginas**») con una línea por extracto, el extracto recortado a 80 caracteres. El texto del modelo no se reescribe: en una respuesta que ya se ha emitido en streaming no se puede cambiar lo mostrado.
+- Si algún extracto es Discrepante, se **añade** al final de la respuesta un bloque fijo que empieza por `ENCABEZADO_VERIFICACION_PAGINAS` («**Verificación automática de páginas**») con una línea por extracto, el extracto recortado a 80 caracteres. El texto del modelo no se reescribe: en una respuesta que ya se ha emitido en streaming no se puede cambiar lo mostrado.
 - En streaming el bloque se emite como un `TextDelta` más; en un turno retenido, junto con el resto. El `Completed` y el historial llevan la respuesta con el bloque.
-- Telemetría: un `ArnesIntervino` con la etapa nueva `VerificacionPagina` y un motivo por extracto no confirmado. La GUI la explica como «comprobación de páginas», sin jerga.
+- Telemetría: un `ArnesIntervino` con la etapa nueva `VerificacionPagina` y un motivo por extracto Discrepante. La GUI la explica como «comprobación de páginas», sin jerga.
 
 ### 5.5 Límites conocidos
 
-- Un extracto parafraseado no se encuentra: queda «no verificada», no se corrige.
+- Un extracto parafraseado no se encuentra: no se anota ni se corrige.
+- Un error que solo se demostraría con una página no consultada en el turno no se detecta (la regla exige ver el texto en otra página).
 - Una página citada lejos de su extracto (otra línea o más de 80 caracteres) no se comprueba.
 - La página es la física del fichero, no la impresa (`/PageLabels`).
 

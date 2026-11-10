@@ -867,6 +867,18 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_cita_en_duda_no_anade_bloque_ni_telemetria() {
+        for del_modelo in [
+            "Dice «una frase que no devolvió ninguna herramienta» (p. 52).",
+            &format!("Dice «{FRASE_DEL_DOCUMENTO}» (pp. 52-53)."),
+        ] {
+            let (respuesta, eventos, _) = turno_con_busqueda(del_modelo).await;
+            assert_eq!(respuesta, del_modelo);
+            assert!(etapas(&eventos).is_empty(), "{del_modelo}");
+        }
+    }
+
+    #[tokio::test]
     async fn test_el_mensaje_fijo_de_salida_segura_no_se_verifica() {
         let runner = RunnerDelArnes::con_guion(
             vec![Ok(TurnoDirigido::Llamada(llamada_lookup()))],
