@@ -14,6 +14,7 @@ Código de salida 1 si hay retrocesos frente a la base (CLAUDE.md §6).
 import argparse
 import hashlib
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -33,7 +34,8 @@ def compilar(ruta):
     r = correr(["cargo", "build", "--release", "--bin", "lakehouse_rag_cli"], cwd=ruta)
     if r.returncode:
         sys.exit("La compilación falló")
-    return Path(ruta) / "target" / "release" / "lakehouse_rag_cli.exe"
+    destino = Path(os.environ.get("CARGO_TARGET_DIR") or Path(ruta) / "target")
+    return destino / "release" / "lakehouse_rag_cli.exe"
 
 
 def sha256(ruta):
