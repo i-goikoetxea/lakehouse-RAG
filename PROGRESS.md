@@ -1301,3 +1301,22 @@
 - Fase 2: la página y el extracto en líneas distintas («Página del dato» y «Extracto literal») no se asocian; ocurre en 12 de 36 respuestas medidas (estimación fuera de la app).
 - Pendiente de la investigación: página impresa (`/PageLabels`). La app cita la física.
 - Compilación con `CARGO_TARGET_DIR` en el `target` de `benchmark-rgb-arnes-d142b4` (ahora también con el perfil debug), sin borrar nada. La aceptación descargó el modelo E5 (2,2 GB) a `target/fastembed_cache` de este worktree. `gen/schemas/*.json` quedan fuera de los commits.
+
+### Sesión Arreglos generales (2026-11-10) — Cinco mejoras sin retrocesos
+
+Rama `claude/arreglos-rag-512d66`, un commit por mejora. Informe: `benchmarks/informes/arreglos_generales_20261110.md` (empieza por los errores).
+
+- [x] Verificador de páginas: solo anota con evidencia positiva (extracto en un único lugar y ninguna de sus páginas citada). `ssd_citas_pagina.md` §5.3.
+- [x] Página en Capa 2: `cita.paginas` y `cita.pagina` (`⟦p. N⟧`) en el cruce; páginas del chunk de origen en la matriz. Sin cambio de esquema. `ssd_capa2_paginas_contexto.md`.
+- [x] `contexto_apartado` en el cruce: prosa del apartado sin filas, con marcas, ≤ 2 000 caracteres.
+- [x] `NegacionSinBusqueda` en el guard (turno retenido sin texto leído). `ssd_arnes_negaciones.md`.
+- [x] Capa 2 solo con intención tabular clara; `tablas_vinculadas` en búsqueda y subárbol. `ssd_arnes_capa2_intencion.md`.
+
+**Tests:** 953 pasan, 0 fallan, 35 `#[ignore]` (línea base 912/1 inestable/34). Clippy y fmt limpios. Herramienta ignorada `tests/repeticion_arnes_guardadas.rs`: 111 respuestas guardadas, 0 reintentos, avisos de página 49 → 0.
+
+**Medido con Claude (1 ejecución, Sonnet, binario `f845d65d…`):** Aguja y dos agujas sin cambios en las notas (todo 1,00) y avisos 4 → 0; ciclo de vida 1,000; RGB global 0,833 → 0,792 por `rechazo_estricto` 0,533 → 0,333 (fecha de vigor citada, que viene de la base; atribución supuesta) con `rechazo_semantico` 1,000.
+
+**Notas para la siguiente sesión:**
+- Medir con el set v2 los cuatro defectos del set oculto; la v2 de la mejora 4 se ajustó con respuestas propias (sesgo declarado en el SSD).
+- Decidir si `rechazo_estricto` debe ignorar una fecha que está en la cita de la tool, o ejecutar RGB con el binario de la base para atribuir la bajada.
+- Sigue abierto el falso bloqueo «-20» de `CifraEnAbstencion` en RGB.
