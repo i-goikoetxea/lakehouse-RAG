@@ -39,6 +39,13 @@
 | **6** | Calidad de datos: fecha nula, apartados, origen del responsable | `[COMPLETADO]` | 566 pasan, 31 ignorados |
 | **7** | Hitos, roles e índice para documentos largos; esquema v5 | `[COMPLETADO]` (pendiente de commit; merge congelado hasta la revisión del usuario) | 600 pasan, 31 ignorados; aceptación real 10/10 en 5 pasadas seguidas |
 
+### Citas de página exacta (rama `claude/citas-pagina-209ed5`; contrato en `docs/arquitectura/ssd_citas_pagina.md`)
+
+| Fase | Título | Estado | Tests |
+| :---: | :--- | :---: | :---: |
+| **1** | Guardar y mostrar: `saltos_pagina` en 02 (esquema v6), marcas `⟦p. N⟧`, `titulo` y `fecha_vigor` en `cita` | `[COMPLETADO]` (pendiente de aprobación del usuario; sin push ni merge) | 913 pasan, 34 ignorados |
+| **2** | Comprobar: `VerificadorPaginas` en el arnés | `[COMPLETADO]` (pendiente de aprobación del usuario; sin push ni merge) | 913 pasan, 34 ignorados; Aguja 5 × 3 con `pagina_exacta_estricta` 1,00 |
+
 *Estados posibles:* `[NO INICIADO]`, `[EN PROGRESO]`, `[COMPLETADO]`, `[BLOQUEADO]`
 
 ---
@@ -1257,3 +1264,40 @@
 - Los centros existentes no se recrean. Lo ya ingerido conserva los cortes de 600 hasta que se reingiera en un centro nuevo; un provisional que se reintenta ya fragmenta con 512.
 - Riesgo restante, visible en el aviso de truncado: texto sin espacios, porque la estimación subcuenta, y breadcrumbs de más de unos 144 tokens estimados.
 - Compilación con `CARGO_TARGET_DIR` en el `target` de `arnes-guard-rechazo` y `FASTEMBED_CACHE_DIR` en `target/fastembed_cache` del checkout principal, sin borrar nada.
+
+### Sesión Citas de página (2026-11-09 y 2026-11-10) — Fases 1 y 2: saltos de página, marcas y verificación
+
+**Estado: implementado y medido con Claude real. Pendiente de aprobación del usuario; sin push ni merge.** Contrato: `docs/arquitectura/ssd_citas_pagina.md`. Origen: §4 de `docs/arquitectura/investigacion_citas_pagina.md`. Informe: `benchmarks/informes/aguja_citas_pagina_20261110.md`.
+
+**Aviso para el usuario: el esquema pasa a v6 y no hay migración. Los centros v5 se rechazan al abrirlos: hay que crear centros nuevos y reingerir los documentos. Los datos de los centros anteriores no se tocan.**
+
+**Fase 1 (guardar y mostrar):**
+- [x] `02_chunks_normativa.saltos_pagina`: `List<Struct<desplazamiento, pagina>>` nulable, en bytes desde el inicio de `texto_contenido`. `VERSION_ESQUEMA_CENTRO = 6`. `SaltoPagina` pasa al dominio (`domain/services/marcas_pagina.rs`).
+- [x] Marcas `⟦p. N⟧` en `texto` de `search_normative_context` y `stair_get_subtree_context`, solo en la respuesta. `⟦ ⟧` del documento se neutralizan a `[ ]`. En el subárbol no cuentan para `desde_caracter`.
+- [x] `cita` añade `titulo` y, solo si existe, `fecha_vigor`. La `nota` de las dos tools explica las marcas y pide un extracto literal junto a la página.
+- [x] Un PDF sin estructura («Contenido General») guarda ya sus saltos: antes todos sus chunks citaban el rango del documento entero.
+- [x] Arnés: la página de una marca queda anclada; el respaldo por cita literal ignora las marcas y los saltos de línea.
+
+**Fase 2 (comprobar):**
+- [x] `arnes_turno/verificador_paginas.rs`: extracto entre comillas con una página en la misma línea → esqueleto normalizado → búsqueda en los textos marcados del turno. Resultados: confirmada, discrepante (se corrige), ambigua (se dice), sin página y no encontrada. No rechaza: añade el bloque «Verificación automática de páginas» y la etapa `VerificacionPagina`. Un título o breadcrumb entre comillas no se revisa.
+
+**Benchmark:** `run_aguja.py --dos-agujas`, `valor_y_pagina`, `pagina_exacta_estricta_modelo`, `mismo_chunk` y coste de las marcas. El evaluador lee «Página del dato: N».
+
+**Tests:** 913 pasando, 0 fallos, 34 `#[ignore]`. `cargo clippy --all-targets -- -D warnings` y `cargo fmt --check`: OK. 215 tests de Python en `benchmarks/`. Rojo verificado: 30 unitarios en una pasada (dominio, ingesta, Arrow, tools, guard, verificador y orquestador), 1 del verificador (metadatos) y los de Python. Nuevas suites: `tests/adversarial_citas_pagina_tests.rs` (20 casos: espacios y guiones partidos, comillas tipográficas y ligaduras, extracto repetido en dos páginas, marcas falsas, chunks sin saltos o con saltos corruptos, Markdown, valores frontera y entradas desmesuradas) y `tests/integration_citas_pagina.rs` (4 casos sobre LanceDB real).
+
+**Medido con Claude real (Sonnet, binario release sha256 `4dc641b5…`, commit `dd65d2e`):**
+- Campaña Aguja 5 × 3 (77,7 min, 30 consultas, 0 fallos): `pagina_exacta_estricta` pasa de 0,00 a 1,00, también sobre el texto del modelo sin el bloque de verificación. `recall_aguja`, `pagina_exacta`, `seccion_real` y la recuperación por MCP siguen en 1,00. Arnés: 0 reintentos, 0 salidas seguras, 0 notas de verificación.
+- Dos agujas en páginas consecutivas del mismo chunk (3 repeticiones, 6 consultas): `valor_y_pagina` 1,00 y `mismo_chunk` 1,00. 4 notas de verificación, todas «ambigua» y correctas: la frase citada está en las dos páginas.
+- Las marcas ocupan el 0,57 % de la salida de `search_normative_context`.
+- `acceptance_8_problemas` con Sonnet: 10/11. Falla `p2_tabla_cruce_exacto_con_nota_y_fronteras` en dos pasadas por su oráculo: la respuesta da 125 °C y descarta el orden invertido, pero menciona «100 °C» en una frase sin «invert…» ni «descart…». No usa páginas ni marcas.
+
+**No medido:**
+- La suite base no se pudo contar entera antes de empezar: se editó `src/` mientras compilaba y los doc-tests fallaron por esa edición. Los 31 binarios cuyo resultado quedó en el registro pasaron sin fallos.
+- La ingesta media de la campaña sube de 183 s a 250 s (mínimo igual, 6 de 15 por encima de 300 s). La causa no se midió.
+- El caso «discrepante» de la fase 2 solo está cubierto por tests: el modelo no citó ninguna página equivocada.
+
+**Notas para la siguiente sesión:**
+- Oráculo de P2: frágil ante redacciones correctas. Decisión del usuario.
+- Fase 2: la página y el extracto en líneas distintas («Página del dato» y «Extracto literal») no se asocian; ocurre en 12 de 36 respuestas medidas (estimación fuera de la app).
+- Pendiente de la investigación: página impresa (`/PageLabels`). La app cita la física.
+- Compilación con `CARGO_TARGET_DIR` en el `target` de `benchmark-rgb-arnes-d142b4` (ahora también con el perfil debug), sin borrar nada. La aceptación descargó el modelo E5 (2,2 GB) a `target/fastembed_cache` de este worktree. `gen/schemas/*.json` quedan fuera de los commits.

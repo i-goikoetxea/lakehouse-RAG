@@ -123,4 +123,6 @@ Dos apariciones con el mismo V (el solape entre chunks, o el mismo texto en la b
 
 - `acceptance_8_problemas`, una pasada con Sonnet.
 - Campaña Aguja 5 × 3 con el binario release de esta rama. `pagina_exacta_estricta` se mide sobre la respuesta completa y también sobre el texto del modelo sin el bloque de verificación (`pagina_exacta_estricta_modelo`), para separar el efecto de las marcas (fase 1) del de la corrección (fase 2).
-- Variante de dos agujas casi iguales en páginas consecutivas del mismo chunk, con métrica conjunta valor + página (`valor_y_pagina`), 3 repeticiones.
+- Variante de dos agujas casi iguales en páginas consecutivas del mismo chunk, con métrica conjunta valor + página (`valor_y_pagina`), 3 repeticiones. Acierta si la respuesta da el valor de esa aguja y cita sola su página; el valor o la página de la otra aguja solo se admiten en una línea que nombre el lote de la otra.
+
+Resultados: [`benchmarks/informes/aguja_citas_pagina_20261110.md`](../../benchmarks/informes/aguja_citas_pagina_20261110.md).
