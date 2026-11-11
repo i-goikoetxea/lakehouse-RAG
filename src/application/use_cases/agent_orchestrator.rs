@@ -93,6 +93,7 @@ impl AgentOrchestrator {
             12. REGLA DE AUDITORÍA: Aunque los datos o el texto de una tabla ya figuren en el historial de turnos previos, tienes PROHIBIDO resolver cruces tabulares leyendo del contexto de la conversación. Debes invocar obligatoriamente `lookup_double_entry_table` en el turno actual para garantizar la resolución determinista de Capa 2 y poblar la telemetría del Studio.\n\
             13. Ejes de tabla: si lookup_double_entry_table devuelve ejes_ambiguos, los dos órdenes de valor_x y valor_y dan celdas distintas. Decide qué valor corresponde a cada eje por las unidades o los nombres de los ejes y dilo en la respuesta, nombrando ambos ejes. Si no lo distinguen, muestra ambos valores o pregunta: nunca elijas uno en silencio. Si devuelve orden_invertido_resolveria, comprueba los ejes y, si estaban cambiados, repite la llamada con ese orden; no des un valor sin esa nueva llamada.\n\
             14. Lo que no consta: si las herramientas no devuelven el dato pedido, di que no consta y termina ahí, sin ofrecer valores de referencia, rangos típicos ni cifras de otros documentos o parámetros, salvo que el operador los pida. Si el operador los pide, di que no son datos del centro. Sí debes dar lo preguntado que sí consta, con sus cifras.\n\
+            15. Preguntas que cruzan varias partes: si la pregunta combina dos o más entidades, documentos o condiciones (por ejemplo, varias preguntas seguidas o datos de cosas distintas), lanza una search_normative_context separada para cada parte, con solo los términos de esa parte, en vez de una consulta que las mezcle. Antes de decir que una parte no consta, consulta inspect_lakehouse_catalog y haz una segunda búsqueda dirigida solo a esa parte: restringida con doc_id si el catálogo muestra un documento candidato o, si no, en modo EXACT_BM25 con otros términos de la pregunta (códigos, identificadores o palabras literales).\n\
             {1}",
             centro_id.as_str(),
             INVENTARIO_TABLAS_V2
@@ -1216,6 +1217,27 @@ mod tests {
             "valores de referencia",
             "salvo que el operador los pida",
             "lo preguntado que sí consta",
+        ] {
+            assert!(regla.contains(exigido), "{exigido}");
+        }
+    }
+
+    #[test]
+    fn test_system_prompt_separa_las_busquedas_de_una_pregunta_que_cruza_varias_partes() {
+        let prompt = AgentOrchestrator::build_system_prompt(&CenterId::new("obra-a").unwrap());
+        let regla = prompt
+            .lines()
+            .find(|linea| linea.starts_with("15. "))
+            .expect("falta la regla 15");
+        for exigido in [
+            "dos o más entidades, documentos o condiciones",
+            "search_normative_context separada para cada parte",
+            "en vez de una consulta que las mezcle",
+            "Antes de decir que una parte no consta",
+            "inspect_lakehouse_catalog",
+            "segunda búsqueda dirigida solo a esa parte",
+            "doc_id",
+            "EXACT_BM25",
         ] {
             assert!(regla.contains(exigido), "{exigido}");
         }
