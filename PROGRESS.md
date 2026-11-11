@@ -1326,3 +1326,18 @@
 - Las decisiones D1 a D6 del §0 del SSD son del usuario.
 - Orden recomendado: 3c, 3a y 1 en paralelo; después la 2 (v7); después la 3b; después la 4. La 5, en otra rama.
 - Sin verificar: la API y la versión de `pdfium-render` y el tamaño de la DLL (van al spike de la Pieza 1); la latencia real de Haiku con este prompt.
+
+### Sesión Pieza 3a (2026-11-11): cuota por documento en `fusionar`
+
+**Estado: BLOQUEADA por retroceso (`CLAUDE.md` §6). No hacer merge del commit de la cuota.** Informe: `benchmarks/informes/pieza_3a_20261111.md`.
+
+- [x] TDD de la cuota en `busqueda.rs`: `CuotaDocumento` y `cuota_de_busqueda`. Se aplica sobre el ranking RRF completo, antes de truncar, y solo sin `doc_id`. 8 tests nuevos con fragmentos en ES, EN y FR, entre ellos la propiedad de salida idéntica con un documento sobre 50 rankings con semilla fija.
+- [x] Herramienta N3 sin Claude: `benchmarks/run_n3_cuota.py` (`preparar`, `medir`, `comparar`), con `tests/test_n3_cuota.py`.
+- [x] N0: antes, 913 aprobados, 0 fallos y 34 ignorados; después, 921, 0 y 34. `clippy` y `fmt` limpios.
+- **Errores y retrocesos:**
+  - El recall@8 de un documento no baja (23/23).
+  - Pero en las 10 preguntas de aguja, la cuota cambia 2 fragmentos del documento correcto por 2 ajenos, con un RRF entre 1,5 y 5 veces menor. En 7 de las 10 llevan cifras de distractores. Es ruido, y cuenta como retroceso.
+  - Las cruzadas no mejoran: 22/26 con los dos documentos y 19/26 con las dos referencias, con el top 8 idéntico en las 26. Las que fallan las llena una familia de documentos parecidos; ningún documento acapara el top 8.
+- El SSD se contradice: la fórmula `top_k − min(2, docs − 1)` frente a «6 de A y 2 de B». Se implementó 6 + 2.
+- **Para la siguiente sesión:** decidir si se descarta la 3a o se rediseña como cuota condicionada a un candidato competitivo. Antes hace falta un caso real en el que un documento acapare el top 8 (informe §4). La N3 se puede repetir sin coste con `run_n3_cuota.py medir` sobre un centro ya preparado.
+
