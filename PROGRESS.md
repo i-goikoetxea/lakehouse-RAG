@@ -1301,3 +1301,52 @@
 - Fase 2: la página y el extracto en líneas distintas («Página del dato» y «Extracto literal») no se asocian; ocurre en 12 de 36 respuestas medidas (estimación fuera de la app).
 - Pendiente de la investigación: página impresa (`/PageLabels`). La app cita la física.
 - Compilación con `CARGO_TARGET_DIR` en el `target` de `benchmark-rgb-arnes-d142b4` (ahora también con el perfil debug), sin borrar nada. La aceptación descargó el modelo E5 (2,2 GB) a `target/fastembed_cache` de este worktree. `gen/schemas/*.json` quedan fuera de los commits.
+
+### Sesión SSD de generalidad (2026-11-11): 4 piezas, solo diseño
+
+**Estado: SSD aprobado por el usuario con D1-D6 (2026-11-11), comunicado por la sesión principal. Recrear los centros y volver a ingerir está autorizado en el paso de la Pieza 2, con la destilación en Sonnet (nunca Opus; hoy es el valor por defecto en `claude_headless_distiller.rs:96`). La implementación va en sesiones nuevas que parten de esta rama. Sin código de producción, sin push ni merge.** Documento: `docs/arquitectura/ssd_generalidad_4_piezas.md`. Incorpora las decisiones vinculantes del debate con el mentor técnico y el criterio del usuario para la Pieza 1 (calidad y seguridad; la DLL no cuenta como inconveniente).
+
+- [x] **Pieza 1: pdfium-render en un proceso hijo aislado**, con DLL por ruta absoluta y sha256 fijado. Se retira `pdf-extract`.
+  - Compuerta por página: `LEGIBLE`, `DEGRADADA` o `SIN_TEXTO`, con estas señales: `U+FFFD` y C0/C1, PUA, y red contra mojibake por vocales del alfabeto (latín, griego o cirílico).
+  - Estado `LECTURA_DEGRADADA` por fila, `paginas_degradadas` en el catálogo y propagación en `aviso_contenido`.
+  - **Defecto verificado en `pdf-extract` 0.12.1:** en CFF, la codificación interna gana a `/Differences` (`lib.rs:406-434` y `:496-505`).
+- [x] **Pieza 2:** se mantiene la destilación LLM. Bloque `[p_ini, p_fin]` por la ventana mínima con las cabeceras y la subsecuencia creciente más larga de las claves de fila. Página por fila con clave + 2 valores cercanos y desempate por monotonía; si no, `None`. Se eliminan los literales `"Tabla {id}"` (`mapeo_destilacion.rs:1252` y `:1077`).
+- [x] **Esquema v7:** **hay que recrear los centros**, una vez, con las piezas 1 y 2 integradas.
+- [x] **Pieza 3:** detector estructural de JSON embebido en `parsear_salida_claude` e invariante `LlamadaEnCrudo` en todas las intenciones; cuota con relleno en `fusionar`; silencio rescatado y excepciones de título y cabecera antes de `Discrepante`.
+- [x] **Pieza 4:** verificador híbrido de procedencia.
+  - El LLM solo propone trazas de 4 tipos (`formato_o_escala`, `aritmetica`, `referencia_estructural`, `conteo_elementos`) y Rust las comprueba sobre `RegistroTurno`.
+  - Haiku con timeout de 10 s y falla cerrada.
+  - `CifraEnAbstencion` se endurece y se elimina `PETICIONES_DE_REFERENCIA`.
+- [x] **Pieza 5** (tool use nativo por MCP): solo diseño futuro, fuera de esta rama.
+- [x] **Protocolo de validación:** niveles N0-N6 sin Claude primero, criterios de no retroceso por pieza y subconjunto propuesto para la sesión evaluadora.
+
+**Tests:** no se han ejecutado, porque no hay cambios de código. **No se ha leído `docs/validacion/set_oculto*`.**
+
+**Notas para la siguiente sesión:**
+- Las decisiones D1 a D6 del §0 del SSD son del usuario.
+- Orden recomendado: 3c, 3a y 1 en paralelo; después la 2 (v7); después la 3b; después la 4. La 5, en otra rama.
+- Sin verificar: la API y la versión de `pdfium-render` y el tamaño de la DLL (van al spike de la Pieza 1); la latencia real de Haiku con este prompt.
+
+### Sesión Pieza 3c (2026-11-11): verificador de páginas
+
+**Estado: `[COMPLETADO]`, pendiente de aprobación del usuario. Rama `claude/pieza-3c-verificador-bbfb9d`, sin push ni merge.** Informe: `benchmarks/informes/pieza_3c_20261111.md`. No se ha leído `docs/validacion/set_oculto*`.
+
+- [x] Silencio rescatado de `claude/arreglos-rag-512d66` (solo `verificador_paginas.rs`): nota solo con `Discrepante`; `Confirmada` si alguna aparición corta las páginas citadas.
+- [x] Excepciones antes de `Discrepante`:
+  - metadato del turno (título o breadcrumb), ahora con cualquier resultado;
+  - cabecera: la cita cubre exactamente la primera línea de una página interior y esa línea no cierra con puntuación.
+  - **Es más estricta que el SSD:** la redacción original silenciaba un `Discrepante` verdadero, y lo detectó un test existente.
+- [x] Herramienta `tests/repeticion_arnes_guardadas.rs` (`#[ignore]`, sin datos) con errores sembrados.
+- [x] 5 tests adversariales adaptados al silencio en caso de duda.
+
+**Tests:** 921 pasan, 0 fallan y 35 ignorados (base 913/0/35). Clippy y fmt limpios.
+
+**Repetición sin Claude** (222 respuestas guardadas, 8 crudas):
+- reintentos: 0 → 0;
+- avisos: 99 → 0. Los 99 eran `NoEncontrada` de Aguja, con la página correcta (1,0), y salían de la reconstrucción de la fuente;
+- errores sembrados anotados: 31/31 → 31/31.
+
+**Notas para la siguiente sesión:**
+- No hay ningún `Discrepante` real en los datos guardados, y las excepciones a) y b) no se activaron. Su efecto real queda para la sesión evaluadora (propuesta en el §4 del informe).
+- `PALABRAS_DE_PAGINA` sigue siendo deuda (SSD §3c.3).
+- `ssd_citas_pagina.md` §5 describe todavía las notas de duda. Manda el SSD de generalidad.

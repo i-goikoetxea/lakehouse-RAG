@@ -101,22 +101,28 @@ fn test_adv_comillas_tipograficas_ligaduras_tildes_y_mayusculas() {
 // --- Ambigüedad ---
 
 #[test]
-fn test_adv_extracto_repetido_en_dos_paginas_es_ambiguo_y_se_dice() {
+fn test_adv_extracto_repetido_en_dos_paginas_no_se_anota_por_duda() {
     let fuente = format!("⟦p. 12⟧ {FRASE}.\n⟦p. 13⟧ {FRASE}.");
     let registro = busqueda(&[&fuente]);
+    // Una de sus apariciones está en la página citada: no hay error que señalar
     for citada in ["p. 12", "p. 13", "pp. 12-13"] {
         let revisadas = VerificadorPaginas::revisar(&format!("«{FRASE}» ({citada})"), &registro);
         assert_eq!(
             revisadas[0].resultado,
-            ResultadoCita::Ambigua {
-                apariciones: vec![paginas(&[12]), paginas(&[13])]
-            },
-            "{citada}: no se elige una"
+            ResultadoCita::Confirmada,
+            "{citada}"
         );
-        let nota = VerificadorPaginas::nota(&revisadas).unwrap();
-        assert!(nota.contains("p. 12") && nota.contains("p. 13"), "{nota}");
-        assert!(nota.contains("no se puede confirmar"), "{nota}");
+        assert!(VerificadorPaginas::nota(&revisadas).is_none(), "{citada}");
     }
+    // Ninguna citada: no se elige una, pero tampoco se acusa (puede ser un texto repetido)
+    let revisadas = VerificadorPaginas::revisar(&format!("«{FRASE}» (p. 20)"), &registro);
+    assert_eq!(
+        revisadas[0].resultado,
+        ResultadoCita::Ambigua {
+            apariciones: vec![paginas(&[12]), paginas(&[13])]
+        }
+    );
+    assert!(VerificadorPaginas::nota(&revisadas).is_none());
 }
 
 #[test]
@@ -140,8 +146,13 @@ fn test_adv_repetido_una_vez_a_caballo_y_otra_en_una_pagina_es_ambiguo() {
     let fuente = format!(
         "⟦p. 5⟧ El inspector de turno firma \n⟦p. 6⟧ el acta de recepción del lote de válvulas. {FRASE}."
     );
+    let registro = busqueda(&[&fuente]);
     assert_eq!(
-        resultado_unico(&format!("«{FRASE}» (p. 6)"), &busqueda(&[&fuente])),
+        resultado_unico(&format!("«{FRASE}» (p. 6)"), &registro),
+        ResultadoCita::Confirmada
+    );
+    assert_eq!(
+        resultado_unico(&format!("«{FRASE}» (p. 8)"), &registro),
         ResultadoCita::Ambigua {
             apariciones: vec![paginas(&[5, 6]), paginas(&[6])]
         }
@@ -294,16 +305,19 @@ fn test_adv_chunk_sin_saltos_o_con_saltos_corruptos_no_lleva_marca_ni_rompe() {
 }
 
 #[test]
-fn test_adv_cita_sobre_texto_sin_paginas_se_declara_no_comprobable() {
+fn test_adv_cita_sobre_texto_sin_paginas_no_es_comprobable_y_no_se_anota() {
     let registro = busqueda(&[&format!("{FRASE}.")]);
     let revisadas = VerificadorPaginas::revisar(&format!("«{FRASE}» (p. 3)"), &registro);
     assert_eq!(revisadas[0].resultado, ResultadoCita::SinPagina);
+    assert!(VerificadorPaginas::nota(&revisadas).is_none());
+    // El bloque, cuando lo hay, va al final y con su encabezado
+    let paginado = busqueda(&[&format!("⟦p. 1⟧ Intro.\n⟦p. 2⟧ {FRASE}.")]);
+    let revisadas = VerificadorPaginas::revisar(&format!("«{FRASE}» (p. 3)"), &paginado);
     let nota = VerificadorPaginas::nota(&revisadas).unwrap();
     assert!(
         nota.starts_with(&format!("\n\n{ENCABEZADO_VERIFICACION_PAGINAS}")),
         "{nota}"
     );
-    assert!(nota.contains("no se puede comprobar"), "{nota}");
 }
 
 #[tokio::test]
@@ -479,11 +493,12 @@ fn test_adv_comillas_sin_cerrar_anidadas_y_unicode_no_provocan_panico() {
 
 #[test]
 fn test_adv_el_bloque_de_verificacion_no_copia_un_extracto_gigante_ni_multilinea() {
-    let registro = busqueda(&["⟦p. 1⟧ nada que ver."]);
     let extracto = format!(
         "línea uno\n\n# título falso\n- viñeta falsa {}",
         "muy largo ".repeat(500)
     );
+    // El extracto está, pero en otra página: es un error real y se anota
+    let registro = busqueda(&[&format!("⟦p. 1⟧ nada que ver.\n⟦p. 2⟧ {extracto}")]);
     let revisadas = VerificadorPaginas::revisar(&format!("«{extracto}» (p. 1)"), &registro);
     let nota = VerificadorPaginas::nota(&revisadas).unwrap();
     assert!(nota.chars().count() < 400, "{}", nota.chars().count());
@@ -517,6 +532,14 @@ fn test_adv_miles_de_citas_y_fuente_enorme_terminan_pronto_y_con_tope() {
         "{:?}",
         inicio.elapsed()
     );
+    assert!(
+        VerificadorPaginas::nota(&revisadas).is_none(),
+        "lo no encontrado no se anota"
+    );
+    // Errores reales a montones: el bloque sigue con tope
+    let erroneas: String = (2..200).map(|i| format!("«{FRASE}» (p. {i})\n")).collect();
+    let revisadas = VerificadorPaginas::revisar(&erroneas, &registro);
+    assert_eq!(revisadas.len(), 32);
     let nota = VerificadorPaginas::nota(&revisadas).unwrap();
     assert!(nota.lines().count() <= 35);
 
