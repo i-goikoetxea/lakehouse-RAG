@@ -1304,7 +1304,7 @@
 
 ### Sesión SSD de generalidad (2026-11-11): 4 piezas, solo diseño
 
-**Estado: SSD cerrado y pendiente de aprobación del usuario. Sin código de producción, sin push ni merge.** Documento: `docs/arquitectura/ssd_generalidad_4_piezas.md`. Incorpora las decisiones vinculantes del debate con el mentor técnico y el criterio del usuario para la Pieza 1 (calidad y seguridad; la DLL no cuenta como inconveniente).
+**Estado: SSD aprobado por el usuario con D1-D6 (2026-11-11), comunicado por la sesión principal. Recrear los centros y volver a ingerir está autorizado en el paso de la Pieza 2, con la destilación en Sonnet (nunca Opus; hoy es el valor por defecto en `claude_headless_distiller.rs:96`). La implementación va en sesiones nuevas que parten de esta rama. Sin código de producción, sin push ni merge.** Documento: `docs/arquitectura/ssd_generalidad_4_piezas.md`. Incorpora las decisiones vinculantes del debate con el mentor técnico y el criterio del usuario para la Pieza 1 (calidad y seguridad; la DLL no cuenta como inconveniente).
 
 - [x] **Pieza 1: pdfium-render en un proceso hijo aislado**, con DLL por ruta absoluta y sha256 fijado. Se retira `pdf-extract`.
   - Compuerta por página: `LEGIBLE`, `DEGRADADA` o `SIN_TEXTO`, con estas señales: `U+FFFD` y C0/C1, PUA, y red contra mojibake por vocales del alfabeto (latín, griego o cirílico).
