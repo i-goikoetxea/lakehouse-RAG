@@ -1353,3 +1353,46 @@
 - `bundle.resources` no se aplica mientras el bundle esté desactivado (informe §7).
 - Pendiente: CFF sintético diferencial; `reporte_ya_ingerido` no refleja `LECTURA_DEGRADADA`; calibración con el set oculto por la sesión evaluadora.
 - Compilación con el `target` propio de este worktree. FastEmbed: `FASTEMBED_CACHE_DIR` en `target/fastembed_cache` de `citas-pagina-209ed5`.
+
+### Sesión Pieza 2 de generalidad (2026-11-11): página exacta de la Capa 2 por ventana de tabla
+
+**Estado: implementada y medida sin Claude en sintéticos, y con una destilación Sonnet cacheada por PDF público. Pendiente de aprobación del usuario; sin push ni merge.** La rama parte de la Pieza 1 y **sube a v7 una sola vez con las dos piezas**. Queda lista para integrar en `main`, con recreación de centros. Contrato: SSD §2, con los ajustes de §2.3.1 y §2.4. Informe: `benchmarks/informes/pieza_2_20261111.md`.
+
+**Errores y retrocesos (primero):**
+- **0 páginas falsas en la versión final**:
+  - sintéticos: 6 semillas, unas 21 000 filas, 8 escrituras y 10 estructuras;
+  - PDF públicos: 95 celdas con página, las 95 correctas.
+- **Durante el desarrollo, la medición N2 encontró 51 páginas falsas, y luego 4,** con el algoritmo del SSD tal como estaba escrito. Las causaban las claves numéricas que reaparecen como valores en la página vecina. Se corrigieron con dos reglas generales (SSD §2.3.1):
+  - los valores deben ir detrás de la clave;
+  - se prefieren las apariciones que abren línea.
+
+  Se depuraron con una semilla y se comprobaron con 5 semillas no vistas.
+- **Retroceso evitado:** sin «Tabla» en el título, `busqueda_tabla` con «Tabla N-X …» (uso real del agente) dejaba de encontrar la tabla. Ahora cae al código de la consulta.
+- **Cobertura baja en PDF reales:**
+  - MIL-STD-882E: 0 de 44 celdas (matrices de riesgo con valores repetidos);
+  - tabla 2 del paper de Transformer: 0 de 26, sin diagnosticar.
+- Un test de tiempo de la línea base falló una vez con carga y pasó al repetirlo.
+- Sin medir con Claude: `acceptance_8_problemas` y RGB.
+
+**Cambios:**
+- [x] `domain/services/anclaje_tabla.rs`, puro: bloque por la subsecuencia creciente más larga y las cabeceras, página por fila, desempate por la posición entre vecinas, tabla transpuesta en `None` y anulación de inversiones. Tokens Unicode, coma y punto decimal equivalentes, CJK por carácter. Sin listas de idioma.
+- [x] `FilaTabla.paginas`, con `pagina_inicio` y `pagina_fin` en 04. `FilaCelda.pagina`, con `pagina` en 05. **`VERSION_ESQUEMA_CENTRO` = 7**: un centro v6 se rechaza.
+- [x] `lookup_double_entry_table`: `cita.paginas` con la página de la fila o el bloque. `tabla_id` y `busqueda_tabla` responden al código de la etiqueta en cualquier idioma (`normalizacion::codigos_de_etiqueta`).
+- [x] Se eliminan `"Tabla {etiqueta}"` y `TABLA-` de `mapeo_destilacion.rs` y `lookup.rs`. Título `"{etiqueta} — {título}"`. Vinculación por sección, por bloque (corta el bloque y menciona una clave) y por etiqueta distintiva.
+- [x] Herramientas N2:
+  - `examples/medir_anclaje.rs`, con los modos `sinteticos` y `pdf`;
+  - `benchmarks/anclaje/generar_sinteticos.py`, `puntuar.py` y `oraculo_pypdf.py`.
+
+**Tests:**
+- Línea base en `1f51bae`: 975 pasan, 0 fallan, 34 ignorados.
+- Final: **1015 pasan, 0 fallan, 34 ignorados**. En la ejecución completa pasaron 1014; el test adversarial de valores de 10 000 caracteres, escrito con la regla antigua, se corrigió y se repitió aparte.
+- Suites nuevas: `tests/integration_paginas_tabla.rs` (3) y `tests/adversarial_anclaje_tabla_tests.rs` (5).
+- Unitarios nuevos en `anclaje_tabla`, `normalizacion`, `mapeo_destilacion` y `lookup`.
+- Actualizados por el cambio de contrato: los tests de versión 6 → 7, el título sin «Tabla» (`integration_gui_v2`, `mapeo_destilacion`) y el centro rechazado, que ahora es v6.
+- `cargo clippy --all-targets -- -D warnings` y `cargo fmt --check`: OK.
+
+**Notas para la siguiente sesión:**
+- **Integrar las Piezas 1 y 2 juntas.** Después, recrear los centros y volver a ingerir: lo coordina la sesión principal.
+- Fuera de alcance, sin tocar: el literal `"Tabla {n}"` de `markdown_parser.rs:290` (título por defecto de una tabla Markdown sin título) y las listas de `intent_detector.rs` (Pieza 5).
+- Pendiente: diagnosticar la cobertura nula en matrices de riesgo y en la tabla 2 del paper. La sesión evaluadora debería comprobar la página de las respuestas con `lookup`.
+- Compilación con el `target` del worktree `pieza-1-pdfium-c5ed7b`. Los datos de N2 están en `benchmarks/.cache/anclaje/`, ignorado; los paquetes destilados se reutilizan sin Claude.

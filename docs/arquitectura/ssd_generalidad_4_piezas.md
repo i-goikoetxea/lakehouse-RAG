@@ -285,7 +285,21 @@ Si no lo es, `bloque = None` y todas las filas quedan en `None`.
 
 **4. Señal opcional:** la banda `y` de pdfium se deja para una versión posterior. Exigiría guardar coordenadas en `ParsedDocument`, y eso complica el contrato de ingesta. **No entra.**
 
+#### 2.3.1 Ajustes de la implementación (11-11-2026)
+
+Todos endurecen el algoritmo: solo pueden cambiar una página por `None`, nunca al revés.
+- **Bloque de una página:** solo reciben la página las filas cuya clave aparece en ella. Una fila destilada que no está en el texto (inventada o de otra página no reconocida) queda en `None`.
+- **Una aparición de la clave solo cuenta si sus valores van detrás:** en su línea, después de la clave, o en las 2 líneas siguientes **de la misma página**. Se exigen `min(2, valores)` valores distintos. Esto vale también para elegir el bloque: la subsecuencia creciente usa solo estas apariciones. Lo que precede a la clave es de otra fila. Sin esta regla, la medición N2 dio **51 páginas falsas** en tablas con claves numéricas que reaparecen como valores en la página vecina: el bloque de una página «contenía» todas las claves.
+- **Apariciones que abren línea:** si alguna aparición válida de una clave es el primer token de su línea (la primera celda de una fila), se descartan las que van en medio de otra línea. Quedaban 4 páginas falsas por claves que cerraban una línea ajena. Sin ninguna que abra línea («unter 40 kg»), valen todas.
+- **Desempate:** por la posición en el texto entre las filas vecinas ya ancladas (anterior y siguiente), no solo por su página. Si las vecinas están en páginas distintas, la página sola no decide.
+- **Tabla transpuesta:** si las claves de fila se amontonan en pocas líneas (menos de `max(2, ⌈encontradas/2⌉)` líneas distintas), las «filas» destiladas son columnas del texto. En un bloque de varias páginas, todas quedan en `None`.
+- **Inversiones:** una fila con una página menor que la de una fila anterior, o mayor que la de una posterior, queda en `None` junto con la que la contradice.
+- **Escrituras sin espacios (Han y kana):** un token por carácter. Con la búsqueda por secuencia contigua equivale a los bigramas del §2.2.
+- **Tokens:** se separan letras y cifras (`S275` → `S`, `275`) en la clave y en el texto por igual.
+
 ### 2.4 Vinculación y literales
+
+> **Implementado (11-11-2026), con dos precisiones.** La vinculación por bloque exige que el rango de páginas del chunk **corte** el bloque y que el chunk mencione la clave de alguna fila. «Contener el bloque» no vinculaba una tabla partida entre dos chunks, y varios chunks de la misma página la vinculaban sin mencionarla. La etiqueta se reduce a su código **desde la primera palabra con cifras** (`Table 4-A` → `4-A`, `3. táblázat` → `3-TABLAZAT`). Esto sustituye también el prefijo español `TABLA-` de `mapeo_destilacion.rs` y `lookup.rs`. El lookup prueba los códigos del más al menos específico: el código, la única palabra con cifras y la etiqueta entera. Como el título ya no lleva «Tabla», `busqueda_tabla` (consultas del tipo «Tabla 7-C espesores», que aparecen en las respuestas guardadas) cae al código de la consulta cuando ninguna tabla contiene todas sus palabras.
 
 - Se elimina `"Tabla {etiqueta}"` (`:1252`). La tabla se vincula al chunk:
   - por su sección declarada o la del parser, como hoy;
