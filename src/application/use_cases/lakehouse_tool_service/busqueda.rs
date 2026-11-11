@@ -142,14 +142,92 @@ fn rangos(scores: &[Option<f32>]) -> Vec<Option<usize>> {
     rango
 }
 
+/// Cómo se reparte el top-k entre documentos
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CuotaDocumento {
+    /// Orden RRF puro
+    Ninguna,
+    /// Con dos o más documentos en el pool, ninguno ocupa más de `top_k − reservados` puestos
+    /// (al menos 1). Los huecos que los demás no llenan vuelven al ranking. Con uno, como `Ninguna`
+    Diversificar { reservados: usize },
+}
+
+/// Puestos del top-k que se dejan a otros documentos cuando la búsqueda no filtra por uno
+const PUESTOS_RESERVADOS_A_OTROS_DOCUMENTOS: usize = 2;
+
+/// Con un documento pedido no hay nada que repartir; sin él, se diversifica
+pub(crate) fn cuota_de_busqueda(doc_pedido: Option<&str>) -> CuotaDocumento {
+    match doc_pedido {
+        Some(_) => CuotaDocumento::Ninguna,
+        None => CuotaDocumento::Diversificar {
+            reservados: PUESTOS_RESERVADOS_A_OTROS_DOCUMENTOS,
+        },
+    }
+}
+
 /// Fusión RRF de la similitud vectorial y BM25 (BM25 = 0 no aporta rango). Sin `usar_bm25` o sin
-/// vector, ese motor no aporta nada: RRF queda como el orden del otro.
+/// vector, ese motor no aporta nada: RRF queda como el orden del otro. La cuota se aplica sobre el
+/// ranking RRF completo, antes de truncar a `top_k`.
 pub(crate) fn fusionar<'a>(
     fragmentos: &[&'a FragmentoIndexado],
     consulta: &str,
     vector_consulta: Option<&[f32]>,
     usar_bm25: bool,
     top_k: usize,
+    cuota: CuotaDocumento,
+) -> Vec<Puntuado<'a>> {
+    let ranking = ranking_rrf(fragmentos, consulta, vector_consulta, usar_bm25);
+    match cuota {
+        CuotaDocumento::Ninguna => ranking.into_iter().take(top_k).collect(),
+        CuotaDocumento::Diversificar { reservados } => {
+            seleccionar_con_cuota(ranking, top_k, reservados)
+        }
+    }
+}
+
+/// Primera pasada por ranking con el tope por documento; después, relleno con los descartados.
+/// Como ambas listas conservan el orden del ranking, la salida sigue ordenada por score
+fn seleccionar_con_cuota(ranking: Vec<Puntuado>, top_k: usize, reservados: usize) -> Vec<Puntuado> {
+    let documentos_en_pool = ranking
+        .iter()
+        .map(|p| p.fragmento.doc_id.as_str())
+        .collect::<HashSet<_>>()
+        .len();
+    if documentos_en_pool < 2 {
+        return ranking.into_iter().take(top_k).collect();
+    }
+    let maximo_por_documento = top_k.saturating_sub(reservados).max(1);
+    let mut ocupados: HashMap<&str, usize> = HashMap::new();
+    let mut aceptados: Vec<usize> = Vec::with_capacity(top_k);
+    let mut descartados: Vec<usize> = Vec::new();
+    for (posicion, puntuado) in ranking.iter().enumerate() {
+        if aceptados.len() == top_k {
+            break;
+        }
+        let ocupados_del_documento = ocupados.entry(&puntuado.fragmento.doc_id).or_default();
+        if *ocupados_del_documento < maximo_por_documento {
+            *ocupados_del_documento += 1;
+            aceptados.push(posicion);
+        } else {
+            descartados.push(posicion);
+        }
+    }
+    let huecos = top_k - aceptados.len();
+    aceptados.extend(descartados.into_iter().take(huecos));
+    aceptados.sort_unstable();
+    let mut elegidos: Vec<Option<Puntuado>> = ranking.into_iter().map(Some).collect();
+    aceptados
+        .into_iter()
+        .filter_map(|posicion| elegidos[posicion].take())
+        .collect()
+}
+
+/// Todos los fragmentos con score RRF positivo, por score descendente y, a igualdad, por id
+fn ranking_rrf<'a>(
+    fragmentos: &[&'a FragmentoIndexado],
+    consulta: &str,
+    vector_consulta: Option<&[f32]>,
+    usar_bm25: bool,
 ) -> Vec<Puntuado<'a>> {
     let tokens = tokenizar(consulta);
     let bm25: Vec<Option<f32>> = if usar_bm25 {
@@ -184,7 +262,6 @@ pub(crate) fn fusionar<'a>(
             .unwrap_or(std::cmp::Ordering::Equal)
             .then(a.fragmento.id.cmp(&b.fragmento.id))
     });
-    puntuados.truncate(top_k);
     puntuados
 }
 
@@ -497,7 +574,14 @@ impl LakehouseToolService {
             },
         };
         let usar_bm25 = params.modo != ModoBusqueda::SoloSemantico;
-        let puntuados = fusionar(&elegibles, consulta, vector.as_deref(), usar_bm25, top_k);
+        let puntuados = fusionar(
+            &elegibles,
+            consulta,
+            vector.as_deref(),
+            usar_bm25,
+            top_k,
+            cuota_de_busqueda(doc_pedido),
+        );
         let aviso = aviso_documento.or(aviso_vector);
         Ok(json!({
             "centro_id": contexto.centro.as_str(),
@@ -583,6 +667,7 @@ mod tests {
             Some(&[1.0, 0.0]),
             true,
             10,
+            CuotaDocumento::Ninguna,
         );
         let grupos = agrupar_por_tema(&puntuados, &HashMap::new());
         let ensayos = grupos
@@ -615,10 +700,27 @@ mod tests {
         );
         let b = fragmento("b", "D", 2, "2. Recepcion", "descarga del camion", vec![]);
         let todos = [&a, &b];
-        let puntuados = fusionar(&todos, "acopio", Some(&[1.0, 0.0]), true, 5);
+        let puntuados = fusionar(
+            &todos,
+            "acopio",
+            Some(&[1.0, 0.0]),
+            true,
+            5,
+            CuotaDocumento::Ninguna,
+        );
         assert_eq!(puntuados.len(), 1);
         assert_eq!(puntuados[0].fragmento.id, "a");
-        assert!(fusionar(&todos, "inexistente", None, true, 5).is_empty());
+        assert!(
+            fusionar(
+                &todos,
+                "inexistente",
+                None,
+                true,
+                5,
+                CuotaDocumento::Ninguna
+            )
+            .is_empty()
+        );
     }
 
     #[test]
@@ -626,12 +728,19 @@ mod tests {
         let a = fragmento("a", "D", 2, "1. Uno", "palabra rara", vec![0.0, 1.0]);
         let b = fragmento("b", "D", 2, "2. Dos", "otro texto", vec![1.0, 0.0]);
         let todos = [&a, &b];
-        let solo_vector = fusionar(&todos, "rara", Some(&[1.0, 0.0]), false, 5);
+        let solo_vector = fusionar(
+            &todos,
+            "rara",
+            Some(&[1.0, 0.0]),
+            false,
+            5,
+            CuotaDocumento::Ninguna,
+        );
         assert_eq!(
             solo_vector[0].fragmento.id, "b",
             "ignora la coincidencia léxica"
         );
-        let solo_bm25 = fusionar(&todos, "rara", None, true, 5);
+        let solo_bm25 = fusionar(&todos, "rara", None, true, 5, CuotaDocumento::Ninguna);
         assert_eq!(solo_bm25.len(), 1);
         assert_eq!(solo_bm25[0].fragmento.id, "a");
     }
@@ -651,7 +760,7 @@ mod tests {
         let mut provisional = fragmento("p", "PROV", 5, "4. Ensayos", "ensayo", vec![]);
         provisional.estado_contenido = Some(EstadoContenido::ParcialUniversal);
         let todos = [&vigente, &provisional];
-        let puntuados = fusionar(&todos, "ensayo", None, true, 5);
+        let puntuados = fusionar(&todos, "ensayo", None, true, 5, CuotaDocumento::Ninguna);
         let mut revisiones = HashMap::new();
         revisiones.insert(
             ("PROV".to_string(), 1),
@@ -677,7 +786,7 @@ mod tests {
     }
 
     fn resultado_unico(f: &FragmentoIndexado, datos: DatosRevision) -> Value {
-        let puntuados = fusionar(&[f], "presion", None, true, 5);
+        let puntuados = fusionar(&[f], "presion", None, true, 5, CuotaDocumento::Ninguna);
         let mut revisiones = HashMap::new();
         revisiones.insert((f.doc_id.clone(), 1), datos);
         agrupar_por_tema(&puntuados, &revisiones)[0]["resultados"][0].clone()
@@ -788,5 +897,238 @@ mod tests {
         assert_eq!(tema(&f), "ENSAYOS");
         let sin = fragmento("y", "D", 2, "", "", vec![]);
         assert_eq!(tema(&sin), "D#y");
+    }
+
+    // --- Cuota por documento (SSD de generalidad, Pieza 3a) ---
+
+    const CUOTA_POR_DEFECTO: CuotaDocumento = CuotaDocumento::Diversificar { reservados: 2 };
+
+    /// Fragmentos de un documento cuya similitud con `[1, 0]` decrece con el índice
+    fn serie(doc: &str, textos: &[&str], similitud_maxima: f32) -> Vec<FragmentoIndexado> {
+        textos
+            .iter()
+            .enumerate()
+            .map(|(i, texto)| {
+                let x = similitud_maxima - 0.05 * i as f32;
+                fragmento(
+                    &format!("{doc}-{i:02}"),
+                    doc,
+                    2,
+                    "1. Apartado",
+                    texto,
+                    vec![x, (1.0 - x * x).max(0.0).sqrt()],
+                )
+            })
+            .collect()
+    }
+
+    fn ids(puntuados: &[Puntuado]) -> Vec<String> {
+        puntuados.iter().map(|p| p.fragmento.id.clone()).collect()
+    }
+
+    const TEXTOS_ES: [&str; 10] = [
+        "presión de prueba hidrostática",
+        "tiempo de mantenimiento de la presión",
+        "temperatura del agua de prueba",
+        "espesor de la junta de brida",
+        "pérdida de presión admisible",
+        "registro de la prueba",
+        "responsable de la inspección",
+        "equipos de medida calibrados",
+        "condiciones de seguridad",
+        "criterio de aceptación",
+    ];
+    const TEXTOS_EN: [&str; 3] = [
+        "hydrostatic test pressure",
+        "holding time of the test",
+        "acceptance criteria for leaks",
+    ];
+    const TEXTOS_FR: [&str; 3] = [
+        "pression d'essai hydrostatique",
+        "durée de maintien de l'essai",
+        "critères d'acceptation",
+    ];
+
+    #[test]
+    fn test_cuota_documento_dominante_conserva_sus_seis_mejores_y_deja_dos_al_otro() {
+        let es = serie("ES-DOC", &TEXTOS_ES, 0.99);
+        let en = serie("EN-DOC", &TEXTOS_EN, 0.50);
+        let todos: Vec<&FragmentoIndexado> = es.iter().chain(&en).collect();
+        let sin_cuota = fusionar(
+            &todos,
+            "pressure",
+            Some(&[1.0, 0.0]),
+            false,
+            8,
+            CuotaDocumento::Ninguna,
+        );
+        assert!(sin_cuota.iter().all(|p| p.fragmento.doc_id == "ES-DOC"));
+        let con_cuota = fusionar(
+            &todos,
+            "pressure",
+            Some(&[1.0, 0.0]),
+            false,
+            8,
+            CUOTA_POR_DEFECTO,
+        );
+        assert_eq!(
+            ids(&con_cuota),
+            [
+                "ES-DOC-00",
+                "ES-DOC-01",
+                "ES-DOC-02",
+                "ES-DOC-03",
+                "ES-DOC-04",
+                "ES-DOC-05",
+                "EN-DOC-00",
+                "EN-DOC-01"
+            ],
+            "los 6 mejores del dominante, después los 2 mejores del otro, por score"
+        );
+        assert!(
+            con_cuota.windows(2).all(|par| par[0].score >= par[1].score),
+            "salida ordenada por score"
+        );
+    }
+
+    #[test]
+    fn test_cuota_con_tres_documentos_reparte_los_huecos_por_ranking() {
+        let es = serie("ES-DOC", &TEXTOS_ES, 0.99);
+        let en = serie("EN-DOC", &TEXTOS_EN, 0.70);
+        let fr = serie("FR-DOC", &TEXTOS_FR, 0.80);
+        let todos: Vec<&FragmentoIndexado> = es.iter().chain(&en).chain(&fr).collect();
+        let con_cuota = fusionar(&todos, "x", Some(&[1.0, 0.0]), false, 8, CUOTA_POR_DEFECTO);
+        let de = |doc: &str| {
+            con_cuota
+                .iter()
+                .filter(|p| p.fragmento.doc_id == doc)
+                .count()
+        };
+        assert_eq!((de("ES-DOC"), de("FR-DOC"), de("EN-DOC")), (6, 2, 0));
+    }
+
+    #[test]
+    fn test_cuota_sin_candidatos_del_otro_documento_rellena_con_el_dominante() {
+        let es = serie("ES-DOC", &TEXTOS_ES, 0.99);
+        // Sin vector y sin coincidencia léxica: el otro documento no entra en el pool
+        let en: Vec<FragmentoIndexado> = serie("EN-DOC", &TEXTOS_EN, 0.80)
+            .into_iter()
+            .map(|mut f| {
+                f.vector = vec![];
+                f
+            })
+            .collect();
+        let todos: Vec<&FragmentoIndexado> = es.iter().chain(&en).collect();
+        let con_cuota = fusionar(&todos, "zzz", Some(&[1.0, 0.0]), true, 8, CUOTA_POR_DEFECTO);
+        assert_eq!(con_cuota.len(), 8);
+        assert!(con_cuota.iter().all(|p| p.fragmento.doc_id == "ES-DOC"));
+    }
+
+    #[test]
+    fn test_cuota_con_un_solo_candidato_ajeno_rellena_el_hueco_restante() {
+        let es = serie("ES-DOC", &TEXTOS_ES, 0.99);
+        let fr = serie("FR-DOC", &TEXTOS_FR[..1], 0.30);
+        let todos: Vec<&FragmentoIndexado> = es.iter().chain(&fr).collect();
+        let con_cuota = fusionar(&todos, "x", Some(&[1.0, 0.0]), false, 8, CUOTA_POR_DEFECTO);
+        let de = |doc: &str| {
+            con_cuota
+                .iter()
+                .filter(|p| p.fragmento.doc_id == doc)
+                .count()
+        };
+        assert_eq!((de("ES-DOC"), de("FR-DOC")), (7, 1));
+    }
+
+    #[test]
+    fn test_cuota_con_top_k_uno_devuelve_el_mejor_fragmento() {
+        let es = serie("ES-DOC", &TEXTOS_ES, 0.99);
+        let en = serie("EN-DOC", &TEXTOS_EN, 0.80);
+        let todos: Vec<&FragmentoIndexado> = es.iter().chain(&en).collect();
+        let con_cuota = fusionar(&todos, "x", Some(&[1.0, 0.0]), false, 1, CUOTA_POR_DEFECTO);
+        assert_eq!(ids(&con_cuota), ["ES-DOC-00"]);
+    }
+
+    #[test]
+    fn test_cuota_con_top_k_menor_que_los_reservados_conserva_el_mejor() {
+        let es = serie("ES-DOC", &TEXTOS_ES, 0.99);
+        let en = serie("EN-DOC", &TEXTOS_EN, 0.80);
+        let fr = serie("FR-DOC", &TEXTOS_FR, 0.70);
+        let todos: Vec<&FragmentoIndexado> = es.iter().chain(&en).chain(&fr).collect();
+        let con_cuota = fusionar(&todos, "x", Some(&[1.0, 0.0]), false, 2, CUOTA_POR_DEFECTO);
+        assert_eq!(ids(&con_cuota), ["ES-DOC-00", "EN-DOC-00"]);
+    }
+
+    #[test]
+    fn test_cuota_solo_sin_filtro_de_documento() {
+        assert_eq!(cuota_de_busqueda(Some("DOC")), CuotaDocumento::Ninguna);
+        assert_eq!(cuota_de_busqueda(None), CUOTA_POR_DEFECTO);
+    }
+
+    /// Generador congruencial: rankings reproducibles sin dependencias nuevas
+    struct Semilla(u64);
+
+    impl Semilla {
+        fn siguiente(&mut self) -> u64 {
+            self.0 = self
+                .0
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            self.0 >> 33
+        }
+
+        fn real(&mut self) -> f32 {
+            (self.siguiente() % 10_000) as f32 / 10_000.0
+        }
+    }
+
+    #[test]
+    fn test_cuota_con_un_solo_documento_no_cambia_la_salida() {
+        let palabras: Vec<&str> = TEXTOS_ES
+            .iter()
+            .chain(&TEXTOS_EN)
+            .chain(&TEXTOS_FR)
+            .flat_map(|t| t.split(' '))
+            .collect();
+        let mut semilla = Semilla(20_261_111);
+        for ronda in 0..50 {
+            let cantidad = 1 + (semilla.siguiente() % 30) as usize;
+            let fragmentos: Vec<FragmentoIndexado> = (0..cantidad)
+                .map(|i| {
+                    let texto: Vec<&str> = (0..6)
+                        .map(|_| palabras[semilla.siguiente() as usize % palabras.len()])
+                        .collect();
+                    let vector = vec![semilla.real(), semilla.real(), semilla.real()];
+                    fragmento(
+                        &format!("f{i:02}"),
+                        "UNICO",
+                        2,
+                        "1. A",
+                        &texto.join(" "),
+                        vector,
+                    )
+                })
+                .collect();
+            let todos: Vec<&FragmentoIndexado> = fragmentos.iter().collect();
+            let consulta = palabras[semilla.siguiente() as usize % palabras.len()];
+            let vector = [semilla.real(), semilla.real(), semilla.real()];
+            let top_k = 1 + (semilla.siguiente() % 20) as usize;
+            let sin = fusionar(
+                &todos,
+                consulta,
+                Some(&vector),
+                true,
+                top_k,
+                CuotaDocumento::Ninguna,
+            );
+            let con = fusionar(
+                &todos,
+                consulta,
+                Some(&vector),
+                true,
+                top_k,
+                CUOTA_POR_DEFECTO,
+            );
+            assert_eq!(ids(&sin), ids(&con), "ronda {ronda}");
+        }
     }
 }
