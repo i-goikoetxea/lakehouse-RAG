@@ -200,6 +200,8 @@ pub fn schema_catalogo_tablas() -> SchemaRef {
             utf8("valor_salida_nombre"),
             utf8("instrucciones_uso_sql"),
             vector_nulable("vector_tabla"),
+            Field::new("pagina_inicio", DataType::Int32, true),
+            Field::new("pagina_fin", DataType::Int32, true),
         ],
     )
 }
@@ -226,6 +228,7 @@ pub fn schema_celdas_doble_entrada() -> SchemaRef {
         utf8_nulable("unidad_medida"),
         utf8_nulable("nota_pie_condicion"),
         nivel_prelacion(),
+        Field::new("pagina", DataType::Int32, true),
     ]);
     esquema_con_comunes(Some("celda_id"), especificas)
 }
@@ -302,7 +305,7 @@ mod tests {
 
     #[test]
     fn test_version_y_nombres_de_tabla_de_la_especificacion() {
-        assert_eq!(VERSION_ESQUEMA, 6);
+        assert_eq!(VERSION_ESQUEMA, 7);
         assert_eq!(
             TODAS_LAS_TABLAS,
             [

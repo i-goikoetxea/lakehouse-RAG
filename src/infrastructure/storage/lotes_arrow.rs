@@ -343,6 +343,8 @@ fn lote_tablas(
         texto(filas.iter().map(|f| f.valor_salida_nombre.as_str())),
         texto(filas.iter().map(|f| f.instrucciones_uso_sql.as_str())),
         vectores(&vectores_tabla)?,
+        paginas(filas.iter().map(|f| f.paginas.map(|(inicio, _)| inicio))),
+        paginas(filas.iter().map(|f| f.paginas.map(|(_, fin)| fin))),
     ];
     ensamblar(
         schema_catalogo_tablas(),
@@ -380,6 +382,7 @@ fn lote_celdas(
         texto_nulable(filas.iter().map(|f| f.unidad_medida.as_deref())),
         texto_nulable(filas.iter().map(|f| f.nota_pie_condicion.as_deref())),
         nivel(filas.iter().map(|f| f.nivel_prelacion.valor())),
+        paginas(filas.iter().map(|f| f.pagina)),
     ]);
     ensamblar(
         schema_celdas_doble_entrada(),

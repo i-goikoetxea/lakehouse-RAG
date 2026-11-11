@@ -13,7 +13,7 @@
 //!
 //! No calcula vectores: devuelve los textos a vectorizar y el servicio los rellena.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use chrono::Utc;
 
@@ -38,14 +38,18 @@ use crate::domain::models::operational_matrix::{
 };
 use crate::domain::models::reference_graph::TipoRelacionNormativa;
 use crate::domain::models::vigencia::{VentanaVigencia, validar_fecha_vigor};
+use crate::domain::services::anclaje_tabla::{
+    FilaParaAnclar, LineaPaginada, TablaParaAnclar, anclar_tabla, contiene_secuencia,
+};
 use crate::domain::services::arbol_secciones::{
     CODIGO_PREAMBULO, SeccionDelArbol, TITULO_PREAMBULO, clasificar_bloque, construir_arbol,
     resumen_extractivo,
 };
 use crate::domain::services::fragmentacion::fragmentar_con_posiciones;
-use crate::domain::services::marcas_pagina::saltos_del_tramo;
+use crate::domain::services::marcas_pagina::{pagina_en, saltos_del_tramo, saltos_validos};
 use crate::domain::services::normalizacion::{
-    codigo_canonico, normalizar_token, plegar_mayusculas, separar_revision,
+    codigo_canonico, codigo_de_etiqueta, codigo_de_palabras, normalizar_token, plegar_mayusculas,
+    separar_revision,
 };
 
 /// Tipo asumido cuando el LLM devuelve un `tipo_documento` fuera de vocabulario
@@ -56,8 +60,6 @@ const FASE_NO_ESPECIFICADA: &str = "NO_ESPECIFICADA";
 const OBJETO_NO_ESPECIFICADO: &str = "NO_ESPECIFICADO";
 /// Nombre de la magnitud de salida cuando el LLM no lo entrega
 const VALOR_SALIDA_POR_DEFECTO: &str = "valor_resultado";
-/// Prefijo canónico que se descarta al comparar etiquetas de tabla (`TABLA-4-A`)
-const PREFIJO_ETIQUETA_TABLA: &str = "TABLA-";
 /// Contexto de las aristas que añade la ingesta como red de seguridad
 const CONTEXTO_ARISTA_SINTETIZADA: &str =
     "Arista añadida por la ingesta: el hito rellena este registro";
@@ -301,7 +303,7 @@ fn mapear_con_estado(
         origenes_rebajados,
     } = filas_hitos(clave, nivel, &paquete.hitos, &secciones, &chunk_ids)?;
     let (tablas, textos_tablas, celdas) =
-        filas_tablas_y_celdas(clave, nivel, &paquete.tablas, &parsed.tablas);
+        filas_tablas_y_celdas(clave, nivel, &paquete.tablas, parsed);
     let etiquetas = etiquetas_de_tabla(&paquete.tablas, &tablas);
     let aristas = filas_aristas(clave, &paquete.aristas, &hitos, &etiquetas);
 
@@ -958,6 +960,7 @@ fn fila_celda(
     celda_id: String,
     celda: &CeldaDestilada,
     tabla_parseada: Option<&ParsedTableRaw>,
+    pagina: Option<u32>,
 ) -> FilaCelda {
     let nota = celda
         .nota_pie_condicion
@@ -976,6 +979,7 @@ fn fila_celda(
         unidad_medida: celda.unidad_medida.as_deref().and_then(texto_opcional),
         nota_pie_condicion: nota,
         nivel_prelacion: nivel,
+        pagina,
     }
 }
 
@@ -985,8 +989,9 @@ fn filas_tablas_y_celdas(
     clave: &ClaveDocumental,
     nivel: NivelPrelacion,
     tablas: &[TablaDestilada],
-    parseadas: &[ParsedTableRaw],
+    parsed: &ParsedDocument,
 ) -> TablasMapeadas {
+    let lineas = lineas_paginadas(parsed);
     let mut filas_tabla = Vec::with_capacity(tablas.len());
     let mut textos = Vec::with_capacity(tablas.len());
     let mut filas_celda = Vec::new();
@@ -997,26 +1002,103 @@ fn filas_tablas_y_celdas(
             TipoEntidad::Tabla,
             idx_tabla,
         );
-        let parseada = tabla_parseada(tabla, parseadas, tablas.len());
-        for celda in &tabla.celdas {
+        let parseada = tabla_parseada(tabla, &parsed.tablas, tablas.len());
+        let (para_anclar, fila_de_celda) = tabla_para_anclar(tabla);
+        let anclaje = anclar_tabla(&lineas, &para_anclar);
+        for (celda, fila) in tabla.celdas.iter().zip(fila_de_celda) {
             let celda_id = id_versionado(
                 &clave.doc_id,
                 clave.version_num,
                 TipoEntidad::Celda,
                 filas_celda.len(),
             );
+            let pagina = fila.and_then(|f| anclaje.por_fila[f]);
             filas_celda.push(fila_celda(
-                clave, nivel, &tabla_id, celda_id, celda, parseada,
+                clave, nivel, &tabla_id, celda_id, celda, parseada, pagina,
             ));
         }
-        let fila = fila_tabla(clave, &tabla_id, tabla);
+        let fila = fila_tabla(clave, &tabla_id, tabla, anclaje.bloque);
         textos.push(texto_vectorizable_tabla(&fila));
         filas_tabla.push(fila);
     }
     (filas_tabla, textos, filas_celda)
 }
 
-fn fila_tabla(clave: &ClaveDocumental, tabla_id: &str, tabla: &TablaDestilada) -> FilaTabla {
+/// Texto paginado del documento, línea a línea (`ssd_generalidad_4_piezas.md` §2.2). Vacío en
+/// formatos sin páginas o con saltos inválidos: la tabla queda sin página
+fn lineas_paginadas(parsed: &ParsedDocument) -> Vec<LineaPaginada<'_>> {
+    parsed
+        .secciones
+        .iter()
+        .filter(|seccion| saltos_validos(&seccion.contenido, &seccion.saltos_pagina))
+        .flat_map(|seccion| {
+            let mut desplazamiento = 0;
+            seccion
+                .contenido
+                .split_inclusive('\n')
+                .filter_map(move |linea| {
+                    let inicio = desplazamiento;
+                    desplazamiento += linea.len();
+                    pagina_en(&seccion.saltos_pagina, inicio).map(|pagina| LineaPaginada {
+                        pagina,
+                        texto: linea,
+                    })
+                })
+        })
+        .collect()
+}
+
+/// Piezas con las que un eje de la celda aparece en el texto: su categoría o los extremos del rango
+fn piezas_de_limites(limites: &LimitesDestilados) -> Vec<String> {
+    match limites.categoria.as_deref().and_then(texto_opcional) {
+        Some(categoria) => vec![categoria],
+        None => [limites.min, limites.max]
+            .into_iter()
+            .flatten()
+            .filter(|extremo| extremo.is_finite())
+            .map(|extremo| extremo.to_string())
+            .collect(),
+    }
+}
+
+/// Tabla reducida a cabeceras (eje x) y filas (eje y) para anclarla, con la fila de cada celda
+fn tabla_para_anclar(tabla: &TablaDestilada) -> (TablaParaAnclar, Vec<Option<usize>>) {
+    let mut para_anclar = TablaParaAnclar::default();
+    let mut indice_de_clave: HashMap<Vec<String>, usize> = HashMap::new();
+    let mut cabeceras_vistas: HashSet<String> = HashSet::new();
+    let mut fila_de_celda = Vec::with_capacity(tabla.celdas.len());
+    for celda in &tabla.celdas {
+        for cabecera in piezas_de_limites(&celda.eje_x) {
+            if cabeceras_vistas.insert(cabecera.clone()) {
+                para_anclar.cabeceras.push(cabecera);
+            }
+        }
+        let clave = piezas_de_limites(&celda.eje_y);
+        if clave.is_empty() {
+            fila_de_celda.push(None);
+            continue;
+        }
+        let fila = *indice_de_clave.entry(clave.clone()).or_insert_with(|| {
+            para_anclar.filas.push(FilaParaAnclar {
+                clave,
+                valores: Vec::new(),
+            });
+            para_anclar.filas.len() - 1
+        });
+        para_anclar.filas[fila]
+            .valores
+            .push(celda.valor_resultado.clone());
+        fila_de_celda.push(Some(fila));
+    }
+    (para_anclar, fila_de_celda)
+}
+
+fn fila_tabla(
+    clave: &ClaveDocumental,
+    tabla_id: &str,
+    tabla: &TablaDestilada,
+    paginas: Option<(u32, u32)>,
+) -> FilaTabla {
     let eje_x = eje_tabla(&tabla.eje_x, &tabla.celdas, |c| &c.eje_x);
     let eje_y = eje_tabla(&tabla.eje_y, &tabla.celdas, |c| &c.eje_y);
     let valor_salida_nombre = texto_opcional(&tabla.valor_salida_nombre)
@@ -1036,6 +1118,7 @@ fn fila_tabla(clave: &ClaveDocumental, tabla_id: &str, tabla: &TablaDestilada) -
         eje_y,
         valor_salida_nombre,
         vector_tabla: None,
+        paginas,
     }
 }
 
@@ -1107,16 +1190,17 @@ fn resolver_origen(
     }
 }
 
-/// Título que conserva la etiqueta humana del documento («Tabla 4-A»): el `tabla_id` real es
-/// versionado y sin ella el agente no podría pedir la tabla por su código a la primera
+/// Título que conserva la etiqueta humana del documento tal como la da el extractor (`4-A`,
+/// `Table 4-A`): el `tabla_id` real es versionado y sin ella el agente no podría pedir la tabla por
+/// su código a la primera. No se antepone ninguna palabra de un idioma
 fn titulo_con_etiqueta(etiqueta_original: &str, titulo: Option<String>) -> String {
-    let etiqueta = etiqueta_canonica(etiqueta_original);
-    let rotulo = format!("Tabla {etiqueta}");
+    let etiqueta = etiqueta_original.trim();
+    let codigo = etiqueta_canonica(etiqueta);
     match titulo {
-        _ if etiqueta.is_empty() => titulo.unwrap_or_default(),
-        Some(titulo) if contiene_etiqueta(&codigo_canonico(&titulo), &etiqueta) => titulo,
-        Some(titulo) => format!("{rotulo} — {titulo}"),
-        None => rotulo,
+        _ if codigo.is_empty() => titulo.unwrap_or_default(),
+        Some(titulo) if contiene_etiqueta(&codigo_de_palabras(&titulo), &codigo) => titulo,
+        Some(titulo) => format!("{etiqueta} — {titulo}"),
+        None => etiqueta.to_string(),
     }
 }
 
@@ -1129,13 +1213,22 @@ fn contiene_etiqueta(codigo: &str, etiqueta: &str) -> bool {
     })
 }
 
-/// Etiqueta canónica de una tabla sin el prefijo «Tabla» (`Tabla 4-A` → `4-A`)
+/// Etiqueta canónica de una tabla, sin las palabras sin cifras que la preceden (`Table 4-A` → `4-A`)
 fn etiqueta_canonica(etiqueta: &str) -> String {
-    let canonica = codigo_canonico(etiqueta);
-    canonica
-        .strip_prefix(PREFIJO_ETIQUETA_TABLA)
-        .map(str::to_string)
-        .unwrap_or(canonica)
+    codigo_de_etiqueta(etiqueta)
+}
+
+/// Etiqueta con la que un chunk cita la tabla: solo si es distintiva, porque mezcla letras y cifras
+/// o separa alfanuméricos (`4-A`, `A.2`, `3.1`). Una numérica pura (`3`) no vincula por cita
+fn etiqueta_distintiva(etiqueta: &str) -> Option<String> {
+    let codigo = etiqueta_canonica(etiqueta);
+    let caracteres: Vec<char> = codigo.chars().collect();
+    let mezcla =
+        caracteres.iter().any(|c| c.is_alphabetic()) && caracteres.iter().any(|c| c.is_numeric());
+    let separa = caracteres.windows(3).any(|trio| {
+        trio[0].is_alphanumeric() && !trio[1].is_alphanumeric() && trio[2].is_alphanumeric()
+    });
+    (mezcla || separa).then_some(codigo)
 }
 
 /// Pares (etiqueta canónica, `tabla_id` versionado) de las tablas de la revisión
@@ -1154,8 +1247,9 @@ fn etiquetas_de_tabla(destiladas: &[TablaDestilada], filas: &[FilaTabla]) -> Vec
 }
 
 /// Una remisión a una tabla de la propia revisión apunta a su `tabla_id` versionado
-fn destino_de_remision(destino: String, etiquetas: &[(String, String)]) -> String {
-    let etiqueta = etiqueta_canonica(&destino);
+/// La etiqueta se lee del destino tal como lo da el extractor: el canónico ya no separa palabras
+fn destino_de_remision(destino: String, original: &str, etiquetas: &[(String, String)]) -> String {
+    let etiqueta = etiqueta_canonica(original);
     etiquetas
         .iter()
         .find(|(candidata, _)| *candidata == etiqueta)
@@ -1173,7 +1267,7 @@ fn resolver_arista(
         TipoRelacionNormativa::parse_con_respaldo(&arista.tipo_relacion);
     let (destino_id, revision) = destino_canonico(&arista.destino_id);
     let destino_id = if tipo_relacion == TipoRelacionNormativa::RemiteATabla {
-        destino_de_remision(destino_id, etiquetas)
+        destino_de_remision(destino_id, &arista.destino_id, etiquetas)
     } else {
         destino_id
     };
@@ -1269,7 +1363,8 @@ fn vincular_hitos(chunks: &mut [FilaChunk], hitos: &[FilaHito], seccion_de_hito:
     }
 }
 
-/// Vincula cada tabla al chunk de su sección y a los chunks que la citan («Tabla 4-A»)
+/// Vincula cada tabla al chunk de su sección, a los chunks de su bloque de páginas que contienen
+/// alguna de sus filas y a los chunks que la citan por su etiqueta distintiva
 fn vincular_tablas(
     chunks: &mut [FilaChunk],
     filas: &[FilaTabla],
@@ -1285,19 +1380,40 @@ fn vincular_tablas(
         let seccion_parser = tabla_parseada(destilada, parseadas, destiladas.len())
             .and_then(|t| t.seccion_codigo.as_deref())
             .and_then(|codigo| buscar_seccion(codigo, secciones));
-        let cita = texto_opcional(&destilada.tabla_id)
-            .map(|etiqueta| plegar_mayusculas(&format!("Tabla {etiqueta}")));
+        let cita = etiqueta_distintiva(&destilada.tabla_id);
+        let (para_anclar, _) = tabla_para_anclar(destilada);
 
         for (idx, chunk) in chunks.iter_mut().enumerate() {
             let es_origen = Some(idx) == seccion_declarada || Some(idx) == seccion_parser;
             let la_cita = cita
-                .as_ref()
-                .is_some_and(|cita| plegar_mayusculas(&chunk.texto_contenido).contains(cita));
-            if es_origen || la_cita {
+                .as_deref()
+                .is_some_and(|cita| contiene_secuencia(&chunk.texto_contenido, cita));
+            let en_bloque = fila.paginas.is_some_and(|bloque| {
+                chunk_corta_bloque(chunk, bloque)
+                    && menciona_alguna_fila(&chunk.texto_contenido, &para_anclar)
+            });
+            if es_origen || la_cita || en_bloque {
                 chunk.tablas_vinculadas.push(fila.tabla_id.clone());
             }
         }
     }
+}
+
+fn chunk_corta_bloque(chunk: &FilaChunk, (inicio, fin): (u32, u32)) -> bool {
+    match (chunk.pagina_inicio, chunk.pagina_fin) {
+        (Some(desde), Some(hasta)) => desde <= fin && hasta >= inicio,
+        _ => false,
+    }
+}
+
+fn menciona_alguna_fila(texto: &str, tabla: &TablaParaAnclar) -> bool {
+    tabla.filas.iter().any(|fila| {
+        !fila.clave.is_empty()
+            && fila
+                .clave
+                .iter()
+                .all(|pieza| contiene_secuencia(texto, pieza))
+    })
 }
 
 #[cfg(test)]
@@ -1933,8 +2049,8 @@ mod tests {
     fn test_titulo_de_tabla_conserva_la_etiqueta_original_del_documento() {
         let revision = mapear_revision(&clave(), &documento(), &paquete(), "hash").unwrap();
         assert_eq!(
-            revision.tablas[0].titulo_tabla, "Tabla 4-A — Temperatura mínima de precalentamiento",
-            "el código humano «4-A» debe sobrevivir al id versionado"
+            revision.tablas[0].titulo_tabla, "4-A — Temperatura mínima de precalentamiento",
+            "el código humano «4-A» debe sobrevivir al id versionado, sin anteponer «Tabla»"
         );
 
         let mut con_etiqueta = paquete();
@@ -1948,7 +2064,15 @@ mod tests {
         let mut sin_titulo = paquete();
         sin_titulo.tablas[0].titulo = "  ".to_string();
         let revision = mapear_revision(&clave(), &documento(), &sin_titulo, "hash").unwrap();
-        assert_eq!(revision.tablas[0].titulo_tabla, "Tabla 4-A");
+        assert_eq!(revision.tablas[0].titulo_tabla, "4-A");
+
+        let mut en_ingles = paquete();
+        en_ingles.tablas[0].tabla_id = "Table 4-A".to_string();
+        let revision = mapear_revision(&clave(), &documento(), &en_ingles, "hash").unwrap();
+        assert_eq!(
+            revision.tablas[0].titulo_tabla, "Table 4-A — Temperatura mínima de precalentamiento",
+            "la etiqueta se conserva tal como la da el documento"
+        );
     }
 
     #[test]
@@ -2024,5 +2148,159 @@ mod tests {
             llamadas_de_nota("150 (1) y (*) (texto largo)"),
             vec!["(1)", "(*)"]
         );
+    }
+
+    /// Sección de PDF con una línea por elemento y un salto en cada cambio de página
+    fn seccion_paginada(codigo: &str, lineas: &[(u32, &str)]) -> ParsedSection {
+        let mut contenido = String::new();
+        let mut saltos: Vec<SaltoPagina> = Vec::new();
+        for (pagina, linea) in lineas {
+            if saltos.last().is_none_or(|s| s.pagina != *pagina) {
+                saltos.push(SaltoPagina {
+                    desplazamiento: contenido.len(),
+                    pagina: *pagina,
+                });
+            }
+            contenido.push_str(linea);
+            contenido.push('\n');
+        }
+        ParsedSection {
+            pagina_inicio: lineas.first().map(|l| l.0),
+            pagina_fin: lineas.last().map(|l| l.0),
+            saltos_pagina: saltos,
+            ..seccion(codigo, &format!("Doc > {codigo}"), None, &contenido)
+        }
+    }
+
+    fn categoria(texto: &str) -> LimitesDestilados {
+        LimitesDestilados {
+            categoria: Some(texto.to_string()),
+            min: None,
+            min_inclusivo: false,
+            max: None,
+            max_inclusivo: false,
+        }
+    }
+
+    /// Tabla de grados de acero × espesor, repartida en las pp. 21 y 22, con una introducción en la
+    /// p. 6 que menciona una fila y un valor
+    fn pdf_con_tabla_partida() -> (ParsedDocument, DistilledDocumentPackage) {
+        let parsed = ParsedDocument {
+            secciones: vec![
+                seccion_paginada(
+                    "1",
+                    &[(
+                        6,
+                        "Grade S275 needs 75 degrees, as shown later in the annex.",
+                    )],
+                ),
+                seccion_paginada(
+                    "4",
+                    &[
+                        (21, "Grade Thin Thick"),
+                        (21, "S275 75 125"),
+                        (21, "S355 100 150"),
+                        (21, "S460 125 175"),
+                        (22, "Grade Thin Thick"),
+                        (22, "Al6061 30 45"),
+                        (22, "Cu110 40 60"),
+                    ],
+                ),
+                seccion_paginada("5", &[(23, "See Таблица 9-C for the limits.")]),
+            ],
+            ..ParsedDocument::default()
+        };
+        let filas = [
+            ("S275", "75", "125"),
+            ("S355", "100", "150"),
+            ("S460", "125", "175"),
+            ("Al6061", "30", "45"),
+            ("Cu110", "40", "60"),
+        ];
+        let celdas = filas
+            .iter()
+            .flat_map(|(grado, delgado, grueso)| {
+                [("Thin", *delgado), ("Thick", *grueso)].map(|(espesor, valor)| CeldaDestilada {
+                    eje_x: categoria(espesor),
+                    eje_y: categoria(grado),
+                    eje_z: None,
+                    valor_resultado: valor.to_string(),
+                    unidad_medida: Some("°C".to_string()),
+                    nota_pie_condicion: None,
+                })
+            })
+            .collect();
+        let mut paquete = paquete_vacio();
+        paquete.tablas.push(TablaDestilada {
+            tabla_id: "9-C".to_string(),
+            titulo: "Preheat temperature".to_string(),
+            eje_x: eje("espesor", "CATEGORIA_EXACTA", None),
+            eje_y: eje("grado", "CATEGORIA_EXACTA", None),
+            valor_salida_nombre: "temperatura_c".to_string(),
+            seccion_origen: None,
+            celdas,
+        });
+        (parsed, paquete)
+    }
+
+    #[test]
+    fn test_pdf_tabla_partida_guarda_bloque_y_pagina_de_cada_celda() {
+        let (parsed, paquete) = pdf_con_tabla_partida();
+        let revision = mapear_revision(&clave(), &parsed, &paquete, "h").unwrap();
+        assert_eq!(revision.tablas[0].paginas, Some((21, 22)));
+        let paginas: Vec<Option<u32>> = revision.celdas.iter().map(|c| c.pagina).collect();
+        let esperadas = [21, 21, 21, 21, 21, 21, 22, 22, 22, 22].map(Some);
+        assert_eq!(paginas, esperadas, "ninguna celda cae en la p. 6");
+    }
+
+    #[test]
+    fn test_pdf_tabla_se_vincula_al_chunk_de_su_bloque_y_a_la_cita_en_otro_idioma() {
+        let (parsed, paquete) = pdf_con_tabla_partida();
+        let revision = mapear_revision(&clave(), &parsed, &paquete, "h").unwrap();
+        let tabla_id = &revision.tablas[0].tabla_id;
+        let vinculado = |pagina: u32| {
+            revision
+                .chunks
+                .iter()
+                .filter(|c| c.pagina_inicio == Some(pagina))
+                .all(|c| c.tablas_vinculadas.contains(tabla_id))
+        };
+        assert!(vinculado(21), "chunk del bloque");
+        assert!(vinculado(23), "cita «Таблица 9-C»");
+        assert!(
+            !vinculado(6),
+            "la introducción de la p. 6 no está en el bloque ni cita la etiqueta"
+        );
+    }
+
+    #[test]
+    fn test_etiqueta_numerica_pura_no_vincula_por_cita() {
+        let (mut parsed, mut paquete) = pdf_con_tabla_partida();
+        parsed.secciones[2] = seccion_paginada("5", &[(23, "Véase la Tabla 3 y la Table 3.")]);
+        paquete.tablas[0].tabla_id = "3".to_string();
+        let revision = mapear_revision(&clave(), &parsed, &paquete, "h").unwrap();
+        let cita = revision
+            .chunks
+            .iter()
+            .find(|c| c.pagina_inicio == Some(23))
+            .unwrap();
+        assert!(cita.tablas_vinculadas.is_empty(), "{cita:?}");
+    }
+
+    #[test]
+    fn test_markdown_sin_paginas_deja_tabla_y_celdas_sin_pagina() {
+        let revision = mapear_revision(&clave(), &documento(), &paquete(), "hash").unwrap();
+        assert_eq!(revision.tablas[0].paginas, None);
+        assert!(revision.celdas.iter().all(|c| c.pagina.is_none()));
+    }
+
+    #[test]
+    fn test_etiqueta_distintiva_mezcla_letras_y_cifras_o_separa_alfanumericos() {
+        for etiqueta in ["4-A", "Table 4-A", "Таблица 4-A", "A.2", "3.1", "T12"] {
+            assert!(etiqueta_distintiva(etiqueta).is_some(), "{etiqueta}");
+        }
+        for etiqueta in ["3", "Tabla 3", "  ", "12."] {
+            assert!(etiqueta_distintiva(etiqueta).is_none(), "{etiqueta}");
+        }
     }
 }
