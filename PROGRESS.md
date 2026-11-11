@@ -1301,3 +1301,25 @@
 - Fase 2: la página y el extracto en líneas distintas («Página del dato» y «Extracto literal») no se asocian; ocurre en 12 de 36 respuestas medidas (estimación fuera de la app).
 - Pendiente de la investigación: página impresa (`/PageLabels`). La app cita la física.
 - Compilación con `CARGO_TARGET_DIR` en el `target` de `benchmark-rgb-arnes-d142b4` (ahora también con el perfil debug), sin borrar nada. La aceptación descargó el modelo E5 (2,2 GB) a `target/fastembed_cache` de este worktree. `gen/schemas/*.json` quedan fuera de los commits.
+
+### Sesión SSD de generalidad (2026-11-11): 4 piezas, solo diseño
+
+**Estado: borrador para aprobación del usuario. Sin código de producción, sin push ni merge.** Documento: `docs/arquitectura/ssd_generalidad_4_piezas.md`. Origen: la decisión del mentor externo sobre `docs/estado/situacion_rag_20261111.md` y `auditoria_generalidad_20261111.md`. La rama `claude/arreglos-rag-512d66` no se integra; de ella solo se rescata el silencio de `verificador_paginas.rs`.
+
+- [x] **Pieza 1: PDF.** Se recomienda la opción (b): ToUnicode propio inyectado en memoria, frente a pdfium. Compuerta de legibilidad sin léxico y estado nuevo `LECTURA_DUDOSA` por fila.
+  - **Hallazgo verificado en `pdf-extract` 0.12.1** (`lib.rs:406-434` y `:496-505`): en las fuentes CFF, la codificación interna gana a `/Differences`.
+  - La AGL solo se aplica por búsqueda exacta.
+- [x] **Pieza 2: página de la Capa 2.** Anclaje textual por coincidencia de 2 o más tokens con al menos uno distintivo; `None` si es ambiguo. Se eliminan los literales `"Tabla {id}"` (`mapeo_destilacion.rs:1252` y `:1077`). **Esquema v7: hay que recrear los centros.**
+- [x] **Pieza 3:**
+  - 3a: cuota con relleno en `fusionar`;
+  - 3b: detector estructural de *tool calls* embebidas y evento `TextoEnVivoDescartado` (el streaming filtra solo por el primer carácter, `stream_json.rs:80`);
+  - 3c: rescate y excepciones de metadatos y de posición de cabecera antes de `Discrepante`.
+- [x] **Pieza 4:** cascada de invariantes estructurales y microllamada a Haiku. El LLM propone una justificación y Rust la comprueba. Falla cerrada. Tabla de listas que se eliminan y que quedan.
+- [x] **Protocolo de validación rápida:** niveles N0 a N6, criterios de no retroceso por pieza y subconjunto propuesto para la sesión evaluadora.
+
+**Tests:** no se han ejecutado porque no hay cambios de código; solo documentación. **No se ha leído `docs/validacion/set_oculto*`.**
+
+**Notas para la siguiente sesión:**
+- Las decisiones D1 a D7 del §0 del SSD son del usuario.
+- Orden recomendado: 3c, 3a y 1 en paralelo; después la 2; después la 3b; y por último la 4.
+- La latencia de Haiku sale del spike de la Fase 0 (6-9 s): no está medida con el prompt del verificador.
