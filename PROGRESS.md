@@ -1326,3 +1326,27 @@
 - Las decisiones D1 a D6 del §0 del SSD son del usuario.
 - Orden recomendado: 3c, 3a y 1 en paralelo; después la 2 (v7); después la 3b; después la 4. La 5, en otra rama.
 - Sin verificar: la API y la versión de `pdfium-render` y el tamaño de la DLL (van al spike de la Pieza 1); la latencia real de Haiku con este prompt.
+
+### Sesión Pieza 3c (2026-11-11): verificador de páginas
+
+**Estado: `[COMPLETADO]`, pendiente de aprobación del usuario. Rama `claude/pieza-3c-verificador-bbfb9d`, sin push ni merge.** Informe: `benchmarks/informes/pieza_3c_20261111.md`. No se ha leído `docs/validacion/set_oculto*`.
+
+- [x] Silencio rescatado de `claude/arreglos-rag-512d66` (solo `verificador_paginas.rs`): nota solo con `Discrepante`; `Confirmada` si alguna aparición corta las páginas citadas.
+- [x] Excepciones antes de `Discrepante`:
+  - metadato del turno (título o breadcrumb), ahora con cualquier resultado;
+  - cabecera: la cita cubre exactamente la primera línea de una página interior y esa línea no cierra con puntuación.
+  - **Es más estricta que el SSD:** la redacción original silenciaba un `Discrepante` verdadero, y lo detectó un test existente.
+- [x] Herramienta `tests/repeticion_arnes_guardadas.rs` (`#[ignore]`, sin datos) con errores sembrados.
+- [x] 5 tests adversariales adaptados al silencio en caso de duda.
+
+**Tests:** 921 pasan, 0 fallan y 35 ignorados (base 913/0/35). Clippy y fmt limpios.
+
+**Repetición sin Claude** (222 respuestas guardadas, 8 crudas):
+- reintentos: 0 → 0;
+- avisos: 99 → 0. Los 99 eran `NoEncontrada` de Aguja, con la página correcta (1,0), y salían de la reconstrucción de la fuente;
+- errores sembrados anotados: 31/31 → 31/31.
+
+**Notas para la siguiente sesión:**
+- No hay ningún `Discrepante` real en los datos guardados, y las excepciones a) y b) no se activaron. Su efecto real queda para la sesión evaluadora (propuesta en el §4 del informe).
+- `PALABRAS_DE_PAGINA` sigue siendo deuda (SSD §3c.3).
+- `ssd_citas_pagina.md` §5 describe todavía las notas de duda. Manda el SSD de generalidad.
