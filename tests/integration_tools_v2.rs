@@ -531,3 +531,33 @@ async fn test_lookup_invertido_respeta_fecha_referencia() {
     assert_eq!(celda_invertida(&historico)["cita"]["revision"], "Rev. 03");
     assert!(!historico.to_string().contains("Rev. 04"), "{historico}");
 }
+
+#[tokio::test]
+async fn test_catalogo_muestra_escritura_y_texto_corrido_de_cada_documento() {
+    let entorno = entorno_sembrado().await;
+    let catalogo = ok(
+        &entorno.herramientas,
+        "inspect_lakehouse_catalog",
+        args(json!({})),
+    )
+    .await;
+    let pliego = catalogo["documentos"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|d| d["doc_id"] == "PCC-01")
+        .unwrap();
+    assert_eq!(pliego["escritura_dominante"], "LATINA", "{pliego}");
+    let muestra = pliego["muestra_texto"].as_str().expect("muestra de texto");
+    let literal = muestra.trim_end_matches('…');
+    assert!(literal.chars().count() <= 150);
+    assert!(PLIEGO.contains(literal), "muestra literal: {muestra}");
+    assert!(
+        !literal.starts_with('#'),
+        "texto corrido, no el título: {muestra}"
+    );
+    assert!(
+        catalogo["nota"].as_str().unwrap().contains("muestra_texto"),
+        "la nota explica para qué sirve la muestra"
+    );
+}

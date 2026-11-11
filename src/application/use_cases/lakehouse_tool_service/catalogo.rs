@@ -1,5 +1,7 @@
 //! `inspect_lakehouse_catalog`: documentos con prelación y vigencia + glue catalog de tablas
 
+use std::collections::HashMap;
+
 use serde_json::{Value, json};
 
 use super::estructura::explicacion_de_estado;
@@ -10,7 +12,10 @@ use crate::application::dtos::tools::{
 use crate::application::ports::lakehouse_store::{
     TABLA_CATALOGO_TABLAS, TABLA_DOCUMENTOS_CATALOGO, TODAS_LAS_TABLAS,
 };
+use crate::application::ports::semantic_index::{FragmentoIndexado, OrigenFragmento};
 use crate::domain::errors::DomainError;
+use crate::domain::models::estructura_documental::{EstadoContenido, TipoBloque};
+use crate::domain::services::muestra_documento::{escritura_dominante, muestra_de_texto_corrido};
 
 /// Lo que se muestra en lugar de una fecha que el documento no declara
 const FECHA_NO_DECLARADA: &str = "no declarada";
@@ -39,6 +44,7 @@ impl LakehouseToolService {
             .await?;
 
         let estados = self.estados_de_revisiones(&contexto).await?;
+        let rasgos = rasgos_de_idioma(&self.indice.fragmentos(&contexto.centro).await);
         let documentos: Vec<Value> = documentos
             .into_iter()
             .map(|mut fila| {
@@ -62,6 +68,12 @@ impl LakehouseToolService {
                 fila.insert("provisional".to_string(), json!(provisional));
                 fila.insert("estado_contenido".to_string(), json!(estado));
                 fila.insert("aviso_contenido".to_string(), json!(aviso));
+                let (escritura, muestra) = rasgos
+                    .get(&(texto(&fila, "doc_id"), version))
+                    .cloned()
+                    .unwrap_or_default();
+                fila.insert("escritura_dominante".to_string(), json!(escritura));
+                fila.insert("muestra_texto".to_string(), json!(muestra));
                 Value::Object(fila)
             })
             .collect();
@@ -84,7 +96,45 @@ impl LakehouseToolService {
             "documentos": documentos,
             "tablas_doble_entrada": tablas,
             "vistas_sql": TODAS_LAS_TABLAS,
-            "nota": "Prelación: 1 = especificación del cliente … 5 = norma. Ante conflicto prevalece el nivel menor; el resto es supletorio. Para cruzar una tabla usa lookup_double_entry_table con su tabla_id. Un documento con aviso_contenido no está completo: dilo si lo usas.",
+            "nota": "Prelación: 1 = especificación del cliente … 5 = norma. Ante conflicto prevalece el nivel menor; el resto es supletorio. Para cruzar una tabla usa lookup_double_entry_table con su tabla_id. Un documento con aviso_contenido no está completo: dilo si lo usas. escritura_dominante y muestra_texto (un extracto literal) dejan ver el idioma de cada documento: busca en ese idioma y con sus términos.",
         }))
     }
+}
+
+/// Escritura y muestra de texto corrido de un documento, por (doc_id, version_num)
+type RasgosDeIdioma = HashMap<(String, i64), (Option<&'static str>, Option<String>)>;
+
+/// Rasgos calculados al vuelo sobre los chunks de 02 ya cargados en el índice, sin tocar el
+/// esquema. Se saltan las filas de lectura degradada; la muestra prefiere los bloques que no son
+/// preámbulo (portadas e índices) y sigue el orden de páginas
+fn rasgos_de_idioma(fragmentos: &[FragmentoIndexado]) -> RasgosDeIdioma {
+    let mut por_revision: HashMap<(String, i64), Vec<&FragmentoIndexado>> = HashMap::new();
+    for fragmento in fragmentos.iter().filter(|f| {
+        f.origen == OrigenFragmento::Chunk
+            && f.estado_contenido != Some(EstadoContenido::LecturaDegradada)
+    }) {
+        por_revision
+            .entry((fragmento.doc_id.clone(), i64::from(fragmento.version_num)))
+            .or_default()
+            .push(fragmento);
+    }
+    por_revision
+        .into_iter()
+        .map(|(clave, mut chunks)| {
+            chunks.sort_by(|a, b| (a.pagina_inicio, &a.id).cmp(&(b.pagina_inicio, &b.id)));
+            let texto_completo: String = chunks
+                .iter()
+                .map(|c| c.texto.as_str())
+                .collect::<Vec<_>>()
+                .join("\n");
+            let escritura = escritura_dominante(&texto_completo).map(|e| e.as_str());
+            let cuerpo = chunks
+                .iter()
+                .filter(|c| c.tipo_bloque != Some(TipoBloque::Preambulo))
+                .map(|c| c.texto.as_str());
+            let muestra = muestra_de_texto_corrido(cuerpo)
+                .or_else(|| muestra_de_texto_corrido(chunks.iter().map(|c| c.texto.as_str())));
+            (clave, (escritura, muestra))
+        })
+        .collect()
 }
