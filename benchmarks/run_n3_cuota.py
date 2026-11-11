@@ -30,7 +30,9 @@ import run  # noqa: E402
 import run_aguja  # noqa: E402
 from lakehouse.cli import ClienteCli, comando_de_binario  # noqa: E402
 from lakehouse.mcp import ClienteMcp  # noqa: E402
-from pistas.aguja import generar_aguja, insertar_aguja, preguntas_de, texto_de_pdf  # noqa: E402
+from dataclasses import replace  # noqa: E402
+
+from pistas.aguja import PLANTILLAS, generar_aguja, insertar_aguja, preguntas_de, texto_de_pdf  # noqa: E402
 from pistas.base import cargar_documentos  # noqa: E402
 
 CENTRO = "n3-cuota"
@@ -55,6 +57,29 @@ CONSULTAS_FIXTURES = (
     ("ciclo-vigente-presion", "¿Cuál es actualmente la presión de purga del procedimiento PTF-PUR-05? Indica la revisión.", "purga_rev01.md", ("8,2",)),
     ("ciclo-vigente-temperatura", "¿Qué temperatura del agua de purga está vigente hoy según el procedimiento PTF-PUR-05? Indica la revisión.", "purga_rev01.md", ("85",)),
 )
+
+
+# Hay más agujas que plantillas: un sujeto extra, solo para N3, para que ninguno se repita
+SUJETOS_EXTRA = (("temperatura", "maximum shell temperature for the heat exchangers", "°C"),)
+
+
+def agujas_de_sujeto_unico(semilla, profundidades, texto_base=""):
+    """Agujas de la pista simple; si un sujeto ya salió, se cambia por el primero libre.
+
+    Con dos agujas del mismo sujeto, la pregunta semántica (sin lote) tiene dos respuestas válidas.
+    """
+    disponibles = [(p.clave, p.sujeto, p.unidad) for p in PLANTILLAS] + list(SUJETOS_EXTRA)
+    if len(profundidades) > len(disponibles):
+        raise ValueError("Hay más agujas que sujetos distintos")
+    agujas, usados = [], set()
+    for profundidad in profundidades:
+        aguja = generar_aguja(semilla, 1, profundidad, texto_base)
+        if aguja.sujeto in usados:
+            clave, sujeto, unidad = next(d for d in disponibles if d[1] not in usados)
+            aguja = replace(aguja, plantilla=clave, sujeto=sujeto, unidad=unidad)
+        usados.add(aguja.sujeto)
+        agujas.append(aguja)
+    return agujas
 
 
 def contiene_valor(texto, valor):
@@ -123,10 +148,11 @@ def preparar(argumentos):
     pdf = ruta_base.read_bytes()
     texto_base = texto_de_pdf(pdf)
     agujas = []
-    for profundidad in profundidades:
-        aguja = generar_aguja(SEMILLA, 1, profundidad, texto_base)
+    for profundidad, aguja in zip(profundidades, agujas_de_sujeto_unico(SEMILLA, profundidades, texto_base), strict=True):
         pdf = insertar_aguja(pdf, aguja, profundidad).pdf
-        agujas.append({"lote": aguja.lote, "valor": aguja.valor, "profundidad": profundidad, "preguntas": list(preguntas_de(aguja))})
+        agujas.append(
+            {"lote": aguja.lote, "valor": aguja.valor, "unidad": aguja.unidad, "sujeto": aguja.sujeto, "profundidad": profundidad, "preguntas": list(preguntas_de(aguja))}
+        )
     documentos = directorio / "documentos"
     documentos.mkdir(exist_ok=True)
     (documentos / NOMBRE_PDF).write_bytes(pdf)
