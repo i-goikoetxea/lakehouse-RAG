@@ -93,7 +93,8 @@ impl AgentOrchestrator {
             12. REGLA DE AUDITORÍA: Aunque los datos o el texto de una tabla ya figuren en el historial de turnos previos, tienes PROHIBIDO resolver cruces tabulares leyendo del contexto de la conversación. Debes invocar obligatoriamente `lookup_double_entry_table` en el turno actual para garantizar la resolución determinista de Capa 2 y poblar la telemetría del Studio.\n\
             13. Ejes de tabla: si lookup_double_entry_table devuelve ejes_ambiguos, los dos órdenes de valor_x y valor_y dan celdas distintas. Decide qué valor corresponde a cada eje por las unidades o los nombres de los ejes y dilo en la respuesta, nombrando ambos ejes. Si no lo distinguen, muestra ambos valores o pregunta: nunca elijas uno en silencio. Si devuelve orden_invertido_resolveria, comprueba los ejes y, si estaban cambiados, repite la llamada con ese orden; no des un valor sin esa nueva llamada.\n\
             14. Lo que no consta: si las herramientas no devuelven el dato pedido, di que no consta y termina ahí, sin ofrecer valores de referencia, rangos típicos ni cifras de otros documentos o parámetros, salvo que el operador los pida. Si el operador los pide, di que no son datos del centro. Sí debes dar lo preguntado que sí consta, con sus cifras.\n\
-            15. Preguntas que cruzan varias partes: si la pregunta combina dos o más entidades, documentos o condiciones (por ejemplo, varias preguntas seguidas o datos de cosas distintas), lanza una search_normative_context separada para cada parte, con solo los términos de esa parte, en vez de una consulta que las mezcle. Antes de decir que una parte no consta, consulta inspect_lakehouse_catalog y haz una segunda búsqueda dirigida solo a esa parte: restringida con doc_id si el catálogo muestra un documento candidato o, si no, en modo EXACT_BM25 con otros términos de la pregunta (códigos, identificadores o palabras literales).\n\
+            15. Preguntas que cruzan varias partes: si la pregunta combina dos o más entidades, documentos o condiciones (por ejemplo, varias preguntas seguidas o datos de cosas distintas), lanza una search_normative_context separada para cada parte, con solo los términos de esa parte, en vez de una consulta que las mezcle; si no dependen unas de otras, pídelas juntas en el mismo array tool_calls. Antes de decir que una parte no consta, consulta inspect_lakehouse_catalog para ver qué documentos e idiomas hay y haz una segunda búsqueda abierta, sin doc_id, solo para esa parte (salvo que la pregunta nombre explícitamente un documento o código del catálogo): cambia los términos, usa el idioma del documento o prueba el modo EXACT_BM25. Nunca restrinjas la búsqueda a un documento por su título: un título genérico no dice qué contiene.\n\
+            16. Idioma de la búsqueda: escribe la consulta con el idioma y los términos técnicos de la pregunta o del documento objetivo; nunca traduzcas la consulta al idioma de estas instrucciones.\n\
             {1}",
             centro_id.as_str(),
             INVENTARIO_TABLAS_V2
@@ -1233,11 +1234,34 @@ mod tests {
             "dos o más entidades, documentos o condiciones",
             "search_normative_context separada para cada parte",
             "en vez de una consulta que las mezcle",
+            "en el mismo array tool_calls",
             "Antes de decir que una parte no consta",
             "inspect_lakehouse_catalog",
-            "segunda búsqueda dirigida solo a esa parte",
-            "doc_id",
+            "qué documentos e idiomas hay",
+            "segunda búsqueda abierta, sin doc_id",
+            "salvo que la pregunta nombre explícitamente un documento o código del catálogo",
+            "usa el idioma del documento",
             "EXACT_BM25",
+            "Nunca restrinjas la búsqueda a un documento por su título",
+        ] {
+            assert!(regla.contains(exigido), "{exigido}");
+        }
+        assert!(
+            !regla.contains("restringida con doc_id"),
+            "la segunda búsqueda ya no se dirige por doc_id"
+        );
+    }
+
+    #[test]
+    fn test_system_prompt_prohibe_traducir_la_consulta() {
+        let prompt = AgentOrchestrator::build_system_prompt(&CenterId::new("obra-a").unwrap());
+        let regla = prompt
+            .lines()
+            .find(|linea| linea.starts_with("16. "))
+            .expect("falta la regla 16");
+        for exigido in [
+            "idioma y los términos técnicos de la pregunta o del documento objetivo",
+            "nunca traduzcas la consulta al idioma de estas instrucciones",
         ] {
             assert!(regla.contains(exigido), "{exigido}");
         }
