@@ -14,9 +14,23 @@ pub const MIN_USO_PRIVADO_DENTRO_DE_PALABRA: usize = 3;
 pub const MIN_TOKENS_EVALUABLES: usize = 80;
 pub const UMBRAL_MOJIBAKE: f32 = 0.30;
 const MIN_LETRAS_TOKEN_EVALUABLE: usize = 4;
-/// Señal de la calibración N1 (no estaba en el SSD): tokens con letras y símbolos ASCII dentro
+/// Señal de la calibración N1 (no estaba en el SSD): símbolos anómalos entre dos letras
 pub const MIN_TOKENS_CON_LETRAS: usize = 40;
+/// Por encima, degrada sola
 pub const UMBRAL_SIMBOLOS_EN_PALABRAS: f32 = 0.35;
+/// Entre este umbral y el anterior, degrada solo si otra señal independiente lo confirma
+pub const UMBRAL_SIMBOLOS_ZONA_GRIS: f32 = 0.15;
+/// Confirmación de la zona gris: palabras de 4 o más letras sin vocales de su alfabeto
+pub const MIN_TOKENS_CONFIRMACION: usize = 20;
+pub const UMBRAL_SIN_VOCAL_CONFIRMACION: f32 = 0.15;
+/// Incoherencia estructural (decisión del mentor tras la calibración N1)
+pub const MIN_NO_BLANCOS_INCOHERENCIA: usize = 80;
+pub const MIN_LETRAS_INCOHERENCIA: usize = 20;
+pub const MAX_PROPORCION_DIGITOS: f32 = 0.50;
+pub const MAX_PROPORCION_CJK: f32 = 0.30;
+pub const UMBRAL_COHERENCIA: f32 = 0.40;
+pub const UMBRAL_RUIDO: f32 = 0.05;
+const MIN_LETRAS_RACHA: usize = 3;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ClasePagina {
@@ -36,6 +50,18 @@ pub struct MetricasPagina {
     pub tokens_sospechosos: usize,
     pub tokens_con_letras: usize,
     pub tokens_con_simbolos: usize,
+    /// Tokens evaluables por la red de vocales que no tienen ninguna
+    pub tokens_sin_vocal: usize,
+    pub digitos: usize,
+    /// Caracteres Han, Kana y Hangul
+    pub cjk: usize,
+    pub letras_no_cjk: usize,
+    /// Letras en rachas de 3 o más letras de una misma escritura
+    pub letras_en_rachas: usize,
+    /// Símbolos ASCII anómalos (`$ # * = + ; ? ! ( )`…) en la página
+    pub simbolos_anomalos: usize,
+    /// Signos de Latin-1 y letras de Latin-1 sueltas
+    pub ruido_latin1: usize,
     pub densidad_alfanumerica: f32,
 }
 
@@ -49,6 +75,7 @@ pub fn clasificar_pagina(texto_crudo: &str) -> (ClasePagina, MetricasPagina) {
         motivo_uso_privado(&metricas),
         motivo_mojibake(&metricas),
         motivo_simbolos_en_palabras(&metricas),
+        motivo_incoherencia(&metricas),
     ]
     .into_iter()
     .flatten()
@@ -65,8 +92,13 @@ fn medir(texto: &str) -> MetricasPagina {
     let caracteres: Vec<char> = texto.chars().collect();
     let no_blancos = caracteres.iter().filter(|c| !c.is_whitespace()).count();
     let alfanumericos = caracteres.iter().filter(|c| c.is_alphanumeric()).count();
-    let (tokens_evaluables, tokens_sospechosos) = contar_tokens(texto);
+    let ConteoTokens {
+        evaluables: tokens_evaluables,
+        sospechosos: tokens_sospechosos,
+        sin_vocal: tokens_sin_vocal,
+    } = contar_tokens(texto);
     let (tokens_con_letras, tokens_con_simbolos) = contar_tokens_con_simbolos(texto);
+    let (letras_no_cjk, letras_en_rachas) = contar_letras_en_rachas(&caracteres);
     MetricasPagina {
         no_blancos,
         reemplazo_o_control: reemplazos_o_controles_no_aislados(&caracteres),
@@ -76,6 +108,13 @@ fn medir(texto: &str) -> MetricasPagina {
         tokens_sospechosos,
         tokens_con_letras,
         tokens_con_simbolos,
+        tokens_sin_vocal,
+        digitos: caracteres.iter().filter(|c| c.is_numeric()).count(),
+        cjk: caracteres.iter().filter(|c| es_cjk(**c)).count(),
+        letras_no_cjk,
+        letras_en_rachas,
+        simbolos_anomalos: caracteres.iter().filter(|c| es_simbolo_suelto(**c)).count(),
+        ruido_latin1: ruido_latin1(texto),
         densidad_alfanumerica: proporcion(alfanumericos, no_blancos),
     }
 }
@@ -115,14 +154,56 @@ fn motivo_mojibake(metricas: &MetricasPagina) -> Option<MotivoDegradacion> {
     })
 }
 
+/// Por encima de `UMBRAL_SIMBOLOS_EN_PALABRAS`, degrada sola. En la zona gris, solo si lo confirma
+/// una señal independiente: palabras sin vocales o el colapso de las palabras coherentes
 fn motivo_simbolos_en_palabras(metricas: &MetricasPagina) -> Option<MotivoDegradacion> {
     if metricas.tokens_con_letras < MIN_TOKENS_CON_LETRAS {
         return None;
     }
     let proporcion = proporcion(metricas.tokens_con_simbolos, metricas.tokens_con_letras);
-    (proporcion > UMBRAL_SIMBOLOS_EN_PALABRAS).then_some(MotivoDegradacion::SimbolosEnPalabras {
-        proporcion,
-        tokens_evaluados: metricas.tokens_con_letras,
+    let confirmada = proporcion > UMBRAL_SIMBOLOS_ZONA_GRIS
+        && (hay_palabras_sin_vocales(metricas) || colapsan_las_palabras(metricas));
+    (proporcion > UMBRAL_SIMBOLOS_EN_PALABRAS || confirmada).then_some(
+        MotivoDegradacion::SimbolosEnPalabras {
+            proporcion,
+            tokens_evaluados: metricas.tokens_con_letras,
+        },
+    )
+}
+
+fn hay_palabras_sin_vocales(metricas: &MetricasPagina) -> bool {
+    metricas.tokens_evaluables >= MIN_TOKENS_CONFIRMACION
+        && proporcion(metricas.tokens_sin_vocal, metricas.tokens_evaluables)
+            > UMBRAL_SIN_VOCAL_CONFIRMACION
+}
+
+/// La incoherencia solo se juzga en páginas con texto suficiente, que no sean sobre todo cifras
+/// (tablas) ni sobre todo CJK (que no separa palabras)
+fn incoherencia_evaluable(metricas: &MetricasPagina) -> bool {
+    metricas.no_blancos >= MIN_NO_BLANCOS_INCOHERENCIA
+        && metricas.letras_no_cjk >= MIN_LETRAS_INCOHERENCIA
+        && proporcion(metricas.digitos, metricas.no_blancos) < MAX_PROPORCION_DIGITOS
+        && proporcion(metricas.cjk, metricas.no_blancos) < MAX_PROPORCION_CJK
+}
+
+fn coherencia(metricas: &MetricasPagina) -> f32 {
+    proporcion(metricas.letras_en_rachas, metricas.letras_no_cjk)
+}
+
+fn colapsan_las_palabras(metricas: &MetricasPagina) -> bool {
+    incoherencia_evaluable(metricas) && coherencia(metricas) < UMBRAL_COHERENCIA
+}
+
+/// Las letras no forman palabras y, además, abundan los símbolos sueltos o el ruido de Latin-1
+fn motivo_incoherencia(metricas: &MetricasPagina) -> Option<MotivoDegradacion> {
+    if !colapsan_las_palabras(metricas) {
+        return None;
+    }
+    let ruido = proporcion(metricas.simbolos_anomalos, metricas.no_blancos)
+        .max(proporcion(metricas.ruido_latin1, metricas.no_blancos));
+    (ruido >= UMBRAL_RUIDO).then_some(MotivoDegradacion::IncoherenciaEstructural {
+        coherencia: coherencia(metricas),
+        ruido,
     })
 }
 
@@ -236,15 +317,39 @@ fn excluye_token(caracter: char) -> bool {
     matches!(caracter, '@' | '/' | ':' | '_' | '.')
 }
 
-/// Signos ASCII que sí aparecen dentro de tokens reales con letras: guiones, apóstrofos,
-/// abreviaturas, decimales, fechas, unidades, horas, identificadores, correos y URL
-fn es_signo_interior_habitual(caracter: char) -> bool {
-    matches!(caracter, '-' | '\'' | '.' | ',' | '/' | ':' | '_' | '@')
+/// Símbolos ASCII que no unen dos letras de una palabra real. Los conectores (`-`, `/`, `_`, `.`,
+/// `'`, `:`, `,`) quedan fuera: unen palabras en rutas, códigos, unidades y abreviaturas
+fn es_simbolo_entre_letras(caracter: char) -> bool {
+    matches!(
+        caracter,
+        '$' | '@'
+            | '#'
+            | '*'
+            | '~'
+            | '\\'
+            | '|'
+            | '{'
+            | '}'
+            | '['
+            | ']'
+            | '^'
+            | '='
+            | '+'
+            | ';'
+            | '?'
+            | '!'
+            | '('
+            | ')'
+    )
+}
+
+/// Símbolos ASCII que cuentan como ruido de página en la incoherencia estructural
+fn es_simbolo_suelto(caracter: char) -> bool {
+    es_simbolo_entre_letras(caracter) || matches!(caracter, '<' | '>' | '"' | '%' | '&')
 }
 
 /// Tokens con al menos dos caracteres y alguna letra (cualquier caja y escritura) y, de ellos,
-/// los que llevan dentro un símbolo ASCII que no es un signo interior habitual. Es tipografía, no
-/// una lista de palabras
+/// los que tienen un símbolo anómalo entre dos letras (`th=s`, `f(x)`). Tipografía, no palabras
 fn contar_tokens_con_simbolos(texto: &str) -> (usize, usize) {
     let mut con_letras = 0;
     let mut con_simbolos = 0;
@@ -254,13 +359,113 @@ fn contar_tokens_con_simbolos(texto: &str) -> (usize, usize) {
             continue;
         }
         con_letras += 1;
-        con_simbolos += usize::from(
-            recortado
-                .chars()
-                .any(|c| c.is_ascii_punctuation() && !es_signo_interior_habitual(c)),
-        );
+        let caracteres: Vec<char> = recortado.chars().collect();
+        con_simbolos += usize::from(caracteres.windows(3).any(|v| {
+            v[0].is_alphabetic() && es_simbolo_entre_letras(v[1]) && v[2].is_alphabetic()
+        }));
     }
     (con_letras, con_simbolos)
+}
+
+// --- Incoherencia estructural ---
+
+/// Han, Kana y Hangul, por bloques Unicode
+fn es_cjk(caracter: char) -> bool {
+    matches!(caracter as u32,
+        0x3040..=0x30FF
+        | 0x31F0..=0x31FF
+        | 0x3400..=0x4DBF
+        | 0x4E00..=0x9FFF
+        | 0xF900..=0xFAFF
+        | 0x1100..=0x11FF
+        | 0x3130..=0x318F
+        | 0xAC00..=0xD7AF
+        | 0x20000..=0x2FA1F)
+}
+
+/// Escritura de una letra: latín, griego, cirílico y árabe por sus bloques; el resto, por su
+/// bloque de 128 puntos de código (cada escritura índica ocupa uno)
+fn escritura_de(caracter: char) -> u32 {
+    match (alfabeto_de(caracter), caracter as u32) {
+        (Some(Alfabeto::Latino), _) => 1,
+        (Some(Alfabeto::Griego), _) => 2,
+        (Some(Alfabeto::Cirilico), _) => 3,
+        (
+            None,
+            0x0600..=0x06FF | 0x0750..=0x077F | 0x08A0..=0x08FF | 0xFB50..=0xFDFF | 0xFE70..=0xFEFF,
+        ) => 4,
+        (None, punto) => 0x100 + (punto >> 7),
+    }
+}
+
+/// Signos de Latin-1 (`U+00A1..U+00BF` salvo `°` y `±`) y `×` `÷`
+fn es_signo_latin1(caracter: char) -> bool {
+    matches!(caracter, '\u{00A1}'..='\u{00BF}' | '×' | '÷') && !matches!(caracter, '°' | '±')
+}
+
+/// Signos de Latin-1 y letras de Latin-1 (`U+00C0..U+00FF`) sueltas: en un token de 1 o 2
+/// caracteres o pegadas a algo que no es alfanumérico
+fn ruido_latin1(texto: &str) -> usize {
+    let mut ruido = 0;
+    for token in texto.split_whitespace() {
+        let caracteres: Vec<char> = token.chars().collect();
+        for (i, caracter) in caracteres.iter().enumerate() {
+            if es_signo_latin1(*caracter) {
+                ruido += 1;
+                continue;
+            }
+            let letra_latin1 =
+                ('\u{00C0}'..='\u{00FF}').contains(caracter) && caracter.is_alphabetic();
+            let vecinos = [i.checked_sub(1), Some(i + 1)]
+                .into_iter()
+                .flatten()
+                .filter_map(|j| caracteres.get(j));
+            let pegada_a_simbolo = vecinos.into_iter().any(|v| !v.is_alphanumeric());
+            if letra_latin1 && (caracteres.len() <= 2 || pegada_a_simbolo) {
+                ruido += 1;
+            }
+        }
+    }
+    ruido
+}
+
+/// Letras fuera de CJK y, de ellas, las que forman rachas de 3 o más letras seguidas de una misma
+/// escritura. Las marcas que no son letras (el virama índico) prolongan la racha si son de la
+/// misma escritura y no son ASCII
+fn contar_letras_en_rachas(caracteres: &[char]) -> (usize, usize) {
+    let mut letras = 0;
+    let mut en_rachas = 0;
+    let mut racha = 0;
+    let mut escritura = 0;
+    let mut cerrar = |racha: &mut usize| {
+        if *racha >= MIN_LETRAS_RACHA {
+            en_rachas += *racha;
+        }
+        *racha = 0;
+    };
+    for caracter in caracteres {
+        if caracter.is_alphabetic() && !es_cjk(*caracter) {
+            letras += 1;
+            let propia = escritura_de(*caracter);
+            if racha > 0 && propia != escritura {
+                cerrar(&mut racha);
+            }
+            escritura = propia;
+            racha += 1;
+        } else {
+            let marca = racha > 0
+                && !caracter.is_ascii()
+                && !caracter.is_whitespace()
+                && !caracter.is_alphanumeric()
+                && !es_signo_latin1(*caracter)
+                && escritura_de(*caracter) == escritura;
+            if !marca {
+                cerrar(&mut racha);
+            }
+        }
+    }
+    cerrar(&mut racha);
+    (letras, en_rachas)
 }
 
 /// Puntuación ASCII que no aparece dentro de una palabra real (`-` y `'` sí aparecen)
@@ -268,21 +473,34 @@ fn es_puntuacion_anomala(caracter: char) -> bool {
     caracter.is_ascii_punctuation() && caracter != '-' && caracter != '\''
 }
 
-fn contar_tokens(texto: &str) -> (usize, usize) {
-    let mut evaluables = 0;
-    let mut sospechosos = 0;
-    for token in texto.split_whitespace() {
-        let recortado = token.trim_matches(|c: char| !c.is_alphanumeric());
-        if let Some(sospechoso) = evaluar_token(recortado) {
-            evaluables += 1;
-            sospechosos += usize::from(sospechoso);
-        }
-    }
-    (evaluables, sospechosos)
+#[derive(Default)]
+struct ConteoTokens {
+    evaluables: usize,
+    sospechosos: usize,
+    sin_vocal: usize,
 }
 
-/// `None` si el token no es evaluable; si lo es, si resulta sospechoso
-fn evaluar_token(token: &str) -> Option<bool> {
+fn contar_tokens(texto: &str) -> ConteoTokens {
+    let mut conteo = ConteoTokens::default();
+    for token in texto.split_whitespace() {
+        let recortado = token.trim_matches(|c: char| !c.is_alphanumeric());
+        if let Some(evaluacion) = evaluar_token(recortado) {
+            conteo.evaluables += 1;
+            conteo.sospechosos +=
+                usize::from(evaluacion.sin_vocal || evaluacion.puntuacion_interior);
+            conteo.sin_vocal += usize::from(evaluacion.sin_vocal);
+        }
+    }
+    conteo
+}
+
+struct EvaluacionToken {
+    sin_vocal: bool,
+    puntuacion_interior: bool,
+}
+
+/// `None` si el token no es evaluable; si lo es, sus dos rasgos sospechosos
+fn evaluar_token(token: &str) -> Option<EvaluacionToken> {
     if token.chars().any(|c| c.is_numeric() || excluye_token(c)) {
         return None;
     }
@@ -294,9 +512,10 @@ fn evaluar_token(token: &str) -> Option<bool> {
     if letras.iter().any(|c| alfabeto_de(*c) != Some(alfabeto)) {
         return None;
     }
-    let sin_vocal = !letras.iter().any(|c| es_vocal(alfabeto, *c));
-    let puntuacion_interior = token.chars().any(es_puntuacion_anomala);
-    Some(sin_vocal || puntuacion_interior)
+    Some(EvaluacionToken {
+        sin_vocal: !letras.iter().any(|c| es_vocal(alfabeto, *c)),
+        puntuacion_interior: token.chars().any(es_puntuacion_anomala),
+    })
 }
 
 #[cfg(test)]
@@ -634,31 +853,180 @@ mod tests {
         )
     }
 
+    fn es_incoherente(motivos: &[MotivoDegradacion]) -> bool {
+        motivos
+            .iter()
+            .any(|m| matches!(m, MotivoDegradacion::IncoherenciaEstructural { .. }))
+    }
+
     #[test]
-    fn test_los_simbolos_dentro_de_las_palabras_degradan() {
+    fn test_la_basura_de_simbolos_y_digitos_se_degrada_por_incoherencia() {
         let motivos = motivos(&basura_de_simbolos());
+        assert!(es_incoherente(&motivos), "{motivos:?}");
+    }
+
+    /// Calibración N1: una fuente CJK sin `ToUnicode` sale como letras sueltas de Latin-1 y
+    /// símbolos, sin un solo token evaluable por las demás señales
+    fn basura_cjk() -> String {
+        repetir(
+            "# # fl § é è, _ É Ñ d $ â ( , ) Ü áA f ‘ * D + Ô d ¢ £, ; , l - . Õ Œ I / 0 1 ~ \
+             2A Æ ) G k # # Ü á, ; D $ ¶ Å Æ ) I Ü á « », T Å B C m ïA # D $ ¶ Å Ü á « »",
+            6,
+        )
+    }
+
+    #[test]
+    fn test_el_cjk_corrupto_se_degrada_por_incoherencia() {
+        let (clase, metricas) = clasificar_pagina(&basura_cjk());
+        assert_eq!(metricas.tokens_evaluables, 0, "las demás señales no lo ven");
+        let ClasePagina::Degradada { motivos } = clase else {
+            panic!("se esperaba Degradada: {metricas:?}");
+        };
+        assert!(es_incoherente(&motivos), "{motivos:?}");
+    }
+
+    #[test]
+    fn test_el_cjk_real_no_se_evalua_por_incoherencia() {
+        for prosa in [PROSA_JA, PROSA_ZH] {
+            let (clase, metricas) = clasificar_pagina(&repetir(prosa, 10));
+            assert!(metricas.cjk * 10 > metricas.no_blancos * 3, "{metricas:?}");
+            assert_eq!(clase, ClasePagina::Legible);
+        }
+    }
+
+    #[test]
+    fn test_una_pagina_mayoritariamente_numerica_no_se_evalua_por_incoherencia() {
+        let tabla = repetir(
+            "| 1.234,5 | (67,8) | = 9 | +10 | 11; 12 | ¿13? | ×14 | ÷15 | ±16 |",
+            20,
+        );
+        let (clase, metricas) = clasificar_pagina(&tabla);
+        assert!(metricas.digitos * 2 >= metricas.no_blancos, "{metricas:?}");
+        assert_eq!(clase, ClasePagina::Legible);
+    }
+
+    /// Textos legítimos con signos dentro de los tokens: ninguno debe degradarse
+    #[test]
+    fn test_software_codigos_unidades_y_referencias_legales_no_degradan() {
+        let muestras = [
+            "use crate::domain::models::center::CenterId;\n\
+             pub fn clasificar(texto: &str) -> Option<Vec<u32>> {\n\
+             let mut paginas = Vec::new();\n\
+             for (i, linea) in texto.lines().enumerate() {\n\
+             if linea.is_empty() { continue; }\n\
+             paginas.push(u32::try_from(i + 1).ok()?);\n}\nSome(paginas)\n}\n\
+             // src/domain/mod.rs y src/infrastructure/parsers/pdf_parser.rs\n\
+             fn main() { let x = foo(bar, baz[2]) + qux * 3; println!(\"{x}\"); }",
+            "Referencias: PTF-HID-10, MIL-STD-882E, ISO 9001:2015, EN-1090-2, PO-ALM-03 Rev. 04, \
+             3.2.1(b), A.2-4, IEC 61508-3:2010 y DIN EN ISO 13849-1.",
+            "Glucosa 98 mg/dL; creatinina 0,9 mg/dL; potasio 4,1 mmol/L; Hb 13,5 g/dL; TSH 2,1 \
+             µUI/mL (VR 0,4-4,0); PA 120/80 mmHg; FC 72 lpm; SatO2 98 %.",
+            "Conforme al Art.14(a) y al art. 3.2.b) de la Ley 31/1995, y según el §21 BGB, \
+             Art.7(1)(c) RGPD, el responsable (art. 24) deberá notificarlo a la autoridad.",
+            "Sea f(x) = a+b con x=1, y R&D del 12% en km/h; el valor 2,487,862 (2026-T1) y la \
+             referencia A.2-4 de e-mail usuario@dominio.org en http://ejemplo.org/a_b cumple que \
+             la norma aplica sin excepciones durante todo el periodo anual",
+        ];
+        for muestra in muestras {
+            let texto = repetir(muestra, 8);
+            let (clase, metricas) = clasificar_pagina(&texto);
+            assert_eq!(clase, ClasePagina::Legible, "{muestra}\n{metricas:?}");
+        }
+    }
+
+    /// Prosa con `=` entre letras en una de cada `cada` palabras largas. Esas palabras empiezan
+    /// en mayúscula para que la red de vocales (regla b del SSD) no las cuente también
+    fn prosa_con_simbolos(cada: usize, veces: usize) -> String {
+        let palabras: Vec<String> = repetir(PROSA_EN, veces)
+            .split_whitespace()
+            .enumerate()
+            .map(|(i, palabra)| {
+                let letras: Vec<char> = palabra.chars().collect();
+                if i % cada == 0 && letras.len() >= 4 && letras.iter().all(|c| c.is_alphabetic()) {
+                    let mitad = letras.len() / 2;
+                    format!(
+                        "{}={}",
+                        letras[..mitad]
+                            .iter()
+                            .enumerate()
+                            .map(|(j, c)| if j == 0 { c.to_ascii_uppercase() } else { *c })
+                            .collect::<String>(),
+                        letras[mitad..].iter().collect::<String>()
+                    )
+                } else {
+                    palabra.to_string()
+                }
+            })
+            .collect();
+        palabras.join(" ")
+    }
+
+    #[test]
+    fn test_simbolos_en_zona_gris_sin_otra_senal_no_degradan() {
+        let texto = prosa_con_simbolos(3, 6);
+        let (clase, metricas) = clasificar_pagina(&texto);
+        let proporcion = proporcion(metricas.tokens_con_simbolos, metricas.tokens_con_letras);
+        assert!(
+            (UMBRAL_SIMBOLOS_ZONA_GRIS..=UMBRAL_SIMBOLOS_EN_PALABRAS).contains(&proporcion),
+            "{proporcion} {metricas:?}"
+        );
+        assert_eq!(clase, ClasePagina::Legible, "{metricas:?}");
+    }
+
+    #[test]
+    fn test_simbolos_en_zona_gris_con_palabras_sin_vocales_degradan() {
+        // Pocas palabras evaluables: la red de mojibake no actúa por sí sola, pero confirma
+        let base = prosa_con_simbolos(3, 2);
+        let texto: String = base
+            .split_whitespace()
+            .enumerate()
+            .map(|(i, palabra)| {
+                if i % 3 == 1 {
+                    cifrar(palabra)
+                } else {
+                    palabra.to_string()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
+        let (clase, metricas) = clasificar_pagina(&texto);
+        assert!(
+            metricas.tokens_evaluables < MIN_TOKENS_EVALUABLES,
+            "{metricas:?}"
+        );
+        let ClasePagina::Degradada { motivos } = clase else {
+            panic!("se esperaba Degradada: {metricas:?}");
+        };
         assert!(
             motivos
                 .iter()
-                .any(|m| matches!(m, MotivoDegradacion::SimbolosEnPalabras { proporcion, .. } if *proporcion > UMBRAL_SIMBOLOS_EN_PALABRAS)),
+                .any(|m| matches!(m, MotivoDegradacion::SimbolosEnPalabras { .. })),
             "{motivos:?}"
         );
     }
 
     #[test]
-    fn test_las_formulas_codigos_y_tablas_con_signos_internos_no_degradan() {
+    fn test_simbolos_por_encima_de_la_zona_gris_degradan_solos() {
+        let (clase, metricas) = clasificar_pagina(&prosa_con_simbolos(1, 6));
+        let ClasePagina::Degradada { motivos } = clase else {
+            panic!("se esperaba Degradada: {metricas:?}");
+        };
+        assert!(
+            motivos
+                .iter()
+                .any(|m| matches!(m, MotivoDegradacion::SimbolosEnPalabras { .. })),
+            "{motivos:?}"
+        );
+    }
+
+    #[test]
+    fn test_los_conectores_entre_letras_no_cuentan_como_simbolos() {
         let texto = repetir(
-            "Sea f(x) = a+b con x=1, y R&D del 12% en km/h; el valor 2,487,862 (2026-T1) \
-             y la referencia A.2-4 de e-mail usuario@dominio.org en http://ejemplo.org/a_b \
-             cumple que la norma aplica sin excepciones durante todo el periodo anual",
+            "src/domain/mod.rs snake_case e-mail l'acqua A.B.C don't y/o",
             10,
         );
-        let (clase, metricas) = clasificar_pagina(&texto);
-        assert!(
-            metricas.tokens_con_letras >= MIN_TOKENS_CON_LETRAS,
-            "{metricas:?}"
-        );
-        assert_eq!(clase, ClasePagina::Legible, "{metricas:?}");
+        let (_, metricas) = clasificar_pagina(&texto);
+        assert_eq!(metricas.tokens_con_simbolos, 0, "{metricas:?}");
     }
 
     #[test]

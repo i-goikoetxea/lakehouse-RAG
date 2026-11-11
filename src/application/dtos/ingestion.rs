@@ -69,6 +69,9 @@ pub enum MotivoDegradacion {
         proporcion: f32,
         tokens_evaluados: usize,
     },
+    /// Las letras no forman palabras (rachas de 3 o más letras de una escritura) y abundan los
+    /// símbolos o el ruido de Latin-1: el rastro de una fuente CJK o CID sin `ToUnicode`
+    IncoherenciaEstructural { coherencia: f32, ruido: f32 },
 }
 
 impl MotivoDegradacion {
@@ -79,6 +82,7 @@ impl MotivoDegradacion {
             Self::UsoPrivado { .. } => "caracteres de uso privado",
             Self::Mojibake { .. } => "letras sustituidas",
             Self::SimbolosEnPalabras { .. } => "símbolos dentro de las palabras",
+            Self::IncoherenciaEstructural { .. } => "letras sueltas sin formar palabras",
         }
     }
 }

@@ -58,6 +58,13 @@ async fn main() -> anyhow::Result<()> {
                 "tokens_evaluables": m.tokens_evaluables,
                 "mojibake": m.tokens_sospechosos as f32 / m.tokens_evaluables.max(1) as f32,
                 "densidad_alfanumerica": m.densidad_alfanumerica,
+                "simbolos_en_palabras": m.tokens_con_simbolos as f32 / m.tokens_con_letras.max(1) as f32,
+                "tokens_con_letras": m.tokens_con_letras,
+                "coherencia": m.letras_en_rachas as f32 / m.letras_no_cjk.max(1) as f32,
+                "letras_no_cjk": m.letras_no_cjk,
+                "digitos": m.digitos as f32 / no_blancos,
+                "cjk": m.cjk as f32 / no_blancos,
+                "ruido": (m.simbolos_anomalos.max(m.ruido_latin1)) as f32 / no_blancos,
             });
             writeln!(fichero, "{fila}")?;
             resumen.push(fila);

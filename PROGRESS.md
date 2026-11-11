@@ -1329,12 +1329,12 @@
 
 ### Sesión Pieza 1 de generalidad (2026-11-11): pdfium y compuerta de legibilidad
 
-**Estado: implementada y medida sin Claude. Pendiente de aprobación del usuario y de una decisión sobre un retroceso (abajo); sin push ni merge.** Contrato: `docs/arquitectura/ssd_generalidad_4_piezas.md` §1. Informe: `benchmarks/informes/pieza_1_20261111.md`.
+**Estado: implementada y medida sin Claude, con una segunda iteración de la compuerta tras las decisiones del mentor. Pendiente de aprobación del usuario; sin push ni merge. Va antes de la Pieza 2.** Contrato: `docs/arquitectura/ssd_generalidad_4_piezas.md` §1. Informe: `benchmarks/informes/pieza_1_20261111.md`.
 
 **Errores y retrocesos (primero):**
-- **Retroceso medido:** en 3 papers TeX antiguos, pdfium separa subíndices y superíndices. 5 páginas pierden más de 2 puntos de cobertura de palabras (tokens de fórmulas; la prosa no cambia) y 1 frase de 240 deja de localizarse. Bloquea según `CLAUDE.md` §6 salvo que el usuario lo acepte. En el mismo lote, MIL-STD-882E pasa de 0,898 a 0,998 de cobertura y el paper LaTeX moderno de 0,908 a 0,991.
-- **Falsos negativos:** chino sin `ToUnicode` 0/7 páginas detectadas; ruso 9/10.
-- **Dos cambios de señal respecto al SSD, salidos de la calibración:** el control aislado entre blancos no cuenta (había 3 falsos rechazos en un paper legible) y una señal nueva, `SimbolosEnPalabras`, para la basura de las fuentes sin `ToUnicode` (sin ella pasaba como legible). Margen estrecho.
+- **Limitación conocida, aceptada por el mentor:** en 3 papers TeX antiguos, pdfium separa subíndices y superíndices. 5 páginas pierden más de 2 puntos de cobertura de palabras (tokens de fórmulas; la prosa no cambia) y 1 frase de 240 deja de localizarse. No se reconstruyen líneas; anotado en el SSD (§1.3.1). En el mismo lote, MIL-STD-882E pasa de 0,898 a 0,998 de cobertura y el paper LaTeX moderno de 0,908 a 0,991.
+- **Falsos negativos:** en la 1.ª iteración, chino sin `ToUnicode` 0/7 y ruso 9/10. Tras la 2.ª (señal `IncoherenciaEstructural` por rachas de letras), chino 7/7, ruso 10/10, griego y polaco 9/9, con 0 falsos rechazos. Sin medir: basura sin letras o páginas de menos de 80 no blancos.
+- **Cambios de señal respecto al SSD (§1.3.1):** el control aislado entre blancos no cuenta; `SimbolosEnPalabras` solo cuenta símbolos entre dos letras, con zona gris 0,15-0,35 que exige confirmación; `IncoherenciaEstructural` mide la coherencia por rachas y no por tokens, como propuso el mentor, porque con tokens una página de código fuente se degradaba (0,19 frente a 0,91). Queda un solapamiento con la regla b) de la red de vocales del SSD.
 - pdfium no extrae texto fuera del `MediaBox`; se corrigió el generador de PDF sintéticos de los tests.
 
 **Cambios:**
@@ -1343,7 +1343,7 @@
 - [x] `EstadoContenido::LecturaDegradada` en las filas 02 y 07 que cortan una página degradada; el informe deja de ser COMPLETO. `01.paginas_degradadas` (parte de la v7: **la versión la sube la Pieza 2**; esta rama no debe integrarse sola). `aviso_contenido` cita las páginas en búsqueda, subárbol y catálogo; regla 7 del system prompt.
 - [x] Herramientas N1: `examples/medir_extraccion`, `examples/metricas_legibilidad`, `benchmarks/legibilidad/comparar.py` y `aguja_sin_claude.py`.
 
-**Tests:** 968 pasan, 0 fallan, 34 `#[ignore]`. En la ejecución completa, 14 tests de `adversarial_arnes_tests` y `adversarial_fase6_stair_tests` fallaron por tiempo agotado mientras corría la Aguja; en solitario, 54/54 y 31/31. `cargo clippy --all-targets -- -D warnings` y `cargo fmt --check`: OK. Línea base en `4989d5e`: 913 pasan, 34 ignorados. Rojo verificado: 11 unitarios de la compuerta con un stub, 4 de los dos ajustes de calibración y 1 del guion de corte. Suites nuevas: `tests/integration_pdfium.rs` (7) y `tests/adversarial_pdfium_tests.rs` (10).
+**Tests:** 975 pasan, 0 fallan, 34 `#[ignore]`, en una sola ejecución completa. En la 1.ª iteración, 14 tests de dos suites ajenas a los PDF fallaron por tiempo agotado mientras corría la Aguja; en solitario pasaron. 2.ª iteración: 6 tests rojos verificados y 8 tests nuevos de falsos rechazos y zona gris (software, códigos, unidades clínicas, referencias legales, tabla numérica y CJK real). `cargo clippy --all-targets -- -D warnings` y `cargo fmt --check`: OK. Línea base en `4989d5e`: 913 pasan, 34 ignorados. Rojo verificado: 11 unitarios de la compuerta con un stub, 4 de los dos ajustes de calibración y 1 del guion de corte. Suites nuevas: `tests/integration_pdfium.rs` (7) y `tests/adversarial_pdfium_tests.rs` (10).
 
 **Medido sin Claude:** N1 con 15 PDF públicos (286 páginas): 0 secciones perdidas, 239/240 frases en la misma página, **0 falsos rechazos**. Aguja con recuperación pura (5 × 3, sin `claude` en el PATH): `recall_mcp`, `pagina_mcp` y `seccion_mcp` en 1,00, antes y después. Está saturada: no ve la mejora de MIL-STD-882E. La Aguja con Claude (N5) no se ha ejecutado.
 

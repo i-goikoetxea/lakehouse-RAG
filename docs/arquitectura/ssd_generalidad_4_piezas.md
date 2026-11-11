@@ -127,6 +127,22 @@ pub fn clasificar_pagina(texto_crudo: &str) -> (ClasePagina, MetricasPagina);
 
 **Prohibido** limitar la longitud de token: no existe esa señal, porque las escrituras CJK, tailandesa o jemer no usan espacios.
 
+#### 1.3.1 Ajustes tras la calibración N1 (11-11-2026, con las decisiones del mentor)
+
+Detalle y márgenes en `benchmarks/informes/pieza_1_20261111.md`.
+
+- **Reemplazo y control:** un control **aislado entre blancos** no cuenta. Los delimitadores de una fuente matemática sin Unicode salen así, en su propia línea, y no dañan ninguna palabra. Un control que es blanco para Unicode (`U+000C`, `U+0085`) no aísla a otro.
+- **`SimbolosEnPalabras` (señal nueva):** proporción de tokens con letras que tienen un símbolo anómalo **entre dos letras** (`$ @ # * ~ \ | { } [ ] ^ = + ; ? ! ( )`). Los conectores (`-`, `/`, `_`, `.`, `'`, `:`, `,`) no cuentan. Con al menos 40 tokens con letras:
+  - por encima de 0,35, degrada sola;
+  - entre 0,15 y 0,35 (zona gris), solo si la confirma otra señal: más del 15 % de palabras sin vocal de su alfabeto (con 20 o más evaluables) o el colapso de la coherencia.
+- **`IncoherenciaEstructural` (señal nueva):** una página está degradada si las letras no forman palabras y, además, hay ruido.
+  - **Ámbito:** 80 o más no blancos, 20 o más letras fuera de CJK, menos del 50 % de dígitos y menos del 30 % de CJK, Kana o Hangul.
+  - **Coherencia:** proporción de las letras no CJK que están en rachas de 3 o más letras seguidas de una misma escritura. Colapsa por debajo de 0,40.
+  - **Ruido:** el máximo entre los símbolos sueltos (los anteriores más `< > " % &`) y el ruido de Latin-1, sobre los no blancos, con un mínimo de 0,05. El ruido de Latin-1 son los signos `U+00A1..U+00BF` (salvo `°` y `±`), `×`, `÷` y las letras `U+00C0..U+00FF` sueltas (en tokens de 1 o 2 caracteres o pegadas a un símbolo).
+  - **Por qué rachas y no tokens:** el mentor propuso tokens puramente alfabéticos. Así, una página de código fuente (`crate::domain::models`) colapsaba a 0,19 y se degradaba. Con rachas sube a 0,91.
+  - Las marcas que no son letras (el virama índico) prolongan la racha si son de la misma escritura. La escritura se toma de los bloques del latín, el griego, el cirílico y el árabe; para el resto, de su bloque de 128 puntos de código.
+- **Limitación conocida, aceptada:** en los PDF TeX antiguos, pdfium separa subíndices y superíndices (`r2` → `r 2`). La prosa no cambia. No se reconstruyen líneas.
+
 ### 1.4 Efecto en la ingesta y contratos
 
 - **`ParsedDocument`** (`dtos/ingestion.rs:22`):
