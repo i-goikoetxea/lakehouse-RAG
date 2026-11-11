@@ -1,30 +1,34 @@
-//! Adaptador de PDF digital, sin OCR (`docs/arquitectura/decisiones_stair.md` §5):
-//! - lopdf abre el archivo y lee `/Outlines`; pdf-extract saca el texto página a página.
-//! - No se usa `get_toc` ni `get_outlines` de lopdf: un `/Next` cíclico los deja en un bucle y
-//!   descartan títulos repetidos. Tampoco `extract_text_by_pages` de pdf-extract: se detiene en la
-//!   primera página con error y perdería el resto.
-//! - pdf-extract entra en pánico con algunas fuentes reales, así que cada página se extrae bajo
-//!   `catch_unwind` y con lopdf como respaldo. Todo corre en un hilo propio con límite de tiempo.
+//! Adaptador de PDF digital, sin OCR (`docs/arquitectura/decisiones_stair.md` §5 y
+//! `ssd_generalidad_4_piezas.md` §1):
+//! - lopdf abre el archivo, rechaza el cifrado y lee `/Outlines`. No se usa `get_toc` ni
+//!   `get_outlines` de lopdf: un `/Next` cíclico los deja en un bucle y descartan títulos repetidos.
+//! - pdfium extrae el texto de cada página en un proceso hijo aislado (`proceso_aislado.rs`). Si el
+//!   extractor o la DLL faltan, la ingesta falla con un mensaje: no hay respaldo silencioso a otro
+//!   extractor. lopdf solo cubre una página concreta que pdfium no pudo leer.
+//! - La compuerta de legibilidad (`legibilidad.rs`) mide el texto crudo de cada página antes de
+//!   normalizarlo.
+//! - lopdf corre en un hilo propio con pila grande, bajo `catch_unwind` y con límite de tiempo.
 //! - Un PDF protegido se rechaza siempre y sin abrirlo, aunque baste la contraseña vacía.
 
 use std::collections::{HashMap, HashSet};
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::time::Duration;
 
 use async_trait::async_trait;
 use lopdf::{Dictionary, Document, Object, ObjectId, decode_text_string};
-use pdf_extract::{PlainTextOutput, output_doc_page};
 use tokio::sync::oneshot;
 
-use crate::application::dtos::ingestion::ParsedDocument;
+use crate::application::dtos::ingestion::{MotivoDegradacion, PaginaDegradada, ParsedDocument};
 use crate::application::ports::document_parser::DocumentParserPort;
 use crate::domain::errors::DomainError;
+use crate::domain::services::marcas_pagina::describir_paginas;
+use crate::infrastructure::parsers::legibilidad::{ClasePagina, clasificar_pagina};
 use crate::infrastructure::parsers::pdf_estructura::{
     EntradaMarcador, dividir_secciones_largas, estructurar_por_marcadores,
     estructurar_por_numeracion, normalizar_pagina, requiere_ocr, seccion_contenido_general,
 };
+use crate::infrastructure::parsers::pdfium_extractor::PaginaExtraida;
+use crate::infrastructure::parsers::proceso_aislado::{ProcesoExtractor, TIEMPO_MAXIMO_EXTRACCION};
 
-const TIEMPO_MAXIMO_EXTRACCION: Duration = Duration::from_secs(300);
 /// Las bibliotecas recorren el PDF de forma recursiva: un PDF hostil no debe agotar la pila
 const TAMANO_PILA_EXTRACCION: usize = 32 * 1024 * 1024;
 const BYTES_DE_CABECERA: usize = 1024;
@@ -35,12 +39,19 @@ const MAX_REFERENCIAS_DESTINO: u8 = 8;
 const MAX_DESTINOS_CON_NOMBRE: usize = 100_000;
 
 /// Parser para PDF con capa de texto
-#[derive(Debug, Default, Clone)]
-pub struct PdfParser;
+#[derive(Debug, Clone, Default)]
+pub struct PdfParser {
+    extractor: ProcesoExtractor,
+}
 
 impl PdfParser {
+    /// Con el extractor `lakehouse_rag_cli` junto al ejecutable
     pub fn new() -> Self {
-        Self
+        Self::default()
+    }
+
+    pub fn con_extractor(extractor: ProcesoExtractor) -> Self {
+        Self { extractor }
     }
 }
 
@@ -59,40 +70,61 @@ impl DocumentParserPort for PdfParser {
         nombre_archivo: &str,
         contenido: &[u8],
     ) -> Result<ParsedDocument, DomainError> {
-        let (emisor, receptor) = oneshot::channel();
         let nombre = nombre_archivo.to_string();
         let bytes = contenido.to_vec();
-        std::thread::Builder::new()
-            .name("extraccion-pdf".to_string())
-            .stack_size(TAMANO_PILA_EXTRACCION)
-            .spawn(move || {
-                let resultado =
-                    catch_unwind(AssertUnwindSafe(|| extraer_documento(&nombre, &bytes)))
-                        .unwrap_or_else(|_| {
-                            Err(error_pdf(
-                                &nombre,
-                                "fallo interno al leerlo: PDF no compatible",
-                            ))
-                        });
-                let _ = emisor.send(resultado);
-            })
-            .map_err(|e| {
-                error_pdf(
-                    nombre_archivo,
-                    &format!("no se pudo iniciar la lectura: {e}"),
-                )
-            })?;
-        match tokio::time::timeout(TIEMPO_MAXIMO_EXTRACCION, receptor).await {
-            Ok(Ok(resultado)) => resultado,
-            Ok(Err(_)) => Err(error_pdf(
+        let abierto = en_hilo_protegido(nombre_archivo, move || {
+            abrir_y_leer_marcadores(&nombre, &bytes)
+        })
+        .await?;
+        let extraidas = self
+            .extractor
+            .extraer(contenido)
+            .await
+            .map_err(|motivo| error_pdf(nombre_archivo, &motivo))?;
+        let nombre = nombre_archivo.to_string();
+        let bytes = contenido.to_vec();
+        en_hilo_protegido(nombre_archivo, move || {
+            Ok(componer_documento(&nombre, &bytes, abierto, extraidas))
+        })
+        .await
+    }
+}
+
+/// Ejecuta la parte de lopdf en un hilo con pila grande, sin pánicos y con límite de tiempo
+async fn en_hilo_protegido<T: Send + 'static>(
+    nombre_archivo: &str,
+    tarea: impl FnOnce() -> Result<T, DomainError> + Send + 'static,
+) -> Result<T, DomainError> {
+    let (emisor, receptor) = oneshot::channel();
+    let nombre = nombre_archivo.to_string();
+    std::thread::Builder::new()
+        .name("extraccion-pdf".to_string())
+        .stack_size(TAMANO_PILA_EXTRACCION)
+        .spawn(move || {
+            let resultado = catch_unwind(AssertUnwindSafe(tarea)).unwrap_or_else(|_| {
+                Err(error_pdf(
+                    &nombre,
+                    "fallo interno al leerlo: PDF no compatible",
+                ))
+            });
+            let _ = emisor.send(resultado);
+        })
+        .map_err(|e| {
+            error_pdf(
                 nombre_archivo,
-                "la lectura terminó sin resultado",
-            )),
-            Err(_) => Err(error_pdf(
-                nombre_archivo,
-                "la lectura superó el tiempo máximo; el PDF puede estar dañado",
-            )),
-        }
+                &format!("no se pudo iniciar la lectura: {e}"),
+            )
+        })?;
+    match tokio::time::timeout(TIEMPO_MAXIMO_EXTRACCION, receptor).await {
+        Ok(Ok(resultado)) => resultado,
+        Ok(Err(_)) => Err(error_pdf(
+            nombre_archivo,
+            "la lectura terminó sin resultado",
+        )),
+        Err(_) => Err(error_pdf(
+            nombre_archivo,
+            "la lectura superó el tiempo máximo; el PDF puede estar dañado",
+        )),
     }
 }
 
@@ -100,15 +132,45 @@ fn error_pdf(nombre_archivo: &str, motivo: &str) -> DomainError {
     DomainError::IngestionError(format!("PDF '{nombre_archivo}': {motivo}"))
 }
 
-fn extraer_documento(nombre_archivo: &str, bytes: &[u8]) -> Result<ParsedDocument, DomainError> {
+/// Lo que lopdf aporta antes de extraer el texto
+struct PdfAbierto {
+    total_paginas: usize,
+    marcadores: Vec<EntradaMarcador>,
+}
+
+fn abrir_y_leer_marcadores(nombre_archivo: &str, bytes: &[u8]) -> Result<PdfAbierto, DomainError> {
     let documento = abrir_sin_proteccion(nombre_archivo, bytes)?;
     let total_paginas = documento.get_pages().len();
     if total_paginas == 0 {
         return Err(error_pdf(nombre_archivo, "no tiene páginas (corrupto)"));
     }
-    let (paginas, mut avisos) = extraer_paginas(&documento, total_paginas);
-    let contenido_completo = paginas.join("\n\n");
+    // Unos marcadores ilegibles no invalidan el documento: se recurre a la numeración
+    let marcadores =
+        catch_unwind(AssertUnwindSafe(|| leer_marcadores(&documento))).unwrap_or_default();
+    Ok(PdfAbierto {
+        total_paginas,
+        marcadores,
+    })
+}
+
+/// Clase de cada página según la compuerta
+#[derive(Default)]
+struct Legibilidad {
+    degradadas: Vec<PaginaDegradada>,
+    sin_texto: Vec<u32>,
+}
+
+fn componer_documento(
+    nombre_archivo: &str,
+    bytes: &[u8],
+    abierto: PdfAbierto,
+    extraidas: Vec<PaginaExtraida>,
+) -> ParsedDocument {
+    let (crudas, mut avisos) = textos_crudos(bytes, abierto.total_paginas, extraidas);
+    let legibilidad = clasificar_paginas(&crudas);
+    let paginas: Vec<String> = crudas.iter().map(|t| normalizar_pagina(t)).collect();
     let titulo = nombre_sin_extension(nombre_archivo);
+    let total_paginas = paginas.len();
 
     if requiere_ocr(&paginas) {
         avisos.push(format!(
@@ -116,7 +178,7 @@ fn extraer_documento(nombre_archivo: &str, bytes: &[u8]) -> Result<ParsedDocumen
         ));
         let respaldo = format!("[Sin texto extraíble; requiere OCR] {nombre_archivo}");
         let seccion = seccion_contenido_general(&paginas, &respaldo);
-        return Ok(ParsedDocument {
+        return ParsedDocument {
             nombre_archivo: nombre_archivo.to_string(),
             titulo,
             contenido_completo: seccion.contenido.clone(),
@@ -124,28 +186,105 @@ fn extraer_documento(nombre_archivo: &str, bytes: &[u8]) -> Result<ParsedDocumen
             tablas: Vec::new(),
             avisos_extraccion: avisos,
             requiere_ocr: true,
-        });
+            paginas_degradadas: legibilidad.degradadas,
+            paginas_sin_texto: legibilidad.sin_texto,
+        };
     }
 
-    // Unos marcadores ilegibles no invalidan el documento: se recurre a la numeración
-    let marcadores =
-        catch_unwind(AssertUnwindSafe(|| leer_marcadores(&documento))).unwrap_or_default();
-    let secciones = if marcadores.is_empty() {
+    avisos.extend(avisos_de_legibilidad(&legibilidad));
+    let secciones = if abierto.marcadores.is_empty() {
         estructurar_por_numeracion(&paginas)
             .unwrap_or_else(|| vec![seccion_contenido_general(&paginas, "")])
     } else {
-        estructurar_por_marcadores(&paginas, &marcadores)
+        estructurar_por_marcadores(&paginas, &abierto.marcadores)
     };
-    let secciones = dividir_secciones_largas(secciones);
-    Ok(ParsedDocument {
+    ParsedDocument {
         nombre_archivo: nombre_archivo.to_string(),
         titulo,
-        secciones,
+        secciones: dividir_secciones_largas(secciones),
         tablas: Vec::new(),
-        contenido_completo,
+        contenido_completo: paginas.join("\n\n"),
         avisos_extraccion: avisos,
         requiere_ocr: false,
-    })
+        paginas_degradadas: legibilidad.degradadas,
+        paginas_sin_texto: legibilidad.sin_texto,
+    }
+}
+
+/// Texto crudo de cada página de lopdf (base 1). Una página que pdfium no leyó se intenta con
+/// lopdf; si tampoco, queda vacía y constatada, sin impedir el resto
+fn textos_crudos(
+    bytes: &[u8],
+    total_paginas: usize,
+    extraidas: Vec<PaginaExtraida>,
+) -> (Vec<String>, Vec<String>) {
+    let mut por_pagina: HashMap<u32, String> = extraidas
+        .into_iter()
+        .filter_map(|p| Some((p.pagina, p.texto?)))
+        .collect();
+    let mut respaldo: Option<Option<Document>> = None;
+    let mut avisos = Vec::new();
+    let mut crudas = Vec::with_capacity(total_paginas);
+    for pagina in 1..=u32::try_from(total_paginas).unwrap_or(u32::MAX) {
+        let texto = por_pagina.remove(&pagina).or_else(|| {
+            let documento = respaldo.get_or_insert_with(|| Document::load_mem(bytes).ok());
+            let texto = documento.as_ref().and_then(|d| texto_con_lopdf(d, pagina));
+            avisos.push(match texto {
+                Some(_) => format!(
+                    "Página {pagina}: extraída con el método de respaldo; el orden de sus líneas \
+                     puede variar"
+                ),
+                None => {
+                    format!("Página {pagina}: no se pudo extraer su texto y falta en el corpus")
+                }
+            });
+            texto
+        });
+        crudas.push(texto.unwrap_or_default());
+    }
+    (crudas, avisos)
+}
+
+fn clasificar_paginas(crudas: &[String]) -> Legibilidad {
+    let mut legibilidad = Legibilidad::default();
+    for (pagina, texto) in (1u32..).zip(crudas) {
+        match clasificar_pagina(texto).0 {
+            ClasePagina::Legible => {}
+            ClasePagina::SinTexto => legibilidad.sin_texto.push(pagina),
+            ClasePagina::Degradada { motivos } => legibilidad
+                .degradadas
+                .push(PaginaDegradada { pagina, motivos }),
+        }
+    }
+    legibilidad
+}
+
+/// Un aviso por clase, con las páginas agrupadas en tramos
+fn avisos_de_legibilidad(legibilidad: &Legibilidad) -> Vec<String> {
+    let mut avisos = Vec::new();
+    if !legibilidad.degradadas.is_empty() {
+        let paginas: Vec<u32> = legibilidad.degradadas.iter().map(|p| p.pagina).collect();
+        let mut motivos: Vec<&str> = legibilidad
+            .degradadas
+            .iter()
+            .flat_map(|p| p.motivos.iter().map(MotivoDegradacion::descripcion))
+            .collect();
+        motivos.sort_unstable();
+        motivos.dedup();
+        avisos.push(format!(
+            "{}: texto degradado ({}). Sus fragmentos quedan como LECTURA_DEGRADADA: la \
+             búsqueda puede no encontrar lo que contienen. Revisa el PDF o pásalo por un OCR.",
+            describir_paginas(&paginas),
+            motivos.join(", ")
+        ));
+    }
+    if !legibilidad.sin_texto.is_empty() {
+        avisos.push(format!(
+            "{} sin texto extraíble (imagen o página en blanco).",
+            describir_paginas(&legibilidad.sin_texto)
+        ));
+    }
+    avisos
 }
 
 fn nombre_sin_extension(nombre_archivo: &str) -> String {
@@ -206,41 +345,6 @@ fn declara_cifrado(bytes: &[u8]) -> bool {
                     || resto.get(inicio).is_some_and(u8::is_ascii_digit)
             }
         })
-}
-
-/// Texto normalizado de cada página y avisos de las que fallaron: una página ilegible queda vacía
-/// y constatada, sin impedir el resto
-fn extraer_paginas(documento: &Document, total_paginas: usize) -> (Vec<String>, Vec<String>) {
-    let mut paginas = Vec::with_capacity(total_paginas);
-    let mut avisos = Vec::new();
-    for pagina in 1..=u32::try_from(total_paginas).unwrap_or(u32::MAX) {
-        let texto = texto_con_pdf_extract(documento, pagina).or_else(|| {
-            let respaldo = texto_con_lopdf(documento, pagina);
-            avisos.push(match respaldo {
-                Some(_) => format!(
-                    "Página {pagina}: extraída con el método de respaldo; el orden de sus líneas \
-                     puede variar"
-                ),
-                None => {
-                    format!("Página {pagina}: no se pudo extraer su texto y falta en el corpus")
-                }
-            });
-            respaldo
-        });
-        paginas.push(normalizar_pagina(&texto.unwrap_or_default()));
-    }
-    (paginas, avisos)
-}
-
-fn texto_con_pdf_extract(documento: &Document, pagina: u32) -> Option<String> {
-    catch_unwind(AssertUnwindSafe(|| {
-        let mut texto = String::new();
-        let mut salida = PlainTextOutput::new(&mut texto);
-        output_doc_page(documento, &mut salida, pagina).ok()?;
-        Some(texto)
-    }))
-    .ok()
-    .flatten()
 }
 
 fn texto_con_lopdf(documento: &Document, pagina: u32) -> Option<String> {

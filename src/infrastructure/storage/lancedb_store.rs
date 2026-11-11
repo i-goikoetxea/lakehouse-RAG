@@ -1127,6 +1127,7 @@ mod tests {
                 .unwrap(),
                 hash_sha256: hash.repeat(64),
                 doc_id_provisional: None,
+                paginas_degradadas: Vec::new(),
             };
             store
                 .escribir_staged(&id, vec![LoteIngesta::Catalogo(vec![fila])])

@@ -9,3 +9,4 @@ docs/validacion/stair/
 benchmarks/.cache/
 benchmarks/resultados/
 __pycache__/
+/vendor/

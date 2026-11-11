@@ -48,6 +48,7 @@ pub(crate) struct DatosRevision {
     pub fecha_vigor: Option<String>,
     pub provisional: bool,
     pub vigencia_no_declarada: bool,
+    pub paginas_degradadas: Vec<u32>,
 }
 
 impl DatosRevision {
@@ -302,10 +303,15 @@ pub(crate) fn agrupar_por_tema(
                         "score": p.score,
                         "tipo_bloque": f.tipo_bloque.map(|t| t.as_str()),
                         "estado_contenido": estado,
-                        "tiene_capa_2": estado == EstadoContenido::Completo.as_str(),
+                        "tiene_capa_2": EstadoContenido::parse(estado)
+                            .is_ok_and(|e| e.tiene_capa_2()),
                         "provisional": revision.provisional,
                         "vigencia_no_declarada": revision.vigencia_no_declarada,
-                        "aviso_contenido": explicacion_de_estado(estado, revision.provisional),
+                        "aviso_contenido": explicacion_de_estado(
+                            estado,
+                            revision.provisional,
+                            &revision.paginas_degradadas
+                        ),
                         "cita": cita,
                     })
                 })
@@ -331,7 +337,8 @@ fn documentos_no_definitivos(
         .filter_map(|r| {
             let version = i32::try_from(r.version_num).ok()?;
             let estado = estados.get(&(r.doc_id.as_str(), version)).copied()?;
-            let explicacion = explicacion_de_estado(estado, r.es_provisional())?;
+            let explicacion =
+                explicacion_de_estado(estado, r.es_provisional(), &r.paginas_degradadas)?;
             Some(json!({
                 "doc_id": r.doc_id,
                 "titulo": r.titulo,
@@ -414,6 +421,7 @@ impl LakehouseToolService {
                         fecha_vigor: r.fecha_vigor.clone(),
                         provisional: r.es_provisional(),
                         vigencia_no_declarada: r.vigencia_no_declarada,
+                        paginas_degradadas: r.paginas_degradadas.clone(),
                     },
                 )
             })

@@ -20,18 +20,31 @@ pub enum EstadoContenido {
     Completo,
     ParcialUniversal,
     RequiereOcr,
+    /// Destilado, pero la fila corta una página cuyo texto no superó la compuerta de
+    /// legibilidad (`ssd_generalidad_4_piezas.md` §1.4). Tiene Capa 2
+    LecturaDegradada,
 }
 
 impl EstadoContenido {
-    pub const VALORES_CANONICOS: [&'static str; 3] =
-        ["COMPLETO", "PARCIAL_UNIVERSAL", "REQUIERE_OCR"];
+    pub const VALORES_CANONICOS: [&'static str; 4] = [
+        "COMPLETO",
+        "PARCIAL_UNIVERSAL",
+        "REQUIERE_OCR",
+        "LECTURA_DEGRADADA",
+    ];
 
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Completo => "COMPLETO",
             Self::ParcialUniversal => "PARCIAL_UNIVERSAL",
             Self::RequiereOcr => "REQUIERE_OCR",
+            Self::LecturaDegradada => "LECTURA_DEGRADADA",
         }
+    }
+
+    /// Hay Capa 2 (matriz, tablas y grafo) para la revisión de la fila
+    pub fn tiene_capa_2(&self) -> bool {
+        matches!(self, Self::Completo | Self::LecturaDegradada)
     }
 
     pub fn parse(valor: &str) -> Result<Self, DomainError> {
@@ -39,6 +52,7 @@ impl EstadoContenido {
             "COMPLETO" => Ok(Self::Completo),
             "PARCIAL_UNIVERSAL" => Ok(Self::ParcialUniversal),
             "REQUIERE_OCR" => Ok(Self::RequiereOcr),
+            "LECTURA_DEGRADADA" => Ok(Self::LecturaDegradada),
             otro => Err(DomainError::ValidationError(format!(
                 "estado_contenido fuera de vocabulario: {otro:?}"
             ))),
@@ -287,6 +301,16 @@ mod tests {
     #[test]
     fn test_nodo_rechaza_doc_con_espacios_que_docid_recortaria() {
         assert!(NodoId::new(" PO-ALM-03#sec-1").is_err());
+    }
+
+    #[test]
+    fn test_lectura_degradada_es_un_estado_con_capa_2() {
+        let estado = EstadoContenido::parse("LECTURA_DEGRADADA").unwrap();
+        assert_eq!(estado, EstadoContenido::LecturaDegradada);
+        assert!(estado.tiene_capa_2());
+        assert!(EstadoContenido::Completo.tiene_capa_2());
+        assert!(!EstadoContenido::ParcialUniversal.tiene_capa_2());
+        assert!(!EstadoContenido::RequiereOcr.tiene_capa_2());
     }
 
     #[test]

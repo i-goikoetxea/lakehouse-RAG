@@ -31,6 +31,56 @@ pub struct ParsedDocument {
     /// PDF sin capa de texto suficiente: se indexa sin destilar y sin reintento (Fase 3)
     #[serde(default)]
     pub requiere_ocr: bool,
+    /// Páginas cuyo texto crudo no supera la compuerta de legibilidad (`ssd_generalidad_4_piezas`
+    /// §1.3); sus filas se marcan `LECTURA_DEGRADADA`
+    #[serde(default)]
+    pub paginas_degradadas: Vec<PaginaDegradada>,
+    /// Páginas con menos de 50 caracteres no blancos: se informan, no degradan
+    #[serde(default)]
+    pub paginas_sin_texto: Vec<u32>,
+}
+
+/// Página (base 1) con texto degradado y las señales que la delataron
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PaginaDegradada {
+    pub pagina: u32,
+    pub motivos: Vec<MotivoDegradacion>,
+}
+
+/// Señal de la compuerta de legibilidad que degrada una página
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MotivoDegradacion {
+    /// `U+FFFD` y controles C0/C1 (salvo salto de línea, retorno y tabulador) sobre los no blancos
+    ReemplazoOControl { proporcion: f32 },
+    /// Área de uso privado: proporción y tramos dentro de una palabra
+    UsoPrivado {
+        proporcion: f32,
+        dentro_de_palabra: usize,
+    },
+    /// Tokens sin vocal de su alfabeto o con puntuación ASCII anómala dentro
+    Mojibake {
+        proporcion: f32,
+        tokens_evaluados: usize,
+    },
+    /// Tokens con letras que llevan dentro símbolos ASCII ajenos a la escritura (`1#+$0#*`), el
+    /// rastro de una fuente sin `ToUnicode`. Añadida en la calibración N1
+    SimbolosEnPalabras {
+        proporcion: f32,
+        tokens_evaluados: usize,
+    },
+}
+
+impl MotivoDegradacion {
+    /// Descripción breve para los avisos al operador
+    pub fn descripcion(&self) -> &'static str {
+        match self {
+            Self::ReemplazoOControl { .. } => "caracteres de reemplazo o de control",
+            Self::UsoPrivado { .. } => "caracteres de uso privado",
+            Self::Mojibake { .. } => "letras sustituidas",
+            Self::SimbolosEnPalabras { .. } => "símbolos dentro de las palabras",
+        }
+    }
 }
 
 /// Punto del contenido de una sección donde empieza una página (en una sección, el

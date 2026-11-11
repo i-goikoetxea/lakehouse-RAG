@@ -666,5 +666,6 @@ fn lotes_minimos_canonicos() -> Vec<LoteIngesta> {
             .unwrap(),
         hash_sha256: sha_del_documento(),
         doc_id_provisional: None,
+        paginas_degradadas: Vec::new(),
     }])]
 }

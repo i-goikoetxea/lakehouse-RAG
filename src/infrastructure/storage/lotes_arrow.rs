@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use arrow::buffer::{NullBuffer, OffsetBuffer};
-use arrow_array::builder::{ListBuilder, StringBuilder};
+use arrow_array::builder::{Int32Builder, ListBuilder, StringBuilder};
 use arrow_array::{
     ArrayRef, BooleanArray, Date32Array, FixedSizeListArray, Float32Array, Float64Array, Int8Array,
     Int32Array, ListArray, RecordBatch, StringArray, StructArray,
@@ -179,6 +179,20 @@ fn vectores(valores: &[Option<&[f32]>]) -> Result<ArrayRef, DomainError> {
     Ok(Arc::new(lista))
 }
 
+/// Una lista vacía se guarda como nula: «sin páginas degradadas»
+fn listas_enteras_nulables<'a>(valores: impl Iterator<Item = &'a [u32]>) -> ArrayRef {
+    let mut constructor = ListBuilder::new(Int32Builder::new());
+    for lista in valores {
+        for elemento in lista {
+            constructor
+                .values()
+                .append_value(i32::try_from(*elemento).unwrap_or(i32::MAX));
+        }
+        constructor.append(!lista.is_empty());
+    }
+    Arc::new(constructor.finish())
+}
+
 fn listas_texto<'a>(valores: impl Iterator<Item = &'a [String]>) -> ArrayRef {
     let mut constructor = ListBuilder::new(StringBuilder::new());
     for lista in valores {
@@ -235,6 +249,7 @@ fn lote_catalogo(
                 .iter()
                 .map(|f| f.doc_id_provisional.as_ref().map(|d| d.as_str())),
         ),
+        listas_enteras_nulables(filas.iter().map(|f| f.paginas_degradadas.as_slice())),
     ];
     ensamblar(
         schema_documentos_catalogo(),

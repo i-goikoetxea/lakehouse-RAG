@@ -234,6 +234,40 @@ pub fn mapear_revision(
     )
 }
 
+/// Estado de la revisión y páginas degradadas por la compuerta de legibilidad
+/// (`ssd_generalidad_4_piezas.md` §1.4)
+struct EstadoPorPaginas {
+    base: EstadoContenido,
+    degradadas: Vec<u32>,
+}
+
+impl EstadoPorPaginas {
+    fn new(base: EstadoContenido, parsed: &ParsedDocument) -> Self {
+        let mut degradadas: Vec<u32> = parsed.paginas_degradadas.iter().map(|p| p.pagina).collect();
+        degradadas.sort_unstable();
+        degradadas.dedup();
+        Self { base, degradadas }
+    }
+
+    /// Una fila destilada cuyo rango de páginas corta una página degradada pasa a
+    /// `LECTURA_DEGRADADA`; las demás, y las de un documento sin destilar o sin texto, conservan
+    /// el estado de la revisión
+    fn de_filas(&self, inicio: Option<u32>, fin: Option<u32>) -> EstadoContenido {
+        let (Some(inicio), Some(fin)) = (inicio, fin.or(inicio)) else {
+            return self.base;
+        };
+        let corta = self
+            .degradadas
+            .iter()
+            .any(|pagina| (inicio.min(fin)..=inicio.max(fin)).contains(pagina));
+        if self.base == EstadoContenido::Completo && corta {
+            EstadoContenido::LecturaDegradada
+        } else {
+            self.base
+        }
+    }
+}
+
 fn mapear_con_estado(
     clave: &ClaveDocumental,
     parsed: &ParsedDocument,
@@ -244,15 +278,17 @@ fn mapear_con_estado(
     let tipo_documento = TipoDocumento::parse(&paquete.catalogo.tipo_documento)
         .unwrap_or(TIPO_DOCUMENTO_POR_DEFECTO);
     let nivel = tipo_documento.nivel_prelacion();
-    let (catalogo, aviso_fecha) = fila_catalogo(
+    let (mut catalogo, aviso_fecha) = fila_catalogo(
         clave,
         &paquete.catalogo,
         tipo_documento,
         hash_sha256,
         &parsed.contenido_completo,
     );
+    let estado = EstadoPorPaginas::new(estado, parsed);
+    catalogo.paginas_degradadas = estado.degradadas.clone();
 
-    let (nodos, textos_nodos, secciones) = estructura_universal(clave, parsed, estado);
+    let (nodos, textos_nodos, secciones) = estructura_universal(clave, parsed, &estado);
     let chunk_ids: Vec<String> = (0..secciones.len())
         .map(|idx| id_versionado(&clave.doc_id, clave.version_num, TipoEntidad::Chunk, idx))
         .collect();
@@ -269,7 +305,7 @@ fn mapear_con_estado(
     let etiquetas = etiquetas_de_tabla(&paquete.tablas, &tablas);
     let aristas = filas_aristas(clave, &paquete.aristas, &hitos, &etiquetas);
 
-    let mut chunks = filas_chunks_sin_vector(clave, nivel, estado, &secciones, &chunk_ids);
+    let mut chunks = filas_chunks_sin_vector(clave, nivel, &estado, &secciones, &chunk_ids);
     vincular_hitos(&mut chunks, &hitos, &seccion_de_hito);
     vincular_tablas(
         &mut chunks,
@@ -347,6 +383,7 @@ fn fila_catalogo(
             vigencia,
             hash_sha256: hash_sha256.to_string(),
             doc_id_provisional: None,
+            paginas_degradadas: Vec::new(),
         },
         validada.aviso,
     )
@@ -379,7 +416,7 @@ fn nivel_de_seccion(indice: usize, seccion: &ParsedSection) -> NivelJerarquico {
 fn estructura_universal(
     clave: &ClaveDocumental,
     parsed: &ParsedDocument,
-    estado: EstadoContenido,
+    estado: &EstadoPorPaginas,
 ) -> EstructuraUniversal {
     let unica;
     let secciones: &[ParsedSection] = if parsed.secciones.is_empty() {
@@ -455,7 +492,7 @@ fn estructura_universal(
         nodos.push(FilaIndice {
             nodo_id: nodo.nodo_id,
             clave: clave.clone(),
-            estado_contenido: estado,
+            estado_contenido: estado.de_filas(seccion.pagina_inicio, seccion.pagina_fin),
             tipo_nodo: seccion.tipo_nodo,
             nivel_jerarquico: nivel,
             codigo_seccion: seccion.codigo.clone(),
@@ -544,7 +581,7 @@ pub fn componer_texto_nodo(titulo: &str, resumen: &str) -> String {
 fn filas_chunks_sin_vector(
     clave: &ClaveDocumental,
     nivel: NivelPrelacion,
-    estado: EstadoContenido,
+    estado: &EstadoPorPaginas,
     secciones: &[SeccionIndexable],
     chunk_ids: &[String],
 ) -> Vec<FilaChunk> {
@@ -556,7 +593,7 @@ fn filas_chunks_sin_vector(
             clave: clave.clone(),
             nodo_id: seccion.nodo_id.clone(),
             tipo_bloque: seccion.tipo_bloque,
-            estado_contenido: estado,
+            estado_contenido: estado.de_filas(seccion.pagina_inicio, seccion.pagina_fin),
             nivel_prelacion: nivel,
             breadcrumb_jerarquia: seccion.breadcrumb.clone(),
             condicion_aplicacion: seccion.condicion.clone(),
@@ -1677,6 +1714,8 @@ mod tests {
             contenido_completo: String::new(),
             avisos_extraccion: Vec::new(),
             requiere_ocr: false,
+            paginas_degradadas: Vec::new(),
+            paginas_sin_texto: Vec::new(),
         }
     }
 

@@ -87,6 +87,7 @@ pub fn fila_catalogo(doc_id: &str, version: u32, vigor: NaiveDate, hash: &str) -
         vigencia: VentanaVigencia::new(vigor, None).unwrap(),
         hash_sha256: hash.to_string(),
         doc_id_provisional: None,
+        paginas_degradadas: Vec::new(),
     }
 }
 

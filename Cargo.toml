@@ -41,9 +41,15 @@ tauri = { version = "2", features = [] }
 tauri-plugin-dialog = "2"
 pulldown-cmark = { version = "0.12", default-features = false, features = ["html"] }
 
-# Extracción de PDF digital. lopdf va en la versión que usa pdf-extract: comparten `Document`
+# PDF digital: lopdf abre el archivo, detecta el cifrado y lee los marcadores; pdfium extrae el
+# texto en un proceso hijo (docs/arquitectura/ssd_generalidad_4_piezas.md §1.2). La DLL se obtiene
+# con scripts/obtener_pdfium.ps1 (chromium/8125, la versión de los bindings pdfium_8125)
 lopdf = "0.42"
-pdf-extract = "0.12"
+pdfium-render = { version = "=0.9.5", default-features = false, features = ["pdfium_8125"] }
+unicode-normalization = "0.1"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_System_JobObjects"] }
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }

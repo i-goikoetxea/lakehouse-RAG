@@ -38,6 +38,8 @@ pub struct FilaCatalogo {
     pub hash_sha256: String,
     /// Identidad provisional (ver `docs/arquitectura/decisiones_stair.md`, D4)
     pub doc_id_provisional: Option<DocId>,
+    /// Páginas con texto degradado según la compuerta de legibilidad; vacío se guarda como nulo
+    pub paginas_degradadas: Vec<u32>,
 }
 
 /// Tabla 02: apartado de texto con su linaje jerárquico y su embedding

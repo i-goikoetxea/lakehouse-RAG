@@ -4,12 +4,17 @@
 //! en release PowerShell y `cmd` lo esperan, la salida sale en orden y `$LASTEXITCODE` es fiable.
 //! La ventana se abre con `lakehouse_rag.exe`.
 
+use lakehouse_rag::infrastructure::parsers::pdfium_extractor::{self, ARGUMENTO_EXTRAER_TEXTO_PDF};
 use lakehouse_rag::presentation::cli::ModoEjecucion;
 use lakehouse_rag::presentation::cli::ejecutor::CODIGO_ARGUMENTOS;
 use lakehouse_rag::presentation::cli::proceso;
 
 fn main() -> anyhow::Result<()> {
     let argumentos: Vec<String> = std::env::args().collect();
+    // Proceso hijo de la extracción de PDF: antes que nada, para que stdout solo lleve su JSON
+    if argumentos.get(1).map(String::as_str) == Some(ARGUMENTO_EXTRAER_TEXTO_PDF) {
+        std::process::exit(pdfium_extractor::ejecutar_extraccion_por_stdio());
+    }
     match ModoEjecucion::desde_args(&argumentos) {
         ModoEjecucion::ErrorArgumentos(mensaje) => {
             std::process::exit(proceso::informar_error_argumentos(&mensaje))

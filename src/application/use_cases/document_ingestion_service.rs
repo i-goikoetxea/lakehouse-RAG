@@ -163,7 +163,7 @@ impl DocumentIngestionService {
                 .await
         };
         let (clave, revision, estado, mut avisos) = match destilado {
-            Ok((clave, revision)) => (clave, revision, EstadoContenido::Completo, Vec::new()),
+            Ok((clave, revision)) => (clave, revision, estado_destilado(&parsed), Vec::new()),
             Err(fallo) => {
                 let (clave, revision) =
                     mapear_revision_provisional(centro_id, &parsed, &hash_sha256)?;
@@ -280,7 +280,7 @@ impl DocumentIngestionService {
         Ok(reporte_confirmado(
             &clave,
             &ingest_id,
-            EstadoContenido::Completo,
+            estado_destilado(&parsed),
             filas,
             resumen.versiones_derogadas,
             avisos,
@@ -547,6 +547,16 @@ fn aviso_provisional(doc_id: &DocId, fallo: &DomainError) -> String {
          provisional '{doc_id}' y sin hitos ni tablas estructuradas; reinténtalo cuando Claude esté \
          disponible."
     )
+}
+
+/// Un documento destilado deja de ser COMPLETO si tiene 1 o más páginas degradadas
+/// (`ssd_generalidad_4_piezas.md` §1.4)
+fn estado_destilado(parsed: &ParsedDocument) -> EstadoContenido {
+    if parsed.paginas_degradadas.is_empty() {
+        EstadoContenido::Completo
+    } else {
+        EstadoContenido::LecturaDegradada
+    }
 }
 
 fn aviso_requiere_ocr(doc_id: &DocId) -> String {

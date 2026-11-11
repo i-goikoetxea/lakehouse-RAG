@@ -11,7 +11,10 @@ use std::collections::{HashMap, HashSet};
 
 use serde_json::{Map, Value, json};
 
-use super::{ContextoConsulta, LakehouseToolService, entero, literal_sql, texto, texto_opcional};
+use super::{
+    ContextoConsulta, LakehouseToolService, entero, lista_de_paginas, literal_sql, texto,
+    texto_opcional,
+};
 use crate::application::dtos::tools::{
     LakehouseToolName, StairGetSubtreeContextParams, StairNavigateTocParams, parsear_argumentos,
 };
@@ -24,7 +27,9 @@ use crate::domain::models::estructura_documental::{
 };
 use crate::domain::services::arbol_secciones::{comparar_natural, comparar_rutas_linaje};
 use crate::domain::services::fragmentacion::reconstruir_con_saltos;
-use crate::domain::services::marcas_pagina::{SaltoPagina, saltos_del_tramo, texto_con_marcas};
+use crate::domain::services::marcas_pagina::{
+    SaltoPagina, describir_paginas, saltos_del_tramo, texto_con_marcas,
+};
 use crate::domain::services::normalizacion::codigo_canonico;
 
 /// Longitud máxima de un identificador pedido por el agente
@@ -54,6 +59,8 @@ pub(crate) struct RevisionDocumental {
     pub fecha_vigor: Option<String>,
     pub doc_id_provisional: Option<String>,
     pub vigencia_no_declarada: bool,
+    /// Páginas con texto degradado según 01 (`ssd_generalidad_4_piezas.md` §1.4)
+    pub paginas_degradadas: Vec<u32>,
 }
 
 impl RevisionDocumental {
@@ -117,8 +124,40 @@ pub(crate) fn seccion_real_de(nodo_id: &str) -> &str {
     codigo_real_de(nodo_id)
 }
 
-/// Explicación para el agente de un documento que no está completo
-pub(crate) fn explicacion_de_estado(estado: &str, provisional: bool) -> Option<String> {
+/// Explicación para el agente de un documento que no está completo. Las páginas degradadas son
+/// del documento entero: valen para cualquier fragmento suyo, porque lo que importa es no concluir
+/// que algo no consta
+pub(crate) fn explicacion_de_estado(
+    estado: &str,
+    provisional: bool,
+    paginas_degradadas: &[u32],
+) -> Option<String> {
+    let partes: Vec<String> = [
+        explicacion_del_estado(estado, provisional),
+        explicacion_de_paginas_degradadas(estado, paginas_degradadas),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    (!partes.is_empty()).then(|| partes.join(" "))
+}
+
+fn explicacion_de_paginas_degradadas(estado: &str, paginas: &[u32]) -> Option<String> {
+    let lista = if paginas.is_empty() {
+        (EstadoContenido::parse(estado).ok()? == EstadoContenido::LecturaDegradada)
+            .then(|| "Algunas páginas".to_string())?
+    } else {
+        describir_paginas(paginas)
+    };
+    Some(format!(
+        "LECTURA_DEGRADADA: texto degradado en el PDF ({lista}; letras sustituidas o \
+         caracteres ilegibles), así que lo que contienen esas páginas puede no aparecer en la \
+         búsqueda. No concluyas que un dato no consta a partir de ellas; si la respuesta depende \
+         de esas páginas, dilo al usuario."
+    ))
+}
+
+fn explicacion_del_estado(estado: &str, provisional: bool) -> Option<String> {
     match EstadoContenido::parse(estado) {
         Ok(EstadoContenido::RequiereOcr) => Some(
             "Documento REQUIERE_OCR: existe en el catálogo, pero no tiene texto extraíble, así que su contenido no es consultable. Dilo al usuario e indícale que lo pase por OCR y lo ingiera de nuevo; no deduzcas su contenido."
@@ -128,8 +167,18 @@ pub(crate) fn explicacion_de_estado(estado: &str, provisional: bool) -> Option<S
             "Documento PARCIAL_UNIVERSAL: su texto es literal y consultable, pero no se ha destilado. No tiene Capa 2 (matriz, tablas ni grafo), sus metadatos son de respaldo (prelación 5) y su identificador es provisional, así que puede ser otra revisión de un documento vigente: dilo en la respuesta y no lo mezcles con él en silencio."
                 .to_string(),
         ),
+        Ok(EstadoContenido::LecturaDegradada) => None,
         _ if provisional => Some("Documento provisional sin validar.".to_string()),
         _ => None,
+    }
+}
+
+fn gravedad_de_estado(estado: &str) -> u8 {
+    match EstadoContenido::parse(estado) {
+        Ok(EstadoContenido::Completo) | Err(_) => 0,
+        Ok(EstadoContenido::LecturaDegradada) => 1,
+        Ok(EstadoContenido::ParcialUniversal) => 2,
+        Ok(EstadoContenido::RequiereOcr) => 3,
     }
 }
 
@@ -395,7 +444,7 @@ impl LakehouseToolService {
             .consultar(
                 contexto,
                 &format!(
-                    "SELECT d.doc_id, d.version_num, d.revision, d.titulo, d.fecha_vigor, d.doc_id_provisional, {} AS vigencia_no_declarada FROM {} d WHERE {}",
+                    "SELECT d.doc_id, d.version_num, d.revision, d.titulo, d.fecha_vigor, d.doc_id_provisional, d.paginas_degradadas, {} AS vigencia_no_declarada FROM {} d WHERE {}",
                     contexto.marca_no_declarada("d"),
                     contexto.vista(TABLA_DOCUMENTOS_CATALOGO),
                     contexto.predicado_vigencia("d", "d")
@@ -415,6 +464,7 @@ impl LakehouseToolService {
                     .get("vigencia_no_declarada")
                     .and_then(Value::as_bool)
                     .unwrap_or(false),
+                paginas_degradadas: lista_de_paginas(f, "paginas_degradadas"),
             })
             .collect();
         // Primero lo afirmable: una revisión sin fecha no sustituye a una con ventana firme
@@ -540,7 +590,11 @@ impl LakehouseToolService {
             "estado_contenido": estado,
             "provisional": revision.es_provisional(),
             "revision_vigencia_no_declarada": revision.vigencia_no_declarada,
-            "aviso_contenido": explicacion_de_estado(estado, revision.es_provisional()),
+            "aviso_contenido": explicacion_de_estado(
+                estado,
+                revision.es_provisional(),
+                &revision.paginas_degradadas
+            ),
         })
     }
 
@@ -809,18 +863,21 @@ impl LakehouseToolService {
                 ),
             )
             .await?;
-        Ok(filas
-            .iter()
-            .map(|f| {
-                (
-                    (
-                        texto(f, "doc_id"),
-                        entero(f, "version_num").unwrap_or_default(),
-                    ),
-                    texto(f, "estado_contenido"),
-                )
-            })
-            .collect())
+        // Con estados mezclados en una revisión (filas degradadas y completas), gana el que
+        // más avisa, para que el resultado no dependa del orden de las filas
+        let mut estados: HashMap<(String, i64), String> = HashMap::new();
+        for f in &filas {
+            let clave = (
+                texto(f, "doc_id"),
+                entero(f, "version_num").unwrap_or_default(),
+            );
+            let estado = texto(f, "estado_contenido");
+            let actual = estados.entry(clave).or_insert_with(|| estado.clone());
+            if gravedad_de_estado(&estado) > gravedad_de_estado(actual) {
+                *actual = estado;
+            }
+        }
+        Ok(estados)
     }
 }
 
@@ -984,15 +1041,40 @@ mod tests {
     #[test]
     fn test_explicaciones_de_estado() {
         assert!(
-            explicacion_de_estado("REQUIERE_OCR", true)
+            explicacion_de_estado("REQUIERE_OCR", true, &[])
                 .unwrap()
                 .contains("OCR")
         );
         assert!(
-            explicacion_de_estado("PARCIAL_UNIVERSAL", true)
+            explicacion_de_estado("PARCIAL_UNIVERSAL", true, &[])
                 .unwrap()
                 .contains("Capa 2")
         );
-        assert!(explicacion_de_estado("COMPLETO", false).is_none());
+        assert!(explicacion_de_estado("COMPLETO", false, &[]).is_none());
+    }
+
+    #[test]
+    fn test_las_paginas_degradadas_se_citan_en_el_aviso_de_cualquier_fragmento() {
+        let aviso = explicacion_de_estado("LECTURA_DEGRADADA", false, &[2, 3, 4, 9]).unwrap();
+        assert!(aviso.contains("Páginas 2-4, 9"), "{aviso}");
+        assert!(
+            aviso.contains("No concluyas que un dato no consta"),
+            "{aviso}"
+        );
+        let completo = explicacion_de_estado("COMPLETO", false, &[7]).unwrap();
+        assert!(completo.contains("Página 7"), "{completo}");
+        let provisional = explicacion_de_estado("PARCIAL_UNIVERSAL", true, &[5]).unwrap();
+        assert!(provisional.contains("Capa 2") && provisional.contains("Página 5"));
+        assert!(
+            explicacion_de_estado("LECTURA_DEGRADADA", false, &[])
+                .unwrap()
+                .contains("LECTURA_DEGRADADA")
+        );
+    }
+
+    #[test]
+    fn test_el_estado_mas_grave_de_una_revision_gana() {
+        assert!(gravedad_de_estado("LECTURA_DEGRADADA") > gravedad_de_estado("COMPLETO"));
+        assert!(gravedad_de_estado("REQUIERE_OCR") > gravedad_de_estado("LECTURA_DEGRADADA"));
     }
 }

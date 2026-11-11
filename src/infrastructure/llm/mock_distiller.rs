@@ -217,6 +217,8 @@ mod tests {
                 .to_string(),
             avisos_extraccion: Vec::new(),
             requiere_ocr: false,
+            paginas_degradadas: Vec::new(),
+            paginas_sin_texto: Vec::new(),
         };
 
         let distiller = MockDistiller::new();
@@ -246,6 +248,8 @@ mod tests {
             contenido_completo: "Test".to_string(),
             avisos_extraccion: Vec::new(),
             requiere_ocr: false,
+            paginas_degradadas: Vec::new(),
+            paginas_sin_texto: Vec::new(),
         };
 
         let err = distiller.distill(&parsed).await.unwrap_err();
