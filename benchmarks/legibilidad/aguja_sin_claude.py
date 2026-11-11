@@ -43,7 +43,7 @@ def main() -> int:
         print("claude sigue en el PATH: no se mide", file=sys.stderr)
         return 2
     run_aguja._consulta = _consulta_sin_agente
-    return run_aguja.main()
+    return run_aguja.principal()
 
 
 if __name__ == "__main__":

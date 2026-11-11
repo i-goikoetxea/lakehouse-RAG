@@ -1326,3 +1326,30 @@
 - Las decisiones D1 a D6 del §0 del SSD son del usuario.
 - Orden recomendado: 3c, 3a y 1 en paralelo; después la 2 (v7); después la 3b; después la 4. La 5, en otra rama.
 - Sin verificar: la API y la versión de `pdfium-render` y el tamaño de la DLL (van al spike de la Pieza 1); la latencia real de Haiku con este prompt.
+
+### Sesión Pieza 1 de generalidad (2026-11-11): pdfium y compuerta de legibilidad
+
+**Estado: implementada y medida sin Claude. Pendiente de aprobación del usuario y de una decisión sobre un retroceso (abajo); sin push ni merge.** Contrato: `docs/arquitectura/ssd_generalidad_4_piezas.md` §1. Informe: `benchmarks/informes/pieza_1_20261111.md`.
+
+**Errores y retrocesos (primero):**
+- **Retroceso medido:** en 3 papers TeX antiguos, pdfium separa subíndices y superíndices. 5 páginas pierden más de 2 puntos de cobertura de palabras (tokens de fórmulas; la prosa no cambia) y 1 frase de 240 deja de localizarse. Bloquea según `CLAUDE.md` §6 salvo que el usuario lo acepte. En el mismo lote, MIL-STD-882E pasa de 0,898 a 0,998 de cobertura y el paper LaTeX moderno de 0,908 a 0,991.
+- **Falsos negativos:** chino sin `ToUnicode` 0/7 páginas detectadas; ruso 9/10.
+- **Dos cambios de señal respecto al SSD, salidos de la calibración:** el control aislado entre blancos no cuenta (había 3 falsos rechazos en un paper legible) y una señal nueva, `SimbolosEnPalabras`, para la basura de las fuentes sin `ToUnicode` (sin ella pasaba como legible). Margen estrecho.
+- pdfium no extrae texto fuera del `MediaBox`; se corrigió el generador de PDF sintéticos de los tests.
+
+**Cambios:**
+- [x] pdfium-render 0.9.5 + pdfium chromium/8125 (DLL de 7,6 MB, sha256 fijado) en un proceso hijo: `lakehouse_rag_cli --extraer-texto-pdf`, PDF por stdin, job object de 2 GiB, 300 s. DLL solo por ruta absoluta; `scripts/obtener_pdfium.ps1` y `build.rs`. Se retira `pdf-extract`.
+- [x] `legibilidad.rs`: `LEGIBLE`, `DEGRADADA` o `SIN_TEXTO`. `ParsedDocument.paginas_degradadas` y `paginas_sin_texto`, con avisos.
+- [x] `EstadoContenido::LecturaDegradada` en las filas 02 y 07 que cortan una página degradada; el informe deja de ser COMPLETO. `01.paginas_degradadas` (parte de la v7: **la versión la sube la Pieza 2**; esta rama no debe integrarse sola). `aviso_contenido` cita las páginas en búsqueda, subárbol y catálogo; regla 7 del system prompt.
+- [x] Herramientas N1: `examples/medir_extraccion`, `examples/metricas_legibilidad`, `benchmarks/legibilidad/comparar.py` y `aguja_sin_claude.py`.
+
+**Tests:** 968 pasan, 0 fallan, 34 `#[ignore]`. En la ejecución completa, 14 tests de `adversarial_arnes_tests` y `adversarial_fase6_stair_tests` fallaron por tiempo agotado mientras corría la Aguja; en solitario, 54/54 y 31/31. `cargo clippy --all-targets -- -D warnings` y `cargo fmt --check`: OK. Línea base en `4989d5e`: 913 pasan, 34 ignorados. Rojo verificado: 11 unitarios de la compuerta con un stub, 4 de los dos ajustes de calibración y 1 del guion de corte. Suites nuevas: `tests/integration_pdfium.rs` (7) y `tests/adversarial_pdfium_tests.rs` (10).
+
+**Medido sin Claude:** N1 con 15 PDF públicos (286 páginas): 0 secciones perdidas, 239/240 frases en la misma página, **0 falsos rechazos**. Aguja con recuperación pura (5 × 3, sin `claude` en el PATH): `recall_mcp`, `pagina_mcp` y `seccion_mcp` en 1,00, antes y después. Está saturada: no ve la mejora de MIL-STD-882E. La Aguja con Claude (N5) no se ha ejecutado.
+
+**Notas para la siguiente sesión:**
+- Pieza 2: añade la subida a v7. Las columnas de la Pieza 1 están en `schemas.rs` (01) y `lotes_arrow.rs`. Nota de coordinación en la carpeta compartida.
+- Pieza 3a: esta rama toca `busqueda.rs` en `DatosRevision`, las dos llamadas a `explicacion_de_estado` y `tiene_capa_2`.
+- `bundle.resources` no se aplica mientras el bundle esté desactivado (informe §7).
+- Pendiente: CFF sintético diferencial; `reporte_ya_ingerido` no refleja `LECTURA_DEGRADADA`; calibración con el set oculto por la sesión evaluadora.
+- Compilación con el `target` propio de este worktree. FastEmbed: `FASTEMBED_CACHE_DIR` en `target/fastembed_cache` de `citas-pagina-209ed5`.
