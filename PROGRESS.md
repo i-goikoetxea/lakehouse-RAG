@@ -1446,3 +1446,19 @@
 **Notas para la siguiente sesión:**
 - Medir con un lote nuevo de preguntas con cálculo, escrito por la sesión evaluadora, y medir Haiku en real.
 - `anclaje_tabla.rs` y la Regla 15 quedan sin tocar.
+### Sesión multidocumento (2026-11-11): búsquedas separadas en el agente
+
+**Estado: BLOQUEADA por ahora (`CLAUDE.md` §6).** Rama `claude/multidoc-consultas-separadas`, creada desde `main` (`734a263`), sin push ni merge. Informe: `benchmarks/informes/multidoc_consultas_separadas_20261111.md`. La cuota de la Pieza 3a queda descartada (decisión del mentor); su rama se conserva como referencia.
+
+- [x] Regla 15 del system prompt (`agent_orchestrator.rs`): una `search_normative_context` por entidad, documento o condición. Antes de afirmar «no consta», `inspect_lakehouse_catalog` y una segunda búsqueda dirigida (con `doc_id` o en `EXACT_BM25`). Test en rojo y después en verde. Sin detección léxica y sin el apoyo por `doc_id` literal, que según la medición no se activaría nunca.
+- [x] Herramientas de medición: `benchmarks/run_n3_cuota.py`, `run_n3_separadas.py` (traídas de la rama de la cuota) y `run_multidoc_claude.py`, con sus tests.
+- [x] N0: 922 aprobados, 0 fallos y 35 ignorados (base 921/0/35). `clippy` y `fmt` limpios.
+- **Errores (Claude real, Sonnet, una pasada por binario, 98 respuestas sin fallos de ejecución):**
+  - Todos los errores son abstenciones falsas en preguntas semánticas de aguja: el agente busca en español sobre el documento en inglés. Ocurren en las dos variantes.
+  - Un documento: 21/23 → **20/23** (retroceso en el recuento bruto). Sin las 2 preguntas ambiguas de mi set, 20/21 → 20/21.
+  - Cruzadas: 19/26 → 23/26 tras la revisión manual (2 falsos negativos del puntuador en la rama).
+  - Herramientas por pregunta: de 1,91 a 2,09 (un documento) y de 3,31 a 3,81 (cruzadas). Latencia de una sola pasada, con la CPU al 28-39 %: no es concluyente.
+- **Para la siguiente sesión:**
+  - Decidir si se repite con 3 pasadas (unas 140 respuestas, en un centro con agujas de sujeto único) para separar el ruido del retroceso.
+  - El problema dominante es la búsqueda en otro idioma que el del documento (informe §4).
+
