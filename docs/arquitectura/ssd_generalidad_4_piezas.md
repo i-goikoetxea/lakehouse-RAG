@@ -1,767 +1,726 @@
 # SSD: generalidad en 4 piezas (PDF, página de Capa 2, búsqueda y arnés)
 
-**Estado: borrador para aprobación. No hay código de producción.** Fecha: 11-11-2026. Base: `main` en `62f3010`.
+**Estado: cerrado para aprobación del usuario. No hay código de producción.** Fecha: 11-11-2026. Base: `main` en `62f3010`.
 
-Origen: [`docs/estado/situacion_rag_20261111.md`](../estado/situacion_rag_20261111.md), [`docs/estado/auditoria_generalidad_20261111.md`](../estado/auditoria_generalidad_20261111.md) y la decisión del mentor externo:
-- la rama `claude/arreglos-rag-512d66` **no se integra**;
-- se descartan `negaciones.rs` y `apartado_tabla.rs`;
-- solo se rescata el silencio de los estados ambiguos de `verificador_paginas.rs`.
+Origen:
+- [`docs/estado/situacion_rag_20261111.md`](../estado/situacion_rag_20261111.md) y [`auditoria_generalidad_20261111.md`](../estado/auditoria_generalidad_20261111.md);
+- la primera decisión del mentor técnico externo: la rama `claude/arreglos-rag-512d66` no se integra; se descartan `negaciones.rs` y `apartado_tabla.rs`; solo se rescata el silencio de `verificador_paginas.rs`;
+- **el resultado del debate con el mentor, vinculante:** pdfium en la Pieza 1, anclaje por ventana de tabla en la 2, protocolo JSON en la 3, verificador híbrido de procedencia en la 4 y tool use nativo como Pieza 5 futura;
+- el criterio del usuario para la Pieza 1: **decidir por calidad y seguridad**; la distribución de la DLL no cuenta como inconveniente.
 
-**Regla dura de este SSD: generalidad absoluta.** Ninguna pieza añade listas de palabras, locuciones o regex de un idioma o dominio. Sí se admiten:
-- propiedades de Unicode (`char::is_alphanumeric`, rangos de la zona de uso privado, bloques de escrituras sin espacios);
-- claves del propio protocolo de la app (`"tool_calls"`);
-- tipografía (pares de comillas).
+**Regla dura: generalidad absoluta.** Ninguna pieza añade listas de palabras, locuciones o regex de un idioma o dominio. Sí se admiten:
+- propiedades de Unicode (`char::is_alphanumeric`, `is_lowercase`, rangos de la PUA y bloques de escritura);
+- propiedades de los alfabetos (qué letras son vocales en el latín, el griego y el cirílico; §1.3);
+- claves del protocolo de la propia app (`"tool_calls"`);
+- tipografía.
 
-Las líneas citadas son de `62f3010` y están comprobadas. Donde la auditoría daba otra línea, vale la de aquí: por ejemplo, el `FinalMessage` de `claude_agent_runner.rs` está en la :143, no en la :140.
+Las líneas citadas son de `62f3010` y están comprobadas. Si difieren de la auditoría, vale la de aquí: por ejemplo, el `FinalMessage` de `claude_agent_runner.rs` está en la :143.
 
 ---
 
-## 0. Resumen y decisiones que pide
+## 0. Resumen
 
-| Pieza | Fallos del set v2 que ataca | Cambia el esquema | Riesgo de retroceso |
+| Pieza | Fallos del set v2 que ataca | Esquema | Riesgo de retroceso |
 |---|---|---|---|
-| 1. PDF y compuerta de legibilidad | 4 (V50 y V51, en 2 pasadas) | Sí: valor nuevo de `estado_contenido` (va con la v7) | Medio: toca el texto de todos los PDF |
-| 2. Página exacta de la Capa 2 | 0 del set; evita el retroceso de la rama (1 página falsa) | **Sí: v6 → v7** | Bajo: hoy el lookup no da página |
-| 3. Búsqueda, fuga de *tool calls* y verificador | Multidocumento (no concluyente), 1 fuga en `main`, 3 o más avisos falsos | No | Medio en la cuota; bajo en el resto |
-| 4. Arnés estructural y verificador semántico | 4 (V22 y V53, en 2 pasadas) | No | **Alto**: protege las trampas y el «no consta» |
+| 1. PDF con pdfium y compuerta por página | 4 (V50 y V51, en 2 pasadas) | v7 (estado nuevo y lista de páginas) | **Alto**: cambia el texto de todos los PDF |
+| 2. Página exacta de la Capa 2 | Evita el retroceso de la rama (1 página falsa) y da página en tablas (hoy no hay) | **v7** (columnas de página) | Bajo: hoy el lookup no da página |
+| 3. JSON embebido, cuota y verificador | 1 fuga en `main`; multidocumento (no concluyente); 3 o más avisos falsos | No | Medio en la cuota, bajo en el resto |
+| 4. Verificador híbrido de procedencia | 4 (V22 y V53, en 2 pasadas) | No | **Alto**: protege las trampas y el «no consta» |
+| 5. Tool use nativo por MCP | — | — | **Fuera de esta rama**: solo diseño futuro (§5) |
 
-**Decisiones para el usuario (detalle en cada pieza):**
-1. **D1. Extractor:** mantener `pdf-extract`/`lopdf` e inyectar un ToUnicode propio (opción b, recomendada), o `pdfium-render` (opción a). §1.1.
-2. **D2. Esquema v7:** hay que **recrear los centros** una sola vez, cuando las piezas 1 y 2 estén integradas. §2.4.
-3. **D3. Estado nuevo `LECTURA_DUDOSA`:** marca las filas de las páginas que fallan la compuerta, en lugar de rebajar todo el documento. §1.3.
-4. **D4. Streaming:** si el arnés valida todos los turnos, el texto emitido en vivo puede tener que retirarse. Propuesta: un evento `TextoEnVivoDescartado`, en lugar de retener siempre el texto. §3.2.
-5. **D5. Arnés:** se quitan del guard las reglas con disparador léxico (`CapaDosNoIntentada` y `CifraEnAbstencion`). El `IntentDetector` queda solo como pista previa, que nunca bloquea. §4.3.
-6. **D6. Microllamada a Haiku:** añade unos 6-9 s cuando se dispara, medidos en el spike de la Fase 0. Si falla, la regla actúa como hoy (falla cerrada). §4.4 y §4.5.
-7. **D7. Invariante «conclusión sin consulta»:** es nuevo. Puede meter reintentos en saludos o preguntas sobre la app. §4.2.
+### Decisiones que tiene que aprobar el usuario
+
+1. **D1. Pieza 1:** pdfium-render como extractor de texto, **en un proceso hijo aislado** (§1.2). Implica una dependencia nueva y una DLL en el bundle de Tauri. Se retira `pdf-extract`; `lopdf` se queda para abrir el PDF, detectar el cifrado y leer los marcadores.
+2. **D2. Esquema v7:** **hay que recrear los centros y volver a ingerir**, una sola vez, con las piezas 1 y 2 integradas (§2.5).
+3. **D3. Estado nuevo `LECTURA_DEGRADADA`** en las filas de las páginas degradadas, más la lista exacta de páginas en el catálogo (§1.4).
+4. **D4. Streaming:** el detector de JSON embebido puede actuar después de que el texto se haya emitido en vivo. Propuesta: el evento `TextoEnVivoDescartado`, que conserva el streaming (§3b).
+5. **D5. Pieza 4:** se elimina `PETICIONES_DE_REFERENCIA`. Una petición de «valor de referencia» que el documento no contiene ya no autoriza una cifra de memoria (§4.4).
+6. **D6.** `LOCUCIONES_DE_ABSTENCION` **se mantiene de forma provisional** como disparador de `CifraEnAbstencion`. Solo puede endurecer y nunca aprueba nada. Su sustitución depende de la Pieza 5 (§4.4).
 
 ---
 
-## 1. Pieza 1: ingesta de PDF robusta y compuerta de legibilidad
+## 1. Pieza 1: PDF con pdfium-render y compuerta de legibilidad por página
 
-### 1.1 Diagnóstico verificado y elección del extractor
+### 1.1 Diagnóstico verificado
 
-**Comprobado en el código:**
-- La extracción es por página: `pdf_parser.rs:207-232` (`extraer_paginas`), con `pdf_extract::output_doc_page` y `lopdf::extract_text` como respaldo.
-- `requiere_ocr` (`pdf_estructura.rs:145`) solo cuenta caracteres no blancos.
-- `normalizar_pagina` (`pdf_estructura.rs:116`) **borra los caracteres de control** antes de cualquier medición. La compuerta debe medir el texto crudo.
-- El documento queda COMPLETO si la destilación tiene éxito (`document_ingestion_service.rs:166`). Los avisos de extracción solo se añaden a la lista (`:184`).
+- **Extracción actual:** página a página con `pdf_extract::output_doc_page`, con `lopdf::extract_text` como respaldo (`pdf_parser.rs:207-232`).
+- `requiere_ocr` solo cuenta caracteres no blancos (`pdf_estructura.rs:145`).
+- `normalizar_pagina` **borra los caracteres de control** (`pdf_estructura.rs:116`). La compuerta debe medir el texto crudo.
+- El documento queda COMPLETO en cuanto la destilación termina bien (`document_ingestion_service.rs:166`). Los avisos de extracción solo se añaden a la lista (`:184`).
 
-**Comprobado en `pdf-extract` 0.12.1** (`~/.cargo/registry/.../pdf-extract-0.12.1/src/lib.rs`):
-1. **`/Differences` ya se decodifica por nombre de glifo** (`:477-535`), pero `glyphnames::name_to_unicode` es una **búsqueda exacta** en una tabla fija. No aplica el algoritmo AGL: `uniXXXX`, `uXXXX[XX]`, ligaduras `f_f_i`, sufijos `.sc`/`.alt`.
-   - Un nombre desconocido solo produce un `warn!`, y el código **conserva la letra de la codificación base**.
-   - Sin `/BaseEncoding`, esa base es `PDFDocEncoding` (`:471-476`), no la codificación interna de la fuente que exige la especificación.
-2. **Fuentes CFF (`FontFile3/Type1C`, `:406-434`):** el `unicode_map` se construye con la **codificación interna** de la fuente. Después, en el bucle de `/Differences`, una entrada ya ocupada **no se sustituye** (`Entry::Occupied` solo avisa, `:496-505`).
-   - Así, la codificación interna gana a `/Differences`, al revés de lo que dice la especificación PDF.
-   - En una fuente subconjunto, cuyos códigos internos son arbitrarios, eso da **letras sustituidas**.
-3. Las entradas de un `/ToUnicode` **sí ganan** a las demás: `unicode_map.extend(get_unicode_map(...))` (`:452-455`).
+**Defectos de `pdf-extract` 0.12.1, comprobados en su código fuente (`lib.rs`):**
+- En las fuentes CFF (`FontFile3/Type1C`, `:406-434`), el mapa de caracteres sale de la **codificación interna** de la fuente. Las entradas de `/Differences` **no la sustituyen**: `Entry::Occupied` solo emite un `warn!` (`:496-505`). Es lo contrario de lo que dice la especificación PDF, y produce letras sustituidas en las fuentes subconjunto.
+- Los nombres de glifo se buscan de forma exacta (`glyphnames`, privado, `:28`). No se aplica el algoritmo AGL (`uniXXXX`, sufijos, ligaduras). Un nombre desconocido conserva la letra de la codificación base, que es `PDFDocEncoding` si no hay `/BaseEncoding` (`:471-476`).
 
-**Supuesto, no comprobado con el documento:** el informe agregado del set v2 describe el PDF de V50/V51 como Type1 (CFF) con `/Differences` y sin ToUnicode. Encaja con los defectos 1 y 2, pero no he abierto ese PDF: no se puede.
+**Supuesto:** el informe agregado del set v2 describe el PDF de V50/V51 como «Type1 (CFF) con `/Differences` sin ToUnicode», lo que encaja con estos defectos. El PDF no se ha abierto: no se puede.
 
-**Elección: opción (b).** Mantener `pdf-extract`/`lopdf` y, antes de extraer, **inyectar en memoria un `/ToUnicode` propio** en cada fuente simple que no lo tenga. Por el punto 3, `pdf-extract` lo usará sin tocar el crate.
+### 1.2 Decisión: pdfium-render, por calidad y seguridad
 
-| Criterio | (a) `pdfium-render` | (b) ToUnicode propio |
+| Criterio | `pdf-extract` + ToUnicode propio | **pdfium-render** |
 |---|---|---|
-| Arregla el defecto diagnosticado | Sí (el motor de Chrome aplica la especificación) | Sí, de forma directa |
-| Radio de cambio | **Todo el texto de todos los PDF** cambia: espacios, orden de líneas, guiones. Afecta a `pdf_estructura` (numeración, capítulos), los chunks, los saltos y los benchmarks de página | Solo las fuentes sin ToUnicode. El resto del texto queda igual byte a byte, y eso se puede comprobar |
-| Distribución en Windows | `pdfium.dll` aparte, cargada en tiempo de ejecución (`Pdfium::bind_to_library`), o compilación estática de pdfium (pesada). Hay que llevarla en `bundle.resources` de Tauri y localizarla en la CLI y en los tests | Nada nuevo |
-| Tamaño | Varios MB por la DLL (no medido) | 0 |
-| Tests | Necesitan la DLL. Sin CI en el repo (no hay `.github/`), cada máquina debe descargarla, o los tests se marcan `#[ignore]` | Unitarios e integración con PDF sintéticos de `lopdf` (`tests/comun_pdf`) |
-| Coordenadas por carácter | **Sí**: base para tablas por regiones | No |
-| Licencia (sin peso) | BSD/Apache | — |
+| Calidad de decodificación | Corrige solo el defecto diagnosticado | Motor de PDF de Chrome: precedencia de codificaciones, AGL, CID, Type3, xref dañadas |
+| Coordenadas por carácter | No | Sí (banda `y` opcional en la Pieza 2) |
+| Seguridad de memoria | Rust: un PDF hostil provoca pánicos, que ya se capturan | C++ sin seguridad de memoria. Muy fuzzeado (OSS-Fuzz), pero en Chrome corre dentro de un sandbox |
+| Mantenimiento de seguridad | Crate con poca actividad | Parches al ritmo de Chromium |
 
-**Por qué (b):** el defecto está localizado y es corregible en el punto exacto. La opción (a) cambia el texto de todo el corpus, y con él se mueven todas las líneas base de página, de estructura y de chunk. Ese es el retroceso que `CLAUDE.md` §6 obliga a evitar. Las coordenadas de (a) solo hacen falta para la vía geométrica de la Pieza 2, y la vía textual no las necesita (§2).
+**Elección: pdfium**, porque es más robusto, **con el riesgo de memoria contenido así:**
+1. **Proceso hijo:** `lakehouse_rag_cli.exe --extraer-texto-pdf <ruta>` escribe por stdout un JSON con el texto crudo de cada página. El padre:
+   - aplica el límite de tiempo actual (`TIEMPO_MAXIMO_EXTRACCION`, 300 s, `pdf_parser.rs:27`) y mata el proceso al agotarse;
+   - en Windows, lo asocia a un *job object* con límite de memoria.
 
-**Revisable:** si tras (b) la compuerta sigue marcando páginas en el corpus público (§5), se evalúa pdfium **solo como respaldo por página**, detrás de una *feature* de cargo. Sería otro SSD.
+   Un PDF que explote un fallo de pdfium solo compromete ese proceso, que no tiene acceso al estado de la app. También resuelve que pdfium no admita llamadas concurrentes: hay un proceso por documento.
+2. **Carga de la DLL** solo por **ruta absoluta**, junto al ejecutable o en los recursos del bundle, **nunca por la ruta de búsqueda del sistema** (evita el secuestro de DLL). Antes de cargarla se comprueba su **sha256**, fijado en el código.
+3. **Versión fijada** de los binarios de pdfium (proyecto `pdfium-binaries`). Se actualiza cuando Chromium publica parches de seguridad de pdfium.
 
-### 1.2 Diseño
+**Si la DLL falta o no valida:** la ingesta de PDF falla con un mensaje accionable. **No hay respaldo silencioso** a otro extractor, porque cambiaría el texto sin avisar. El respaldo por página con `lopdf::extract_text`, que ya existe, se mantiene solo para una página que pdfium no pueda leer.
 
-**Módulo nuevo `infrastructure/parsers/pdf_unicode.rs`.** Construye el ToUnicode de las fuentes simples (`Type1`, `Type1C`, `TrueType`, `MMType1`) que no lo tienen.
+**A fijar en el spike inicial de la pieza** (no verificado en esta sesión):
+- versión de `pdfium-render`;
+- API exacta del texto por página y de los límites por carácter;
+- tamaño de la DLL;
+- `bundle.resources` en `tauri.conf.json`.
 
-Precedencia de la especificación PDF:
+### 1.3 Compuerta de legibilidad por página
 
-```text
-/Differences  >  /BaseEncoding  >  codificación interna (FontFile/FontFile3)  >  StandardEncoding
-```
-
-Algoritmo AGL completo para cada nombre de glifo:
-- búsqueda en la tabla de la AGL. El módulo `glyphnames` de `pdf-extract` es privado (`lib.rs:28`), así que se incorpora la tabla pública de la AGL como dato estático;
-- `uniXXXX[XXXX…]`;
-- `uXXXX` a `uXXXXXX`;
-- componentes separados por `_`;
-- sufijo tras `.` descartado.
-
-Un nombre no resoluble (`/g13`, `/C0`) **no se adivina**: se cuenta.
+**Módulo `infrastructure/parsers/legibilidad.rs`:** puro, sin I/O, y aplicado al texto **crudo** de cada página, antes de `normalizar_pagina`.
 
 ```rust
-pub struct InformeUnicodeFuente {
-    pub fuente: ObjectId,
-    pub codigos_mapeados: usize,
-    pub nombres_no_resueltos: usize, // nombres de glifo fuera de la AGL y sin forma uniXXXX
+pub enum ClasePagina { Legible, Degradada { motivos: Vec<MotivoDegradacion> }, SinTexto }
+pub enum MotivoDegradacion {
+    ReemplazoOControl { proporcion: f32 },  // U+FFFD + C0/C1 sin \n \r \t
+    UsoPrivado { proporcion: f32, dentro_de_palabra: usize },
+    Mojibake { proporcion: f32, tokens_evaluados: usize },
 }
-/// Inyecta /ToUnicode en memoria en las fuentes simples que no lo tienen. Nunca toca una fuente que ya lo tiene.
-pub fn completar_to_unicode(documento: &mut Document) -> Vec<InformeUnicodeFuente>;
+pub struct MetricasPagina { /* no blancos, proporciones, densidad alfanumérica (solo informativa) */ }
+pub fn clasificar_pagina(texto_crudo: &str) -> (ClasePagina, MetricasPagina);
 ```
 
-Se llama en `extraer_documento` (`pdf_parser.rs:102`), entre `abrir_sin_proteccion` y `extraer_paginas`, bajo el `catch_unwind` que ya existe. Para la codificación interna de CFF basta el `charset` y la `Encoding` del CFF, sin rasterizar. `cff-parser` ya es dependencia de `pdf-extract` (su `Cargo.toml`). Si expone lo necesario, se declara como dependencia directa con la misma versión, un cambio de dependencias que pide el SÍ del usuario (AGENTS.md §1.2); si no, un lector mínimo propio.
+| Señal | Se evalúa si | Umbral inicial | Rango de calibración |
+|---|---|---|---|
+| `U+FFFD` + controles C0/C1 (sin `\n`, `\r`, `\t`) / no blancos | ≥ 50 caracteres no blancos | > 1 % | 0,5-1 % |
+| PUA (`U+E000..U+F8FF`) / no blancos | ≥ 50 caracteres no blancos | > 5 % | 5-10 % |
+| PUA **dentro de una palabra** (entre dos alfanuméricos) | ≥ 50 caracteres no blancos | ≥ 3 apariciones | a calibrar |
+| Mojibake (tokens sin vocal de su alfabeto o con puntuación ASCII anómala dentro) / tokens evaluados | ≥ 80 tokens evaluables | > 30 % | 30-35 % |
+| Densidad alfanumérica (`char::is_alphanumeric()`) | Siempre | **Solo se informa**, no clasifica | Se decide tras la calibración |
 
-**Módulo nuevo `infrastructure/parsers/legibilidad.rs` (compuerta), puro y sin I/O.** Se ejecuta sobre el texto **crudo** de cada página, antes de `normalizar_pagina`.
+`SinTexto` se aplica a una página con menos de 50 caracteres no blancos. **No bloquea:** se informa como aviso. La regla de documento entero `REQUIERE_OCR` (`pdf_estructura.rs:145`) no cambia.
 
-```rust
-pub struct MetricasPagina {
-    pub caracteres_visibles: usize,        // sin espacios
-    pub proporcion_reemplazo: f32,         // U+FFFD / visibles
-    pub proporcion_control_pua: f32,       // control (sin \t \n \r) + PUA (E000–F8FF, planos 15-16) / visibles
-    pub densidad_alfanumerica: f32,        // alfanuméricos / (visibles − símbolos en rachas de ≥3 iguales)
-    pub proporcion_tokens_anomalos: f32,   // letras en tokens de > 40 caracteres / letras
-    pub usa_fuente_no_fiable: bool,        // la página usa una fuente con ≥25 % de nombres no resueltos
-}
-pub enum VeredictoPagina { Legible, NoEvaluable, Dudosa { motivos: Vec<MotivoIlegible> } }
-pub fn evaluar_pagina(texto_crudo: &str, usa_fuente_no_fiable: bool) -> VeredictoPagina;
-```
+**Red contra mojibake: definición estructural.**
+- **Token evaluable:** se separa por blancos y se recorta la puntuación de los bordes. Es evaluable si:
+  - todas sus letras están en minúscula (`char::is_lowercase`);
+  - tiene 4 o más letras;
+  - no tiene dígitos;
+  - no tiene caracteres CJK (por bloques Han, Hiragana, Katakana y Hangul);
+  - no tiene `@`, `/`, `:`, `_` ni `.` interior: así se excluyen correos, URL y códigos;
+  - y todas sus letras son del **mismo alfabeto**: latín, griego o cirílico (por bloques Unicode).
+- **Página no evaluable** para esta red: la que tiene menos de 80 tokens evaluables, como las de CJK, árabe, devanagari, tablas o fórmulas. Así se evita el falso positivo en esos casos.
+- **Token sospechoso:** el que cumple alguna de estas condiciones:
+  - a) no contiene ninguna **vocal de su alfabeto**:
+    - latín: `a e i o u y` y sus variantes con diacrítico, plegadas con `quitar_diacritico` (`domain/services/normalizacion.rs`);
+    - griego: `α ε η ι ο υ ω` con o sin tono;
+    - cirílico: `а е ё и о у ы э ю я і ї є`;
+  - b) lleva **puntuación ASCII dentro** de la palabra, distinta de `-` y `'`, como en `th#s` o `w;rd`.
+- **Por qué no es una lista de palabras:** las vocales son una propiedad del **sistema de escritura**, no de ningún idioma. El conjunto es cerrado y finito por alfabeto, y vale igual para el español, el inglés, el alemán, el polaco, el ruso, el búlgaro o el griego.
+  - No se comprueba ninguna palabra de ningún diccionario. Se mide una propiedad de forma: en un texto real casi todas las palabras de 4 o más letras tienen vocal, y en una sustitución de letras muchas la pierden.
+  - Las lenguas con palabras sin vocal (checo o eslovaco `vlk`, `krk`) las tienen sobre todo de 3 letras o menos, y son minoría. Por eso el umbral es del 30 %.
+  - Las escrituras sin vocales escritas o sin espacios no se evalúan con esta red.
 
-- **No evaluable:** menos de 200 caracteres visibles, por ejemplo una portada o una página de figura. Nunca falla.
-- **Tokens:** se separan por espacios. No cuentan como anómalos los tokens que contienen caracteres de escrituras sin espacios: Han, Hiragana, Katakana, tailandés, lao, jemer, birmano y tibetano, por rangos de bloque Unicode.
-- **Rachas de símbolos:** se excluyen del denominador las de 3 o más símbolos iguales, como los puntos guía de un índice («……… 3») o las líneas de tabla («────»).
+**Prohibido** limitar la longitud de token: no existe esa señal, porque las escrituras CJK, tailandesa o jemer no usan espacios.
 
-**Umbrales iniciales, que se ajustan con el corpus público (§5) y nunca con el set oculto.** Una página es `Dudosa` si cumple cualquiera de estas condiciones:
+### 1.4 Efecto en la ingesta y contratos
 
-| Métrica | Umbral | Lo que caza |
-|---|---|---|
-| `proporcion_reemplazo` | > 1 % | Códigos sin mapa |
-| `proporcion_control_pua` | > 5 % | Glifos sin Unicode (los iconos de viñeta legítimos suelen quedar por debajo del 3 %; a medir) |
-| `densidad_alfanumerica` | < 40 % | Basura de símbolos |
-| `proporcion_tokens_anomalos` | > 25 % | Espacios perdidos: el síntoma del set v2 (22 de 24 trozos superaron el límite de embeddings) |
-| `usa_fuente_no_fiable` | verdadero | Sustitución de letras por letras, que las demás métricas no ven |
-
-**Por qué no rechazan textos legítimos:**
-- `is_alphanumeric` es Unicode: el griego, el cirílico, el árabe, el devanagari (con sus matras alfabéticas) y el CJK cuentan como alfanuméricos.
-- El CJK sin espacios queda fuera de los tokens anómalos.
-- En fórmulas, las letras griegas y los dígitos son alfanuméricos. Una página con muchas ecuaciones se mantiene en torno al 50 % (lo fija un test).
-- En tablas, las cifras son alfanuméricas y las líneas de tabla se descuentan por racha.
-
-**Respaldo por página:** si una página sale `Dudosa`, se extrae con `lopdf::extract_text`, se vuelve a evaluar y se queda la versión `Legible`, si la hay. Si las dos fallan, la página conserva el texto (puede tener cifras útiles), pero queda marcada.
-
-### 1.3 Contratos y efecto en la ingesta
-
-- **`ParsedDocument`** (`dtos/ingestion.rs:22`): nuevo `#[serde(default)] pub paginas_dudosas: Vec<PaginaDudosa>`, con `pagina` y `motivos`.
-- **`EstadoContenido`** (`domain/models/estructura_documental.rs:19`): nuevo valor `LecturaDuda` → `"LECTURA_DUDOSA"` (**D3**).
-  - Hay que tocar `VALORES_CANONICOS`, `as_str` y `parse`.
-  - `lancedb_store.rs:720` lo acepta a través de `EstadoContenido::parse`.
+- **`ParsedDocument`** (`dtos/ingestion.rs:22`):
+  - `+ #[serde(default)] paginas_degradadas: Vec<PaginaDegradada>`, con `pagina` y `motivos`;
+  - `+ paginas_sin_texto: Vec<u32>`.
+- **`EstadoContenido`** (`domain/models/estructura_documental.rs:19`): `+ LecturaDegradada` → `"LECTURA_DEGRADADA"`. Hay que tocar `VALORES_CANONICOS`, `as_str` y `parse`. `lancedb_store.rs:720` lo acepta a través de `parse`.
 - **Mapeo:**
-  - las filas de 02 (chunks) y 07 (nodos) cuyo rango de páginas corta una página dudosa llevan `LECTURA_DUDOSA`;
-  - el resto conserva su estado;
-  - el informe de ingesta da `LECTURA_DUDOSA` si hay al menos una página dudosa, con este aviso: «Páginas N–M: el texto extraído puede ser ilegible (motivo). Revisa el PDF o pásalo por OCR».
-  - Se toca `mapear_con_estado` (`mapeo_destilacion.rs:233` y siguientes) y `document_ingestion_service.rs:166-184`.
-- **System prompt, regla 7** (`agent_orchestrator.rs:88`): se añade `LECTURA_DUDOSA` («el texto de esas páginas puede estar corrupto: dilo y no concluyas "no consta" a partir de él»). No es una lista léxica del arnés: es una instrucción al modelo.
-- **Por qué no `PARCIAL_UNIVERSAL`:** ese estado significa «sin Capa 2» y lo usa la lógica de provisionales (`busqueda.rs:652`). Mezclarlos rompería esa semántica.
+  - las filas de 02 (chunks) y 07 (nodos) cuyo rango de páginas corta una página degradada llevan `LECTURA_DEGRADADA`; el resto conserva su estado;
+  - el informe de ingesta deja de ser COMPLETO si hay **1 o más** páginas degradadas.
+- **Catálogo 01:** `+ paginas_degradadas: List<Int32>` (nulable). Es la lista exacta.
+- **`aviso_contenido`:**
+  - `explicacion_de_estado` (`lakehouse_tool_service/estructura.rs:121`) recibe la lista y redacta: «Páginas 2-11 con texto degradado (motivo). No concluyas que un dato no consta a partir de ellas».
+  - Lo propagan ya `search_normative_context` (`busqueda.rs:308`), el subárbol (`estructura.rs:543`) y el catálogo (`catalogo.rs:60`).
+- **Regla 7 del system prompt** (`agent_orchestrator.rs:88`): se añade `LECTURA_DEGRADADA`. Es una instrucción al modelo, no una lista del arnés.
+- **Por qué no `PARCIAL_UNIVERSAL`:** ese estado significa «sin Capa 2» y lo usa la lógica de provisionales (`busqueda.rs:652`).
 
-### 1.4 Archivos
+### 1.5 Archivos
 
-- `src/infrastructure/parsers/pdf_unicode.rs` (nuevo)
+- `Cargo.toml` (`pdfium-render`; se retira `pdf-extract`)
+- `src/infrastructure/parsers/pdfium_extractor.rs` (nuevo: el lado del proceso hijo)
 - `src/infrastructure/parsers/legibilidad.rs` (nuevo)
-- `pdf_parser.rs`
-- `pdf_estructura.rs` (solo para exportar el texto crudo; `requiere_ocr` no cambia)
-- `dtos/ingestion.rs`
-- `estructura_documental.rs`
-- `mapeo_destilacion.rs`
-- `document_ingestion_service.rs`
-- `agent_orchestrator.rs` (regla 7)
-- `tests/adversarial_pdf_tests.rs`
-- `tests/integration_pdf_parser.rs`
-- `tests/comun_pdf/mod.rs` (generadores)
+- `pdf_parser.rs` (lanza el hijo y clasifica)
+- `src/presentation/cli/` (subcomando oculto `--extraer-texto-pdf`)
+- `tauri.conf.json` (`bundle.resources`)
+- `scripts/obtener_pdfium.ps1` (descarga la versión fijada y comprueba su sha256)
+- `dtos/ingestion.rs`, `estructura_documental.rs`, `mapeo_destilacion.rs`, `document_ingestion_service.rs`
+- `schemas.rs`, `lotes_arrow.rs`
+- `lakehouse_tool_service/estructura.rs`, `catalogo.rs`, `busqueda.rs`
+- `agent_orchestrator.rs`
+- `tests/integration_pdf_parser.rs`, `tests/adversarial_pdf_tests.rs`, `tests/comun_pdf/mod.rs`
 
-### 1.5 Plan TDD (datos sintéticos)
+**Tests y DLL:** no hay CI en el repositorio (no existe `.github/`). Los tests de PDF **fallan con un mensaje claro** si falta la DLL («ejecuta `scripts/obtener_pdfium.ps1`»). No se marcan `#[ignore]`, para que no se salten en silencio. La ruta se puede fijar con la variable de entorno `LAKEHOUSE_RAG_PDFIUM`.
 
-**Generador:** se amplía `tests/comun_pdf` con fuentes cuya `/Encoding` es un diccionario con `/Differences`, y con un CFF mínimo construido en el test (cabecera, `charset` y `Encoding`) para el caso de precedencia. **Coste: el generador de CFF es el trabajo más largo de la pieza** (unas 150 líneas de test).
+### 1.6 Plan TDD (datos sintéticos)
 
-**Rojo, ToUnicode:**
-1. `/Differences` con `uni0394`, `afii10017`, `f_i`, `a.sc` y `Alpha`: produce «Δ», «А», «fi», «a» y «Α».
-2. CFF cuya codificación interna contradice `/Differences`: gana `/Differences`.
-3. Fuente con ToUnicode propio: **no se toca**. Su texto queda igual byte a byte.
-4. Nombres `/g13`: se cuentan en `nombres_no_resueltos`. No se inventa ningún carácter.
-5. Fuente sin `/Differences`: nada cambia.
+**Rojo, `clasificar_pagina`.** Texto escrito en el test; no hace falta pdfium:
 
-**Rojo, compuerta.** Una página por caso:
-
-| Caso | Contenido sintético | Veredicto esperado |
+| Caso | Contenido | Clase esperada |
 |---|---|---|
-| Legible | Prosa en ES, EN, DE, EL (griego), RU (cirílico), JA, ZH (CJK sin espacios), AR (árabe), HI (devanagari) | `Legible` |
-| Fórmulas | Ecuaciones densas (`∑`, `≤`, `α`, subíndices) | `Legible` |
-| Tablas | Rejilla de cifras con líneas `│─` y puntos guía | `Legible` |
-| Iconos | Viñetas en la PUA por debajo del 3 % | `Legible` |
-| Corrupta | 5 % de `U+FFFD`, 10 % de PUA, símbolos sueltos, palabras pegadas | `Dudosa` (cada métrica por separado) |
-| Corta | Portada de 40 caracteres | `NoEvaluable` |
+| Prosa | ES, EN, DE, PL, CS (con `vlk`, `krk`), EL, RU, BG | `Legible` |
+| Escrituras sin red de mojibake | JA y ZH sin espacios, AR, HI | `Legible` (red no evaluable) |
+| Fórmulas | `∑`, `≤`, `α`, subíndices | `Legible` |
+| Tabla financiera | Rejilla numérica con `│─` | `Legible` |
+| Iconos | PUA por debajo del 2 %, fuera de palabras | `Legible` |
+| Sustitución de letras | Prosa ES y EN cifrada por sustitución (sin vocales en más del 30 % de los tokens) | `Degradada(Mojibake)` |
+| Puntuación interior | `th#s w;rd` en más del 30 % de los tokens | `Degradada(Mojibake)` |
+| Reemplazo y control | 2 % de `U+FFFD`; 2 % de C1 | `Degradada(ReemplazoOControl)` |
+| PUA | 8 %; PUA dentro de 5 palabras | `Degradada(UsoPrivado)` |
+| Página corta | 30 caracteres | `SinTexto` |
+| Correos, URL y códigos | `abcd@xyzw.qrst`, `pqrs/tvwx` | No cuentan como tokens evaluables |
 
-**Integración:**
-- un PDF de 3 páginas con la página 2 corrupta da el informe `LECTURA_DUDOSA`, el chunk de esa página lleva `LECTURA_DUDOSA` y los chunks de las páginas 1 y 3 quedan `COMPLETO`;
-- el respaldo `lopdf` sustituye una página dudosa cuando su texto es legible.
+**Rojo, integración con pdfium.** PDF generados con `tests/comun_pdf`:
+- texto WinAnsi;
+- `/Differences` con `uni0394`, `afii10017` y `f_i`, que dan «Δ», «А» y «fi»;
+- una fuente con ToUnicode.
 
-**Adversarial:**
-- `Differences` con un código mayor que 255;
-- nombres de 10 000 caracteres;
-- un CFF truncado;
-- fuentes con 10 000 entradas.
+Los resultados deben coincidir con el texto esperado. **Prueba diferencial del defecto CFF:** se construye en el test un CFF mínimo cuya codificación interna contradice `/Differences`; pdfium debe dar las letras de `/Differences`. Es el trabajo de test más largo, unas 150 líneas.
 
-Ninguno debe producir un pánico que salga fuera del `catch_unwind`, y el resto de páginas se conserva.
+**Rojo, ingesta:**
+- un PDF de 3 páginas con la p. 2 degradada da el informe `LECTURA_DEGRADADA`, `paginas_degradadas = [2]`, el chunk de la p. 2 marcado y los de las pp. 1 y 3 en `COMPLETO`;
+- `aviso_contenido` cita la p. 2 en la búsqueda, el subárbol y el catálogo.
 
-### 1.6 Riesgos de retroceso y medición
+**Adversarial y de seguridad:**
+- el proceso hijo se cuelga: se mata al agotarse el tiempo y la ingesta falla con un mensaje;
+- el hijo muere abruptamente: error controlado, sin pánico en el padre;
+- falta la DLL o su sha256 no coincide: error accionable;
+- una DLL falsa en la ruta de búsqueda no se carga;
+- un PDF de 10 000 páginas o con un stream gigante: límite de memoria del *job object*;
+- se mantienen los casos de PDF cifrado y corrupto.
 
-| Riesgo | Medición | Criterio |
+### 1.7 Riesgos de retroceso y medición
+
+**El texto de todos los PDF cambia,** así que el criterio de «texto idéntico» no sirve. Se compara la calidad:
+
+| Riesgo | Medición (sin Claude, §6.2) | Criterio |
 |---|---|---|
-| Cambia el texto de PDF que ya funcionaban | Hash del texto por página antes y después en el corpus público (§5.2) | Solo pueden cambiar páginas con fuentes sin ToUnicode. Cualquier otro cambio bloquea |
-| Falso «dudoso» en otros alfabetos, fórmulas o tablas | Proporción de páginas dudosas en el corpus legible | **0** páginas dudosas en los PDF que un humano valida como legibles |
-| El estado nuevo confunde al modelo | Aguja y ciclo de vida sin cambios en la puntuación | Iguales a la línea base |
-| Coste de la ingesta | Tiempo de parseo por documento | < 5 % más (orientativo: el equipo tiene carga) |
+| Cambian los apartados que detecta `pdf_estructura` (numeración, capítulos, marcadores) | Número y títulos de las secciones por PDF del corpus público, antes y después | Ningún PDF pierde secciones. Cada diferencia se revisa a mano |
+| Cambian los saltos de página | Página de las agujas de Aguja; página de 20 frases por PDF localizadas con `pypdf` | 100 % iguales |
+| Falsos degradados | Clase por página en el lote de control legible | **0 páginas degradadas** en los PDF validados como legibles |
+| El PDF académico sigue mal | Clase por página en un PDF LaTeX público con Type1/CFF | Legible con pdfium |
+| Ingesta más lenta (proceso hijo) | Tiempo de parseo por documento, 3 ejecuciones | Informado; el equipo tiene carga |
+| Funcionamiento con el modelo | Aguja 5 × 3 | `recall_aguja`, `pagina_exacta_estricta` y `seccion_real` iguales a la línea base (1,00) |
+
+**Calibración de umbrales:** sin Claude, con el lote de control (§6.2) y nuestros PDF públicos. Los 15 PDF del set oculto los calibra **la sesión evaluadora**, no esta.
 
 ---
 
-## 2. Pieza 2: página exacta de la Capa 2 en la ingesta
+## 2. Pieza 2: página exacta de la Capa 2 por ventana de tabla
 
 ### 2.1 Estado verificado
 
-- **El parser de PDF no extrae tablas** (`pdf_parser.rs:142`). Las tablas de un PDF salen solo de `TablaDestilada` (`dtos/ingestion.rs:170`), con la `seccion_origen` que declara el LLM.
-- **`vincular_tablas`** (`mapeo_destilacion.rs:1236-1262`) vincula la tabla:
-  - a la sección declarada;
-  - a la sección del parser;
-  - a todo chunk que contenga `"Tabla {etiqueta}"` (`:1252`), un literal en **español**.
-- `titulo_con_etiqueta` (`:1077`) también compone `"Tabla {etiqueta}"` para el título que ve el modelo. **Mismo acoplamiento al español.** Se incluye aquí porque es el mismo archivo y la misma regla.
-- Los esquemas 04 (`schemas.rs:177`) y 05 (`schemas.rs:206`) **no tienen columnas de página**. `lookup.rs` no devuelve página.
+- El parser de PDF **no extrae tablas** (`pdf_parser.rs:142`). Las tablas salen de `TablaDestilada` (`dtos/ingestion.rs:170`), que se **mantiene**.
+- `vincular_tablas` (`mapeo_destilacion.rs:1236-1262`) vincula las tablas por la sección declarada, la del parser y el literal **español** `"Tabla {etiqueta}"` (`:1252`).
+- `titulo_con_etiqueta` (`:1077`) compone también `"Tabla {etiqueta}"` en el título que ve el modelo.
+- Los esquemas 04 (`schemas.rs:177`) y 05 (`:206`) no tienen columnas de página. `lookup.rs` no da página.
+- Los ejes de una celda (`LimitesDestilados`, `dtos/ingestion.rs:143`) son una `categoria` de texto o un rango `min`/`max` numérico.
 
-### 2.2 Diseño
+### 2.2 Definiciones
 
-**Vía elegida: anclaje textual en Rust** (la vía geométrica requiere pdfium; ver D1).
+- **Texto paginado:** cada `ParsedSection.contenido` con sus `saltos_pagina` (`dtos/ingestion.rs:58`), mediante `texto_con_marcas` y `tramos_paginados` (`domain/services/marcas_pagina.rs:101` y `:126`). Da una secuencia de líneas con su página. En Markdown no hay páginas, así que todo queda en `None`.
+- **Normalización:**
+  - `plegar_mayusculas` (`normalizacion.rs:11`);
+  - tokens alfanuméricos;
+  - en las escrituras sin espacios, bigramas de caracteres;
+  - una cifra admite su texto y su variante con la coma y el punto decimal intercambiados.
+- **Cabeceras de columna:** los textos de categoría distintos del eje x. Si el eje x es de rangos, sus extremos.
+- **Clave de fila:** la categoría del eje y, o sus extremos si es un rango, en el orden de la tabla destilada.
+- **Valores de una fila:** los `valor_resultado` de sus celdas.
+- **«Aparece»:** la secuencia completa de tokens de la clave está en el texto.
 
-**Servicio de dominio nuevo `domain/services/anclaje_paginas.rs`**, puro:
+### 2.3 Algoritmo (`domain/services/anclaje_tabla.rs`, puro)
 
 ```rust
-pub struct PaginaTexto<'a> { pub pagina: u32, pub texto: &'a str }
-pub struct FilaParaAnclar { pub rotulos: Vec<String>, pub valores: Vec<String> } // etiqueta del eje y + textos de celda
-pub struct TablaParaAnclar { pub cabecera: Vec<String>, pub filas: Vec<FilaParaAnclar> } // título + categorías y nombre del eje x
-pub struct AnclajeTabla { pub por_fila: Vec<Option<u32>>, pub rango: Option<(u32, u32)> }
-pub fn anclar_tabla(paginas: &[PaginaTexto], tabla: &TablaParaAnclar) -> AnclajeTabla;
+pub struct LineaPaginada<'a> { pub pagina: u32, pub texto: &'a str }
+pub struct TablaParaAnclar { pub cabeceras: Vec<String>, pub filas: Vec<FilaParaAnclar> }
+pub struct FilaParaAnclar { pub clave: String, pub valores: Vec<String> }
+pub struct AnclajeTabla { pub bloque: Option<(u32, u32)>, pub por_fila: Vec<Option<u32>> }
+pub fn anclar_tabla(lineas: &[LineaPaginada], tabla: &TablaParaAnclar) -> AnclajeTabla;
 ```
 
-**Algoritmo,** independiente del idioma:
-1. **Tokens:** `plegar_mayusculas` (`domain/services/normalizacion.rs:11`), corte por no alfanuméricos y tokens de 2 o más caracteres.
-   - En las escrituras sin espacios, los tokens son **bigramas de caracteres**.
-   - Las cifras se tokenizan con su texto, y además con la coma y el punto decimal intercambiados.
-2. **Rareza:** `df(t)` es el número de páginas del documento que contienen `t`. Un token es **distintivo** si `df(t) ≤ max(2, ⌈N/10⌉)`.
-3. **Anclaje de una fila:** una página `p` es candidata si, en una ventana de 400 caracteres de esa página, aparecen juntos:
-   - al menos **2 tokens distintos de la fila** (rótulos o valores);
-   - al menos **1 token de la cabecera o del rótulo**;
-   - y al menos uno de todos ellos es distintivo.
+**1. Bloque físico `[p_ini, p_fin]`.** Para cada ventana de 1 a `MAX_PAGINAS_BLOQUE` (4) páginas consecutivas se calcula:
+- `C`: el número de cabeceras distintas presentes en la ventana;
+- `L`: la longitud de la **subsecuencia creciente más larga** de las claves de fila, por su orden en la tabla, según la posición de su primera aparición en el texto de la ventana.
 
-   La puntuación es el número de tokens distintos que coinciden. **Solo se acepta una página con la puntuación máxima única.** Si hay empate, o ninguna candidata, la fila queda en `None`.
-4. **Rango de la tabla:** se calcula con el mínimo y el máximo de las filas ancladas, solo si se anclan al menos la mitad de las filas y el rango ocupa como mucho las páginas consecutivas que justifican sus filas. Si no, queda en `None`.
-5. **Celda:** toma la página de su fila.
-6. **Nunca** se recurre a la sección padre, a `seccion_origen` ni a un número suelto: el anclaje exige que coincidan 2 o más tokens en la misma ventana y que alguno sea distintivo.
+La ventana elegida es la que maximiza `(L, C)` y, a igualdad, la **más corta**. **Es inequívoca** si se cumplen tres condiciones:
+- `L ≥ max(2, ⌈filas/2⌉)`;
+- `C ≥ max(1, ⌈cabeceras/2⌉)`;
+- ninguna otra ventana disjunta alcanza el mismo `(L, C)`.
 
-**Texto paginado en la ingesta:** se reconstruye con `ParsedSection.contenido` y `saltos_pagina` (`dtos/ingestion.rs:58`), mediante `texto_con_marcas` y `tramos_paginados` (`domain/services/marcas_pagina.rs:101` y `:126`). No hace falta cambiar el parser. Un Markdown no tiene saltos, así que su página es siempre `None`.
+Si no lo es, `bloque = None` y todas las filas quedan en `None`.
 
-**Literal `"Tabla {id}"` (`:1252`):** se elimina. La vinculación por cita pasa a ser estructural:
-- a) **un chunk cuyo rango de páginas contiene una página anclada** de la tabla;
-- b) **la etiqueta distintiva como secuencia de tokens completa** en el chunk.
+**2. Página de cada fila:**
+- `p_ini == p_fin`: todas las filas llevan esa página.
+- `p_ini < p_fin`: se buscan dentro del bloque las apariciones de la clave en las que **al menos 2 valores distintos de esa fila** aparecen a ±2 líneas.
+  - Si caen en una única página, esa es la de la fila.
+  - Si hay varias, se desempata por **monotonía**: la página debe ser mayor o igual que la de la fila anclada anterior y menor o igual que la de la siguiente.
+  - Si sigue habiendo empate, o no hay ninguna aparición, la fila queda en `None`.
 
-Una etiqueta es distintiva si mezcla letras y dígitos, o si tiene un separador entre alfanuméricos: «4-A» y «A.2» lo son; «3» no. Así se reconoce «Tabla 4-A», «Table 4-A» o «Таблица 4-A», y una etiqueta numérica pura no vincula por cita.
+**3. Nunca** se recurre a la sección padre, a `seccion_origen` ni a un número suelto: fuera del bloque no hay búsqueda, y dentro se exige clave más 2 valores.
 
-**`titulo_con_etiqueta` (`:1077`):** el rótulo neutro es `"{etiqueta} — {título}"`, sin la palabra «Tabla».
+**4. Señal opcional:** la banda `y` de pdfium se deja para una versión posterior. Exigiría guardar coordenadas en `ParsedDocument`, y eso complica el contrato de ingesta. **No entra.**
 
-### 2.3 Contratos
+### 2.4 Vinculación y literales
 
-- **`FilaTabla`** (`dtos/lakehouse_filas.rs:113`): `+ paginas: Option<(u32, u32)>`.
-- **`FilaCelda`** (`:136`): `+ pagina: Option<u32>`.
-- **Esquema 04:** `+ pagina_inicio Int32 null`, `+ pagina_fin Int32 null`. **Esquema 05:** `+ pagina Int32 null`. Se escriben en `lotes_arrow.rs`.
-- **`lookup_double_entry_table`:** `cita.paginas` (`"21-22"` o `"21"`), solo si existe, con el mismo formato que `cita.paginas` de la búsqueda. Si es `None`, la clave no aparece.
-- **`VERSION_ESQUEMA_CENTRO`** (`dtos/centros.rs:13`): **6 → 7.**
+- Se elimina `"Tabla {etiqueta}"` (`:1252`). La tabla se vincula al chunk:
+  - por su sección declarada o la del parser, como hoy;
+  - por **el chunk cuyo rango de páginas contiene el bloque** anclado;
+  - por la **etiqueta distintiva como secuencia completa de tokens**. Es distintiva si mezcla letras y dígitos, o tiene un separador entre alfanuméricos («4-A», «A.2»). Una etiqueta numérica pura («3») no vincula por cita.
+- `titulo_con_etiqueta` (`:1077`): el rótulo pasa a ser `"{etiqueta} — {título}"`, sin la palabra «Tabla».
 
-### 2.4 Esquema: v6 → v7 (D2)
+### 2.5 Contratos y esquema v7
 
-**Sí hace falta cambiarlo.** Un centro v6 se rechaza al abrirlo (`centros.rs:71`) y no hay migración, como en la v5 → v6.
+- `FilaTabla` (`dtos/lakehouse_filas.rs:113`): `+ paginas: Option<(u32, u32)>`, el bloque.
+- `FilaCelda` (`:136`): `+ pagina: Option<u32>`.
+- **04:** `+ pagina_inicio`, `+ pagina_fin` (Int32, nulables). **05:** `+ pagina` (Int32, nulable).
+- **`lookup_double_entry_table`:** `cita.paginas` con la página de la celda o, si no la tiene, el bloque. Usa el mismo formato que la búsqueda (`"21"` o `"21-22"`). Si no hay ninguna de las dos, la clave no aparece.
+- **`VERSION_ESQUEMA_CENTRO` 6 → 7** (`dtos/centros.rs:13`). Un centro v6 se rechaza al abrirlo (`:71`) y no hay migración.
 
-> **El usuario tendrá que recrear sus centros y volver a ingerir los documentos.** Los datos de los centros anteriores no se tocan.
+> **El usuario tendrá que recrear sus centros y volver a ingerir los documentos.** Los centros anteriores no se tocan. La v7 incluye también los cambios de la Pieza 1 (`LECTURA_DEGRADADA` y `paginas_degradadas`): **se recrean una sola vez**, con las dos piezas integradas.
 
-El valor `LECTURA_DUDOSA` de la Pieza 1 viaja en la misma v7: un binario v6 no lo reconocería. **Hay que recrear los centros una sola vez, con las dos piezas integradas.**
+### 2.6 Archivos
 
-### 2.5 Archivos
+- `domain/services/anclaje_tabla.rs` (nuevo)
+- `mapeo_destilacion.rs`: `vincular_tablas`, `fila_tabla`, celdas y `titulo_con_etiqueta`
+- `dtos/lakehouse_filas.rs`, `schemas.rs`, `lotes_arrow.rs`, `dtos/centros.rs`
+- `lakehouse_tool_service/lookup.rs`, `dtos/tools.rs`
+- `tests/integration_tools_v2.rs`, `tests/adversarial_tools_v2_tests.rs`
 
-- `src/domain/services/anclaje_paginas.rs` (nuevo)
-- `mapeo_destilacion.rs` (`vincular_tablas`, `fila_tabla`, celdas, `titulo_con_etiqueta`)
-- `dtos/lakehouse_filas.rs`
-- `infrastructure/storage/schemas.rs`
-- `lotes_arrow.rs`
-- `dtos/centros.rs`
-- `lakehouse_tool_service/lookup.rs`
-- `dtos/tools.rs` (descripción de la tool)
-- `tests/integration_tools_v2.rs`
-- `tests/adversarial_*` (nuevo caso)
+### 2.7 Plan TDD (datos sintéticos)
 
-### 2.6 Plan TDD (datos sintéticos)
+**Unitarios de `anclar_tabla`.** Líneas paginadas escritas en el test:
+1. Tabla en una página: bloque `(21, 21)` y todas las filas en la p. 21. Una variante por idioma: ES (material y temperatura), EN (ingresos por trimestre), DE (dosis por peso) y EL.
+2. **Una introducción en la p. 6 menciona un valor y una clave de la tabla, que está en las pp. 21-22:** el bloque es `(21, 22)` y ninguna fila cae en la p. 6. Es el defecto de la rama, reproducido con datos inventados.
+3. Tabla partida: las filas 1-5 en la p. 21 y la 6-9 en la 22, cada fila en su página.
+4. Una fila cuya clave se repite en las pp. 21 y 22 y solo tiene 1 valor cerca: se resuelve por monotonía entre sus vecinas; si las vecinas no lo deciden, `None`.
+5. Dos ventanas con el mismo `(L, C)`, como una tabla duplicada en un anexo: `bloque = None`.
+6. Claves en desorden en el texto (columnas leídas al revés): la subsecuencia creciente más corta no alcanza el mínimo, y queda `None`.
+7. CJK sin espacios: anclaje por bigramas.
+8. Markdown: `None`.
 
-**Rojo, unitarios** de `anclar_tabla`, con texto paginado escrito en el test:
-1. Tabla de ES (rótulos de material y temperatura), EN (finanzas), DE (dosis clínica) y EL (griego): la fila se ancla en su página.
-2. **La tabla está en la página 21, y la introducción de la página 6 menciona un valor de la tabla:** la fila se ancla en la 21, nunca en la 6. Es el patrón del defecto de la rama, reproducido con datos inventados.
-3. Valor repetido en dos páginas con los mismos rótulos: `None`.
-4. Solo coincide 1 token: `None`.
-5. Tabla partida entre las páginas 21 y 22: rango `(21, 22)`.
-6. CJK sin espacios: anclaje por bigramas.
-7. Markdown sin saltos: `None`.
-
-**Rojo, vinculación:**
-- «Table 4-A» en un chunk inglés vincula;
-- «Tabla 3», con la etiqueta numérica pura «3», **no** vincula por cita;
-- un chunk que contiene la página anclada vincula.
+**Vinculación:**
+- «Table 4-A» en un chunk inglés y «Таблица 4-A» en uno ruso vinculan;
+- «Tabla 3», con una etiqueta numérica pura, no vincula por cita.
 
 **Integración:**
-- ingesta con `MockDistiller` y un PDF sintético de 3 páginas: el lookup devuelve `cita.paginas` correcto;
-- un centro v6 se rechaza con el mensaje actual.
+- `MockDistiller` y un PDF sintético de 3 páginas: el lookup devuelve `cita.paginas` correcto;
+- un centro v6 se rechaza.
 
 **Adversarial:**
-- tablas de 5000 celdas;
-- celdas vacías;
-- textos de celda de 10 000 caracteres;
-- saltos corruptos (que `saltos_validos` ya filtra).
+- 5000 celdas;
+- claves vacías;
+- valores de 10 000 caracteres;
+- saltos corruptos;
+- 1000 páginas (coste lineal en ventanas por páginas).
 
-### 2.7 Riesgos de retroceso y medición
+### 2.8 Riesgos y medición
 
-| Riesgo | Medición | Criterio |
+| Riesgo | Medición (§6.3) | Criterio |
 |---|---|---|
-| **Página falsa** (el retroceso de la rama) | Precisión del anclaje en un corpus con páginas de tabla verificadas por script (§5.3) | **0 páginas falsas.** Una sola bloquea |
-| Menos vínculos tabla-chunk en documentos en español | Número de `tablas_vinculadas` por documento en los fixtures, antes y después | No baja la recuperación de tablas en RGB industrial ni en `acceptance_8_problemas` |
-| Coste de la ingesta | Tiempo de `vincular_tablas` | Despreciable frente a la destilación (a medir) |
+| Página falsa | Precisión del anclaje frente a un oráculo `pypdf` en los PDF públicos con tablas | **0 páginas falsas** |
+| Menos vínculos tabla-chunk | `tablas_vinculadas` por documento en los fixtures | La recuperación de tablas no baja en RGB ni en `acceptance_8_problemas` |
+| Poca cobertura | Porcentaje de filas con página | Se informa; es preferible `None` a una página falsa |
 
 ---
 
-## 3. Pieza 3: búsqueda multidocumento, fuga de *tool calls* y verificador de páginas
+## 3. Pieza 3: JSON embebido, cuota por documento y verificador de páginas
 
-Son 3 subpiezas independientes entre sí: **3a**, **3b** y **3c**.
+Se mantiene el protocolo JSON por texto. Hay 3 subpiezas independientes: **3a**, **3b** y **3c**.
 
 ### 3a. Cuota por documento en `fusionar`
 
-**Estado:** `fusionar` (`busqueda.rs:147-189`) puntúa **todos** los fragmentos elegibles, los ordena y aplica `truncate(top_k)` (`:187`). `top_k` vale 8 por defecto (`lakehouse_tool_service.rs:68`) y 20 como máximo (`busqueda.rs:31`). La llamada está en `:500`.
+**Estado:** `fusionar` (`busqueda.rs:147-189`) puntúa todos los fragmentos elegibles y aplica `truncate(top_k)` (`:187`). `top_k` vale 8 por defecto (`lakehouse_tool_service.rs:68`) y 20 como máximo (`busqueda.rs:31`). La llamada está en `:500`.
 
-**Diseño: cuota con relleno.** Se aplica solo sin filtro de documento, es decir, con `doc_pedido.is_none()` (`busqueda.rs:423`):
-1. El pool es el ranking RRF completo, que ya existe.
-2. `max_por_documento = top_k − min(2, documentos_en_pool − 1)`: 6 de 8 con dos o más documentos.
-3. **Primera pasada:** se recorre el ranking y se acepta cada fragmento si su documento no ha llenado la cuota.
-4. **Relleno:** si quedan huecos, se completan con los descartados, en orden de ranking.
-5. **Orden de salida:** el del score RRF.
-
-**Por qué no empeora una pregunta de un solo documento:**
-- en un centro con un documento, o con un único documento en el pool, la salida es **idéntica** a la actual;
-- con varios documentos, el documento dominante conserva sus **6 mejores** fragmentos, y solo pierde los puestos 7 y 8 si otro documento tiene candidatos;
-- con `doc_id` en la petición, no hay cuota.
+**Diseño: cuota con relleno.** Se aplica solo sin filtro de documento (`doc_pedido.is_none()`, `busqueda.rs:423`):
+1. El pool es el ranking RRF completo, que ya se calcula.
+2. `max_por_documento = top_k − min(2, documentos_en_pool − 1)`: 6 de 8.
+3. **Primera pasada:** se acepta cada fragmento en orden de ranking si su documento no ha llenado la cuota.
+4. **Relleno:** los huecos que queden se completan con los descartados, por ranking.
+5. Salida ordenada por score.
 
 ```rust
+pub(crate) enum CuotaDocumento { Ninguna, Diversificar { reservados: usize } }
 pub(crate) fn fusionar<'a>(…, top_k: usize, cuota: CuotaDocumento) -> Vec<Puntuado<'a>>;
-pub(crate) enum CuotaDocumento { Ninguna, Diversificar { reservados: usize } } // reservados = 2
 ```
 
-**Archivos:** `lakehouse_tool_service/busqueda.rs` y sus tests.
+**Cómo no empeora las preguntas de un solo documento:**
+- con un único documento en el pool, la salida es **idéntica** a la actual;
+- el documento dominante conserva sus 6 mejores fragmentos;
+- con `doc_id`, no hay cuota.
 
-**TDD:**
-1. Centro con un documento: salida igual a la de hoy (la propiedad se comprueba con 50 rankings aleatorios con semilla fija).
-2. Dos documentos, con 10 fragmentos de A mejor puntuados que el mejor de B: salida de 6 de A y 2 de B.
+**TDD:** con fragmentos en ES, EN y FR:
+1. Un documento: la salida es igual a la actual (propiedad comprobada con 50 rankings con semilla fija).
+2. A domina y B existe: 6 de A y 2 de B.
 3. B sin candidatos: 8 de A.
 4. Con `doc_id`: sin cuota.
-5. Tres documentos con `top_k = 1`: 1 resultado, el mejor.
+5. `top_k = 1`: el mejor fragmento.
 
-Los fragmentos de prueba están en ES, EN y FR.
+**Criterio de no retroceso:** el recall@8 de las preguntas de un solo documento no baja (§6.4).
 
-**Riesgo y medición:** el fragmento de referencia de una pregunta de un solo documento puede caer del puesto 7 u 8. Se mide en recuperación pura (§5.4). **Criterio:** el recall@8 del fragmento de referencia de las preguntas de un solo documento no baja.
-
-### 3b. Fuga de *tool calls* en crudo
+### 3b. Guarda estructural en `parsear_salida_claude`
 
 **Estado verificado:**
-- `parsear_salida_claude` (`claude_agent_runner.rs:80-144`) solo reconoce como llamada **la salida entera** parseada como JSON. Si no lo consigue, devuelve `FinalMessage` (`:143`).
-- El filtro de streaming decide si el texto es visible **por su primer carácter** (`stream_json.rs:80`: `'{'` o `` '`' ``). Un texto que empieza en prosa y sigue con el JSON se emite en vivo.
-- Con `IntencionTurno::Ninguna`, el guard devuelve `Ok` sin revisar nada (`post_inference_guard.rs:191`), y el texto no se retiene (`pre_inference_interceptor.rs:37`).
+- `parsear_salida_claude` (`claude_agent_runner.rs:80-144`) solo reconoce la salida **entera** como JSON; si no lo consigue, devuelve `FinalMessage` (`:143`).
+- El streaming decide si el texto es visible **por su primer carácter** (`stream_json.rs:80`).
+- Con `IntencionTurno::Ninguna`, el guard no revisa nada (`post_inference_guard.rs:191`) y el texto no se retiene (`pre_inference_interceptor.rs:37`).
+- El spike de la Fase 0 ya registró la fuga: en `arnes_fase0/bateria.jsonl`, caso `pregunta_ajena`, la respuesta fue prosa con un bloque ```json que contenía `{"tool_calls":…}`.
 
-**Evidencia previa:** en el spike de la Fase 0 (`arnes_fase0/bateria.jsonl`, caso `pregunta_ajena`), Haiku respondió con prosa y un bloque ```json con `{"tool_calls": …}`. Es exactamente esta fuga.
-
-**Diseño:** es una regla estructural sobre las claves del protocolo de la propia app, no sobre el idioma.
+**Diseño** (`application/use_cases/arnes_turno/llamada_en_crudo.rs`, puro):
 
 ```rust
-// application/use_cases/arnes_turno/llamada_en_crudo.rs
 pub enum LlamadaEmbebida { Completa(Vec<ToolCall>), Parcial }
-/// Busca objetos JSON (serde_json::Deserializer sobre cada '{') con la clave "tool_calls" (array)
-/// o "type":"tool_use". Si no hay ninguno completo, `Parcial` si aparece la clave del
-/// protocolo seguida de ':' (`"tool_calls"\s*:`), también dentro de una valla ```.
+/// Recorre cada '{' con serde_json::Deserializer y acepta un objeto con "tool_calls" (array) o
+/// "type": "tool_use". Si no hay ninguno completo, da `Parcial` cuando aparece la clave del
+/// protocolo seguida de ':' (también dentro de una valla ```).
 pub fn detectar(texto: &str) -> Option<LlamadaEmbebida>;
 ```
 
-1. **Runner** (`parsear_salida_claude`): antes de devolver `FinalMessage`, aplica `detectar`.
-   - Con `Completa`, devuelve `ToolCalls` y descarta la prosa: el modelo quería llamar a una herramienta, y ejecutarla ahorra un reintento.
-   - Un nombre que no está en el catálogo ya devuelve un resultado de error de la tool.
-2. **Guard:** nuevo invariante `ViolacionArnes::LlamadaEnCrudo`, para el caso `Parcial`. Se aplica **en todas las intenciones, también `Ninguna`**. Produce un reintento con el recordatorio «responde solo con el JSON del protocolo o solo con texto» y, si se repite, salida segura.
-3. **Streaming (D4):** si ya se emitió texto en vivo y la respuesta se rechaza o se reinterpreta como llamada, el orquestador emite `AgentExecutionEvent::TextoEnVivoDescartado`.
-   - La GUI (`web/app.js`, rama `arnes`, `:673`) vacía la burbuja y muestra el estado «revisando».
-   - **Alternativa:** retener siempre el texto, sin streaming. Es más simple, pero pierde una función que el usuario aprobó en la Fase 15.
+1. **Runner:** antes del `FinalMessage` de `:143`:
+   - `Completa` → `ToolCalls`. Se descarta la prosa y se ejecuta lo que el modelo pedía. Un nombre fuera del catálogo da un error de tool, como hoy.
+   - `Parcial` → `FinalMessage`, que el guard rechaza en el paso 2.
+2. **Guard:** el invariante `ViolacionArnes::LlamadaEnCrudo` se comprueba **antes** del cortocircuito de `Ninguna`, así que vale en todas las intenciones. Provoca un reintento con «responde solo con el JSON del protocolo o solo con texto» y, si se repite, salida segura.
+3. **Streaming (D4):** si ya se emitió texto en vivo y luego se rechaza o se convierte en llamada, se emite `AgentExecutionEvent::TextoEnVivoDescartado`. La GUI (`web/app.js`, rama `arnes`, `:673`) vacía la burbuja.
 
 **Archivos:**
 - `arnes_turno/llamada_en_crudo.rs` (nuevo)
 - `claude_agent_runner.rs`
-- `post_inference_guard.rs` (solo el invariante)
-- `agent_orchestrator.rs` (evento)
-- `dtos/agent.rs` (evento)
-- `presentation/gui/chat_service.rs`
-- `web/app.js`
+- `post_inference_guard.rs` (solo este invariante)
+- `agent_orchestrator.rs`, `dtos/agent.rs`
+- `presentation/gui/chat_service.rs`, `web/app.js`
 - `tests/integration_chat_arnes.rs`
 
 **TDD:**
-1. Prosa + valla ```json con `tool_calls` completo: `ToolCalls`.
-2. JSON truncado: guard → `LlamadaEnCrudo`.
-3. Dos bloques JSON: las dos llamadas.
-4. Respuesta legítima que **muestra** un JSON sin las claves del protocolo, como un ejemplo de configuración: `FinalMessage`.
-5. La prosa del caso 1 en ES, EN y JA.
-6. En vivo: tras el rechazo, la GUI recibe `TextoEnVivoDescartado` antes del texto nuevo.
+1. Prosa en ES, EN y JA seguida de una valla ```json completa → `ToolCalls`.
+2. JSON truncado → `LlamadaEnCrudo`.
+3. Dos bloques → dos llamadas.
+4. Una respuesta que muestra un JSON sin las claves del protocolo (un ejemplo de configuración) → `FinalMessage`.
+5. Con intención `Ninguna`, el invariante actúa.
+6. En vivo: `TextoEnVivoDescartado` llega antes del texto nuevo.
 
-**Riesgo y medición:** un falso positivo, si un documento contiene la cadena `"tool_calls":`, es improbable fuera de documentación técnica de LLM. Se mide repuntuando las respuestas guardadas (`--ask --json` guarda `herramientas[].resultado` y `respuesta`, `cli/salida.rs:159-175`). **Criterio:** 0 detecciones en las respuestas correctas guardadas.
+**Criterio:** 0 detecciones al repuntuar las respuestas correctas guardadas (§6.5).
 
 ### 3c. Verificador de páginas
 
 **Estado verificado:**
-- `CitaRevisada::motivo` (`verificador_paginas.rs:55`) genera nota para `Discrepante`, `Ambigua`, `SinPagina` y `NoEncontrada`.
-- La excepción de título o breadcrumb (`:106-111`) se aplica **solo** con `NoEncontrada`.
-- `comprobar` (`:145-179`) da `Discrepante` cuando hay una única aparición distinta de las páginas citadas, aunque estas la contengan dentro de un rango.
+- `motivo()` (`verificador_paginas.rs:55`) da nota en los 4 estados que no son `Confirmada`.
+- La excepción de título o breadcrumb (`:106-111`) solo actúa con `NoEncontrada`.
+- `comprobar` (`:145-179`) da `Discrepante` aunque la página citada sea un rango que contiene la aparición.
 
 **Diseño:**
-1. **Rescate de la rama**, solo esto (`git show claude/arreglos-rag-512d66:…/verificador_paginas.rs`):
-   - a) `motivo()` devuelve `Some` **solo** con `Discrepante`;
-   - b) `Confirmada` si alguna aparición **corta** las páginas citadas (`!paginas.is_disjoint(citadas)`), antes del `match`.
+1. **Rescate de la rama**, y solo esto:
+   - a) `motivo()` da `Some` **solo** con `Discrepante`; `Ambigua`, `SinPagina` y `NoEncontrada` quedan en silencio;
+   - b) `Confirmada` si alguna aparición **corta** las páginas citadas.
 
-   **No** se rescata el test `test_el_contexto_del_apartado_de_un_cruce_es_fuente_con_paginas`: depende de `contexto_apartado`, que viene de `apartado_tabla.rs`, descartado.
+   No se rescata `test_el_contexto_del_apartado_de_un_cruce_es_fuente_con_paginas`, porque depende de `apartado_tabla.rs`.
 2. **Excepciones antes de emitir `Discrepante`:**
-   - a) **metadatos:** si el esqueleto del extracto está contenido en algún metadato del turno (`titulo`, `breadcrumb`, que ya recoge `registro.metadatos()`), no se revisa, **sea cual sea el resultado**;
-   - b) **posición de cabecera:** si **todas** las apariciones empiezan en el primer carácter del esqueleto de una página (justo tras `⟦p. N⟧`) y el extracto no pasa de una línea del texto fuente, el extracto es un título o una cabecera y no genera nota.
+   - a) **título o metadato:** si el esqueleto del extracto está contenido en algún metadato del turno (`registro.metadatos()`: título y breadcrumb), no se anota;
+   - b) **cabecera:** si **todas** las apariciones empiezan justo tras `⟦p. N⟧` y el extracto no supera una línea de la fuente, es un título o una cabecera de página y no se anota. `FuentePaginada` guarda los inicios de página y los finales de línea.
+3. **Deuda:** `PALABRAS_DE_PAGINA` (`:29`, español e inglés) decide qué citas se revisan. No bloquea, así que no entra aquí.
 
-   `FuentePaginada` guarda para ello los inicios de página y los finales de línea en el esqueleto.
-3. **Deuda que queda:** `PALABRAS_DE_PAGINA` (`:29`) es una lista de abreviaturas de «página» en español e inglés. No se toca aquí, porque no bloquea: solo decide qué se revisa. La opción general sería pedir al modelo que cite con la misma notación `⟦p. N⟧`. Es otro cambio, con efecto en la experiencia de usuario.
+**TDD:** con datos en EN, ES y RU:
+- los 4 tests de la rama con texto sintético;
+- nuevo: el título de la portada (p. 1) citado como p. 22 → sin nota;
+- nuevo: una cabecera al inicio de la p. 7 citada como p. 9 → sin nota;
+- se mantiene: un extracto del cuerpo citado con una página ajena → `Discrepante` con nota.
 
-**Archivos:** `arnes_turno/verificador_paginas.rs` y `tests/adversarial_citas_pagina_tests.rs`.
-
-**TDD:**
-- los tests de la rama `test_en_caso_de_duda_se_guarda_silencio`, `test_rango_que_contiene_…`, `test_extracto_que_cruza_el_salto_…` y `test_parafrasis_no_se_anota`, con su texto sintético;
-- nuevo: título del documento en la p. 1 del chunk, citado como «…», p. 22: sin nota;
-- nuevo: cabecera repetida al inicio de la p. 7, citada como p. 9: sin nota;
-- se mantiene: un extracto del cuerpo citado en una página ajena da `Discrepante` con nota.
-
-Los datos van en EN, ES y RU.
-
-**Riesgo:** callar un error real. **Medición:** campaña Aguja (§5.5) y repuntuación de las respuestas guardadas.
-- **Criterio:** las notas `Discrepante` verdaderas de los tests siguen saliendo;
-- en las respuestas guardadas, los avisos bajan y ninguno de los eliminados era un error de página real (revisión manual de cada uno).
+**Criterio:** los `Discrepante` verdaderos de los tests se mantienen. Al repuntuar (§6.5), las notas eliminadas no eran errores reales (revisión manual). Aguja: 0 notas nuevas.
 
 ---
 
-## 4. Pieza 4: arnés estructural y verificador semántico en cascada
+## 4. Pieza 4: verificador híbrido de procedencia
 
 ### 4.1 Estado verificado
 
 - **`PostInferenceGuard::validar`** (`post_inference_guard.rs:186-207`):
-  - sale con `Ok` si la intención es `Ninguna`;
-  - `CapaDosNoIntentada` depende de la intención **léxica** (`intent_detector.rs`);
-  - `CifraEnAbstencion` depende de `LOCUCIONES_DE_ABSTENCION` (`:18-51`, 33 locuciones en español) y `PETICIONES_DE_REFERENCIA` (`:53-72`);
-  - el anclaje de cifras (`CifraSinAnclar`) **solo** se aplica con intención tabular o de responsable (`:198-205`).
-- **Listas léxicas:**
-  - `LOCUCIONES_DE_RECHAZO` (`:16`)
-  - `IDENTIFICADORES_DE_ABSTENCION` (`:74`)
-  - `PALABRAS_DE_ENLACE` (`:83`)
-  - `cifras.rs:13` `UNIDADES` y `:19` `PALABRAS_SIN_CIFRA`
-  - `fechas.rs:6` `MESES` (solo español)
+  - `CifraSinAnclar` solo con intención tabular o de responsable;
+  - `CifraEnAbstencion` depende de `LOCUCIONES_DE_ABSTENCION` (`:18-51`, en español) y queda exenta con `PETICIONES_DE_REFERENCIA` (`:53-72`).
+- Hoy una cifra anclada pasa aunque sea de otra entidad (`:232-233`).
+- El anclaje literal usa `extraer_cifras` y `lecturas_de_fuente` (`cifras.rs`) sobre la pregunta, las salidas de las tools y la fecha de hoy (`:294-308`).
 
-### 4.2 Diseño: cascada
+### 4.2 Principio
+
+**El LLM nunca aprueba nada: solo propone una traza de procedencia. Rust la comprueba sobre los bytes reales de `RegistroTurno` y de la pregunta.** Lo que Rust no puede comprobar no pasa.
 
 ```text
-respuesta candidata
-  │
-  ├─ R1 LlamadaEnCrudo (3b) ─────────────────────────────── estructural, Rust
-  ├─ R2 anclaje literal de cifras, EN TODAS las intenciones ─ estructural, Rust
-  │     cifras sin anclar = sospechas
-  ├─ R3 conclusión sin consulta: 0 tools de contenido en el turno y respuesta no vacía
-  │     → sospecha `ConclusionSinConsulta` ──────────────── estructural, Rust
-  ├─ R4 ejes ambiguos (señal de la tool) y rol sin respaldo (señal de la matriz)
-  │     → igual que hoy, sin listas (§4.3) ──────────────── estructural, Rust
-  │
-  └─ ¿hay sospechas? ── no → se entrega
-         │ sí
-         ▼
-     microverificación (1 llamada, Haiku, sin tools, salida JSON)
-         ▼
-     Rust COMPRUEBA cada justificación (§4.6)
-         ├─ todas válidas → se entrega sin intervención
-         └─ alguna no válida → reintento (como hoy) → salida segura al segundo fallo
+borrador ── filtro literal en Rust (el anclaje de hoy) ─ todo anclado ──► sigue el guard actual (0 ms)
+                │ alguna cifra sin anclar, o abstención con cifras que no son de la pregunta
+                ▼
+           Haiku: --tools "" --json-schema estricto; payload = pregunta + salidas del turno + borrador
+                ▼
+           Rust comprueba cada traza ─ todas válidas ──► la cifra pasa
+                │ alguna inválida, timeout o error
+                ▼
+           comportamiento actual: CifraSinAnclar / CifraEnAbstencion → reintento → salida segura
 ```
 
-- **R2:** extrae las cifras con `extraer_cifras`. Las anclas son:
-  - las cifras de la pregunta;
-  - las de las salidas de las tools;
-  - la fecha de hoy;
-  - **las del system prompt y las descripciones de las tools**, el vocabulario de la app. Esto sustituye a `PALABRAS_SIN_CIFRA`: el «2» de «Capa 2» queda anclado en cualquier idioma del prompt.
-- **R3** es el invariante «negación con 0 búsquedas», sin léxico. El disparador es estructural: no hubo ninguna llamada a `search_normative_context`, `stair_*`, `lookup_*`, `query_*`, `execute_athena_sql`, `traverse_*` ni `inspect_*`. El juicio (si la respuesta afirma o niega hechos de los documentos) lo hace la microllamada. **D7:** es nuevo y puede dar reintentos en saludos.
-- Como máximo hay **1 microllamada por respuesta candidata**, que agrupa todas las sospechas: 2 por turno, contando el reintento.
-
-### 4.3 Listas: qué se elimina y qué queda
-
-| Elemento | Destino | Motivo |
-|---|---|---|
-| `LOCUCIONES_DE_ABSTENCION`, `PETICIONES_DE_REFERENCIA`, `LOCUCIONES_DE_RECHAZO`, `IDENTIFICADORES_DE_ABSTENCION` | **Se eliminan** | `CifraEnAbstencion` queda dentro de R2, que vale para cualquier respuesta: una cifra nueva tras un «no consta» (o tras un «not stated») está sin anclar y la juzga la cascada |
-| Regla `CapaDosNoIntentada` | **Se elimina del guard** (D5) | El disparador es léxico: en otro idioma, o con la palabra equivocada, bloquea o no actúa. La pista hacia la Capa 2 sigue en `PreInferenceInterceptor`, que dirige el primer paso y **nunca bloquea** |
-| `RolSinRespaldo` | Se mantiene sin `LOCUCIONES_DE_RECHAZO` | El disparador es la señal `sin_responsable_declarado` de la matriz. Pasa si la respuesta cita literalmente una tool o si no da ningún rol no anclado: el rol inventado es una afirmación sin respaldo, y su detección pasa a la microllamada como sospecha `RolNoDeclarado` |
-| `PALABRAS_DE_ENLACE` | Se sustituye | Una seña de eje es un token del nombre del eje que no aparece en el otro eje (ya se calcula así) y que tiene 3 o más caracteres alfabéticos, o 1 o más ideográficos, o la unidad. Es una regla de longitud por escritura, no de vocabulario |
-| `UNIDADES` (`cifras.rs:13`) | Se sustituye | Un token de dígitos con un sufijo de 1 a 4 letras y sin más dígitos es una cifra. La extracción es simétrica en la fuente y en la respuesta, así que extraer de más solo añade sospechas que la cascada resuelve |
-| `PALABRAS_SIN_CIFRA` (`cifras.rs:19`) | Se elimina | Lo cubre el anclaje con el vocabulario de la app (R2) |
-| `MESES` (`fechas.rs:6`) | Se elimina la parte textual | Quedan las fechas numéricas e ISO. Una fecha con el mes en palabras, en cualquier idioma, se ancla por sus componentes numéricos o se juzga en la cascada como `EquivalenciaTextual` |
-| `PARES_DE_COMILLAS` | Se mantiene y se amplía (`„“`, `‹›`, `「」`, `『』`) | Es tipografía, no vocabulario |
-| `intent_detector.rs` (todas sus listas) | **Quedan, como deuda declarada** | Ya no pueden bloquear una respuesta: solo eligen el primer paso dirigido. Sustituirlas (por ejemplo, con un enrutado por descripción de las tools) sería otro SSD |
-
-`retener_texto` deja de depender de la intención: el texto se emite en vivo siempre, y se descarta con `TextoEnVivoDescartado` (D4).
-
-### 4.4 Puerto hexagonal y adaptador
+### 4.3 Esquema JSON cerrado y comprobación en Rust
 
 ```rust
-// application/ports/verificador_afirmaciones.rs
+// application/ports/verificador_procedencia.rs
 #[async_trait]
-pub trait VerificadorAfirmacionesPort: Send + Sync {
-    async fn verificar(&self, solicitud: &SolicitudVerificacion) -> Result<Dictamen, DomainError>;
+pub trait VerificadorProcedenciaPort: Send + Sync {
+    async fn proponer_trazas(&self, solicitud: &SolicitudProcedencia) -> Result<TrazasPropuestas, DomainError>;
 }
-pub struct SolicitudVerificacion {
-    pub pregunta: String,
-    pub extractos: Vec<ExtractoTurno>,   // id "r{i}" = salida i de las tools; texto sin marcas
-    pub borrador: String,
-    pub sospechas: Vec<Sospecha>,
+pub struct SolicitudProcedencia { pub pregunta: String, pub salidas: Vec<SalidaTurno>, pub borrador: String, pub cifras: Vec<String> }
+pub struct SalidaTurno { pub id: String /* "t{i}" */, pub herramienta: String, pub texto: String }
+pub struct TrazasPropuestas { pub trazas: Vec<Traza> }
+pub struct Traza { pub cifra: String, pub tipo: TipoTraza }
+pub enum TipoTraza {
+    FormatoOEscala { fuente: Literal, factor_potencia_diez: i8 },   // 0,42 = 0.42 (0); 1500 mm = 1.5 m (-3)
+    Aritmetica { operacion: Operacion, operandos: Vec<Literal> },    // ≤ 6 operandos
+    ReferenciaEstructural { subcadena: Literal },
+    ConteoElementos { elementos: Vec<Literal> },
 }
-pub enum Sospecha {
-    CifraSinAnclar { literal: String, contexto: String }, // ±120 caracteres del borrador
-    ConclusionSinConsulta,
-    RolNoDeclarado { fragmento: String },
-}
-pub struct Dictamen { pub cifras: Vec<DictamenCifra>, pub afirma_sobre_documentos: Option<bool>, pub rol_respaldado: Option<CitaLiteral> }
-pub struct DictamenCifra { pub literal: String, pub justificacion: Justificacion }
-pub enum Justificacion {
-    Calculo { operacion: Operacion, operandos: Vec<Operando> },
-    EquivalenciaTextual { extracto: String /* id */, fragmento_literal: String },
-    NoRespaldada,
-}
-pub struct Operando { pub valor: String, pub extracto: String /* id o "pregunta" */ }
-pub enum Operacion { Suma, Resta, Producto, Cociente, Porcentaje, Media, Redondeo { decimales: u8 } }
-pub struct CitaLiteral { pub extracto: String, pub fragmento_literal: String }
+pub enum Operacion { Suma, Resta, Producto, Division, Porcentaje }
+pub struct Literal { pub origen: String /* id de salida o "pregunta" */, pub texto: String }
 ```
 
-**Adaptador `infrastructure/llm/claude_headless_verificador.rs`:**
-- comando: `claude -p --model <haiku> --tools "" --no-session-persistence --strict-mcp-config --json-schema <esquema del Dictamen>`, con un system prompt corto y fijo;
-- reutiliza `ejecutar_cli` y la lectura de `structured_output` de los turnos dirigidos (`claude_agent_runner.rs:478` y siguientes);
-- el modelo es configurable y Haiku va por defecto.
+**Comprobación en Rust** (`arnes_turno/procedencia.rs`, puro). Para todos los tipos, cada `Literal.texto` debe ser una **subcadena exacta** del `origen` citado: en el texto de la salida tal como se registró (`recorrer_textos`, sin marcas `⟦p. N⟧`) o en la pregunta.
 
-**Composición:** en `bootstrap.rs`. `AgentOrchestrator` recibe `Arc<dyn VerificadorAfirmacionesPort>`; en los tests, un `VerificadorFalso`.
-
-**Latencia, medida en el spike de la Fase 0** (`arnes_fase0/bateria.jsonl`, Haiku con `claude -p`):
-- caso de control sin esquema: 8,7 s y 8,8 s de reloj;
-- con `--json-schema`: entre 6,0 y 9,3 s en los casos simples, con valores atípicos de 16 a 22 s.
-
-Ese spike tenía otro prompt y una sola máquina con carga, así que el tiempo **real** de la microverificación no está medido.
-
-**Coste:** se paga solo cuando hay sospecha. En `main`, la regla léxica saltó en 17 de 122 consultas del set v2. Con R2 en todas las intenciones, la frecuencia puede subir. **Se estima sin Claude** repuntuando las respuestas guardadas con R2 nuevo (§5.6) antes de implementar el adaptador.
-
-### 4.5 Fallo o tiempo agotado (D6)
-
-- Límite: **30 s**, sin reintento de la microllamada.
-- **Falla cerrada:** si la microllamada falla, se agota el tiempo o el JSON no valida, cada sospecha cuenta como no respaldada. Es el comportamiento de hoy: reintento y salida segura.
-- Se emite `EtapaArnes::VerificacionNoDisponible` con el motivo, para la telemetría y la GUI.
-- **Por qué falla cerrada:** fallar abierto permitiría que una cifra de memoria pasara justo cuando Haiku no responde, y eso rompería las trampas.
-
-### 4.6 Cómo se impide que acepte una cifra de memoria
-
-El LLM **propone** la justificación y **Rust la comprueba** (`arnes_turno/dictamen.rs`, puro). Solo pasa lo que Rust puede verificar:
-
-1. **`Calculo`:**
-   - cada operando debe estar anclado **en el extracto que cita** (o en la pregunta);
-   - Rust recalcula la operación;
-   - el resultado debe coincidir con la cifra del borrador, con una tolerancia de media unidad de su último decimal mostrado;
-   - como máximo 6 operandos.
-
-   Un operando que no está en su extracto, o un resultado que no cuadra, hacen que la justificación no sea válida.
-2. **`EquivalenciaTextual`:** `fragmento_literal` debe aparecer **literalmente** (comparando esqueletos, como en `verificador_paginas`) en el extracto citado. Cubre las cifras escritas en palabras, los ordinales y los números romanos, en cualquier idioma, sin listas.
-
-   **Límite reconocido:** que el fragmento signifique esa cifra lo afirma el LLM y Rust no lo comprueba. Para colar una cifra de memoria, tendría que señalar un fragmento real y leerlo mal.
-3. **`NoRespaldada`,** o cualquier cifra sin dictamen: es una violación.
-4. **`ConclusionSinConsulta`:** si `afirma_sobre_documentos` es verdadero, o no viene en el dictamen, se produce un reintento con «consulta las herramientas antes de afirmar o negar».
-5. **`RolNoDeclarado`:** solo pasa con una `CitaLiteral` que exista en un extracto.
-6. **Prompt fijo del verificador:** lo que no está en los extractos o en la pregunta es `NoRespaldada`, aunque sea conocimiento general. No tiene tools ni historial.
-7. **El extractor de cifras y el anclaje siguen siendo deterministas.** El LLM solo puede **añadir** aceptaciones que Rust compruebe; nunca quita un rechazo sin evidencia comprobada.
-
-**Riesgo residual:** una coincidencia aritmética casual, como una cifra de memoria que coincide con `a − b` de dos cifras recuperadas. La limitan dos condiciones: los operandos deben estar **en el extracto citado** y la operación la declara el modelo, no una búsqueda exhaustiva de Rust. Por eso **no** se buscan combinaciones aritméticas a ciegas: con unos 200 números en las salidas, casi cualquier cifra sería la diferencia de dos de ellos.
-
-### 4.7 Mantener deterministas las 8 trampas y los 9 «no consta»
-
-| Hoy | Después |
+| Tipo | Comprobación determinista |
 |---|---|
-| Trampa respondida con el valor del documento: está anclada y pasa | Igual: está anclada y no hay microllamada |
-| Cifra de memoria en una respuesta con intención tabular: `CifraSinAnclar`, reintento | Sin anclar → microllamada → sin justificación verificable → reintento. **Mismo resultado, en cualquier intención e idioma** |
-| «No consta» sin cifras: pasa | Igual: sin sospechas no hay microllamada |
-| «No consta» + valor de referencia: `CifraEnAbstencion` (solo si la locución está en la lista española) | Sin anclar → no verificable → reintento. **Más cobertura:** también con «not stated» |
-| Cálculo correcto (V53): reintento, y a veces se pierde | `Calculo` comprobado por Rust: pasa sin intervención |
-| Artículo citado con otra forma escrita (V22, supuesto) | `EquivalenciaTextual` con fragmento real: pasa. **Si el número de artículo sale de memoria y no está en los extractos, se sigue rechazando.** No se sabe cuál de los dos casos fue V22 (el informe solo dice «no figuraban literalmente») |
+| `formato_o_escala` | El valor de `fuente`, leído con las lecturas canónicas de `cifras.rs`, por `10^factor` (con `factor` entre −9 y 9) es igual al valor de la cifra |
+| `aritmetica` | Se recalcula la operación con los valores de los operandos. El resultado coincide con la cifra con una tolerancia de **±0,5·10^-d**, siendo `d` los decimales que muestra la cifra. Porcentaje = `a/b·100` |
+| `referencia_estructural` | La subcadena existe y **contiene la secuencia de dígitos** de la cifra (sin separadores): «Art. 21» respalda «artículo 21» |
+| `conteo_elementos` | Cada elemento existe. Los elementos son distintos tras normalizarlos (esqueleto). Su número es igual a la cifra |
+
+- Sin traza, con una traza que no valida o con un tipo fuera del esquema: la cifra no pasa.
+- **Límite reconocido:** una cifra escrita con palabras en la respuesta («doce») no tiene tipo en el esquema cerrado. Sigue el comportamiento actual.
+- **Por qué no se buscan combinaciones aritméticas a ciegas:** con unas 200 cifras en las salidas, casi cualquier número saldría como `a − b` de dos de ellas, y se colarían cifras de memoria. La operación la declara el modelo y sus operandos deben estar en el origen que cita.
+
+### 4.4 `CifraEnAbstencion`
+
+- **En una abstención** siguen prohibidas **las cifras de parámetros, aunque estén ancladas en otro documento recuperado.** Esto endurece la regla actual (`:232-233`).
+- Solo se permiten las cifras de la pregunta y las `referencia_estructural` verificadas. En una abstención no se admiten `aritmetica`, `formato_o_escala` ni `conteo_elementos`.
+- **Disparador (D6):** sigue siendo `LOCUCIONES_DE_ABSTENCION`, **de forma provisional**.
+  - Es la única lista léxica que queda en este camino. Solo endurece: nunca aprueba nada.
+  - Limitación declarada, la misma que hoy: una abstención redactada en otro idioma no activa este endurecimiento. Las cifras sin anclar siguen pasando por el verificador.
+  - La detección general de la abstención depende de la Pieza 5. No se añade ninguna lista nueva.
+- **Se elimina `PETICIONES_DE_REFERENCIA` (D5).** Pedir un «valor de referencia» que el documento no contiene ya no autoriza una cifra de memoria.
+
+### 4.5 Listas tras la Pieza 4
+
+| Lista | Destino |
+|---|---|
+| `PETICIONES_DE_REFERENCIA` | Se elimina |
+| `LOCUCIONES_DE_ABSTENCION`, `LOCUCIONES_DE_RECHAZO`, `IDENTIFICADORES_DE_ABSTENCION` | Se mantienen de forma provisional, como disparador que solo endurece (D6) |
+| `PALABRAS_DE_ENLACE`, `UNIDADES`, `PALABRAS_SIN_CIFRA`, `MESES` | Sin cambios en esta pieza. Sus falsos negativos ya no bloquean: llegan al verificador como cifras sin anclar. Su sustitución es deuda declarada |
+| `intent_detector.rs` | Sin cambios. Su sustitución por directivas va con la Pieza 5 |
+
+### 4.6 Adaptador, modelo y latencia
+
+- **`infrastructure/llm/claude_headless_procedencia.rs`:** `claude -p --model <haiku> --tools "" --no-session-persistence --strict-mcp-config --json-schema <esquema>`, con un system prompt fijo y corto.
+  - Reutiliza `ejecutar_cli` y la lectura de `structured_output` de los turnos dirigidos (`claude_agent_runner.rs:478`).
+  - **Payload mínimo:** pregunta, salidas de las tools del turno y borrador. Sin historial.
+- **Composición** en `bootstrap.rs`. En los tests, un `VerificadorProcedenciaFalso`.
+- **Latencia:**
+  - 0 ms si el filtro literal lo resuelve, el caso habitual;
+  - entre 3 y 6 s cuando hace falta la microllamada (objetivo del mentor). **No está medido:** en el spike de la Fase 0, Haiku con `--json-schema` tardó entre 6,0 y 9,3 s de reloj, con valores atípicos de 16 a 22 s (`arnes_fase0/bateria.jsonl`; equipo con carga).
+- **Timeout de 10 s.** Si hay timeout o error, el comportamiento actual no cambia: la cifra cuenta como no anclada. **Falla cerrada:** las trampas no dependen de que Haiku responda.
+- **Como máximo, 1 microllamada por borrador:** se agrupan todas las cifras.
+
+### 4.7 Las 8 trampas y los 9 «no consta» siguen deterministas
+
+| Caso | Resultado |
+|---|---|
+| Trampa respondida con el valor del documento | Anclada: 0 ms, como hoy |
+| Cifra de memoria | Sin traza comprobable → comportamiento actual (reintento y salida segura) |
+| «No consta» sin cifras | No se llama a Haiku, como hoy |
+| «No consta» + valor de referencia | Rechazada, ahora también si se pidió un «valor de referencia» (D5) |
+| «No consta» + cifra anclada de otro documento | **Rechazada (nuevo):** antes pasaba |
+| Cálculo correcto a partir de dos celdas (V53) | `aritmetica` comprobada: pasa sin reintento |
+| Número de artículo cuya subcadena está en las salidas (V22, supuesto) | `referencia_estructural`: pasa. Si el número sale de memoria, se sigue rechazando |
 
 ### 4.8 Archivos
 
-- `src/application/ports/verificador_afirmaciones.rs` (nuevo)
-- `src/application/use_cases/arnes_turno/dictamen.rs` (nuevo)
-- `src/application/use_cases/arnes_turno/post_inference_guard.rs`
-- `cifras.rs`
-- `fechas.rs`
-- `pre_inference_interceptor.rs` (`retener_texto`)
-- `agent_orchestrator.rs` (cascada y evento)
-- `src/infrastructure/llm/claude_headless_verificador.rs` (nuevo)
-- `src/infrastructure/bootstrap.rs`
-- `src/presentation/gui/intervenciones_arnes.rs` (etapa nueva)
-- `tests/adversarial_arnes_tests.rs`
-- `tests/integration_chat_arnes.rs`
+- `application/ports/verificador_procedencia.rs` (nuevo)
+- `arnes_turno/procedencia.rs` (nuevo)
+- `post_inference_guard.rs`
+- `agent_orchestrator.rs` (el guard pasa a ser asíncrono en el punto de la microllamada)
+- `infrastructure/llm/claude_headless_procedencia.rs` (nuevo)
+- `bootstrap.rs`
+- `presentation/gui/intervenciones_arnes.rs` (etapa `VerificacionProcedencia` en la telemetría)
+- `tests/adversarial_arnes_tests.rs`, `tests/integration_chat_arnes.rs`
 
 ### 4.9 Plan TDD
 
-Todos los tests usan `VerificadorFalso`, que devuelve dictámenes fijados por cada test.
+**Rojo, `procedencia.rs`:**
+1. Cada tipo con un caso válido:
+   - `0,42` frente a `0.42`;
+   - `1500` mm a `1.5` m;
+   - resta de dos celdas de una tabla financiera en EN, mostrada con 1 decimal;
+   - «Art. 21» en ES y «§ 21» en DE;
+   - un conteo de 3 ítems en griego.
+2. Cada tipo con un caso inválido:
+   - un operando que no está en su origen;
+   - un origen inexistente;
+   - un resultado fuera de la tolerancia;
+   - un factor de 7,3, que no es potencia de 10;
+   - una subcadena sin los dígitos;
+   - un conteo con ítems duplicados o con un número distinto de elementos.
+3. Traza para una cifra que no está en el borrador: se ignora.
+4. Más de 6 operandos: inválida.
 
-**Rojo, `dictamen.rs`:**
-1. `Calculo` correcto: `Resta` de dos celdas de una tabla financiera EN da la diferencia mostrada → válido.
-2. Operando inexistente en su extracto → inválido.
-3. Resultado que no cuadra → inválido.
-4. Redondeo a 1 decimal → válido.
-5. `EquivalenciaTextual` con «doce» (ES), «twelve» (EN), «XII» y «十二» (ZH), cuyo fragmento existe → válido.
-6. Fragmento inventado → inválido.
-7. `NoRespaldada` → inválido.
-8. Dictamen sin la cifra → inválido.
+**Rojo, en el orquestador** con el falso verificador:
+1. Trampa: documento 412 y respuesta 400. El falso devuelve una `aritmetica` con operandos inventados → Rust la rechaza y hay reintento.
+2. Cálculo válido → se entrega sin intervención.
+3. Timeout o error del verificador → comportamiento actual.
+4. «No consta» + cifra anclada de otro documento → `CifraEnAbstencion`.
+5. «No consta» + artículo verificado → pasa.
+6. Todo anclado → 0 llamadas al verificador (contador del falso).
 
-**Rojo, cascada en el orquestador:**
-1. Trampa sintética: el documento dice 412 y el modelo da 400 (de memoria). El falso verificador devuelve `NoRespaldada` → reintento y, al segundo fallo, salida segura.
-2. La misma trampa, con un falso verificador que **intenta** colar 400 como `Calculo` con operandos inexistentes → Rust lo rechaza.
-3. «Not stated, but typically 20 MPa» (EN), sin lista léxica → reintento.
-4. «No consta» sin cifras → 0 microllamadas.
-5. Cálculo válido → se entrega sin `ArnesIntervino`.
-6. El verificador devuelve un error o agota el tiempo → falla cerrada y etapa `VerificacionNoDisponible`.
-7. 0 tools y la respuesta afirma hechos → reintento; saludo con `afirma_sobre_documentos: false` → se entrega.
-8. Respuesta en alemán, japonés y griego con cifras ancladas → 0 microllamadas.
+**Regresión:** la suite actual de `post_inference_guard` (`:515-1508`) sigue en verde. Los tests que cambian por D5 o por el endurecimiento de la abstención se reescriben y se justifican uno a uno en el PR.
 
-**Regresión:** la suite actual de `post_inference_guard` (`:515-1508`) se revisa test a test:
-- los de anclaje y ejes deben seguir en verde;
-- los de `CapaDosNoIntentada` y de locuciones se **reescriben** como casos de R2 y se documenta cada uno en el PR.
-
-### 4.10 Riesgos de retroceso y medición
+### 4.10 Riesgos y medición
 
 | Riesgo | Medición | Criterio |
 |---|---|---|
-| Se cuela una cifra de memoria | Tests de trampas sintéticas y `acceptance_8_problemas` | 100 % de los casos de trampa rechazados |
-| Más intervenciones por anclar en todas las intenciones | Repuntuación de las respuestas guardadas con R2 nuevo: número de turnos con sospecha | Informado antes de implementar el adaptador. Si supera el 30 % de los turnos, se revisa la extracción |
-| Latencia | Tiempo de la microllamada, 3 o más ejecuciones (el equipo tiene carga) | Informado, no bloquea |
-| Retroceso en «no consta» | Las preguntas sin respuesta de los benchmarks propios | Ninguna cifra en una abstención |
+| Se cuela una cifra de memoria | Trampas sintéticas y `acceptance_8_problemas` | 100 % rechazadas |
+| Abstenciones legítimas rechazadas por el endurecimiento | Repuntuar las respuestas guardadas: abstenciones con cifras ancladas de otro documento (§6.5) | Se informa antes de implementar y se revisa cada caso |
+| Frecuencia y latencia de la microllamada | Repuntuar: turnos con cifras sin anclar. Después, 3 o más ejecuciones reales | Se informa |
+| Retroceso en «no consta» | Preguntas sin respuesta de los benchmarks propios | Ninguna cifra en una abstención |
 
 ---
 
-## 5. Protocolo de validación rápida
+## 5. Pieza 5 (fuera de esta rama): tool use nativo por MCP
 
-### 5.1 Principio
+**Solo diseño futuro.** Se hará después de validar las piezas 1 a 4.
 
-Cada pieza se mide primero **sin inferencia de Claude** y en minutos. El set oculto (unas 2,5 h) solo se usa al final, y lo ejecuta la sesión evaluadora aislada. **Esta sesión no ha leído `docs/validacion/set_oculto*`.**
+- **Un único `claude -p` por turno** con `--mcp-config`, en lugar de un proceso por paso con el protocolo JSON (`claude_agent_runner.rs:156-192`).
+- **Servidor MCP dentro de `LakehouseApp`,** ligado al turno (hoy `infrastructure/mcp/mcp_server.rs` solo sirve a clientes externos). Cada llamada alimenta `RegistroTurno` y el Studio.
+- **stream-json** con retención del texto final hasta que pasa el guard, y **un reintento**.
+- **`PreInferenceInterceptor` solo con directivas.** El guard no depende de la intención léxica.
+- **Spike previo en Windows:**
+  - los flags de `--mcp-config` y `--strict-mcp-config`;
+  - los permisos no interactivos de las tools MCP (`--allowedTools` o equivalente);
+  - el transporte stdio o local dentro del proceso de la app;
+  - la latencia frente al protocolo actual.
+- Hace innecesaria la Pieza 3b y abre la sustitución de `LOCUCIONES_DE_ABSTENCION` (D6).
+
+---
+
+## 6. Protocolo de validación rápida
+
+### 6.1 Niveles
+
+Todo se mide primero **sin inferencia de Claude**, con nuestros datos. **Esta sesión no ha leído `docs/validacion/set_oculto*`.**
 
 | Nivel | Coste de Claude | Qué mide | Piezas |
 |---|---|---|---|
-| N0 | 0 | `cargo test`, `clippy`, `fmt` | Todas |
-| N1 | 0 | Extracción y compuerta en un corpus público | 1 |
-| N2 | 1 ingesta por documento, una vez | Anclaje de páginas de tabla, repetido sin coste | 2 |
+| N0 | 0 | `cargo test`, `clippy --all-targets -D warnings`, `fmt --check` | Todas |
+| N1 | 0 | Extracción y compuerta por página, en el lote de control y el corpus público | 1 |
+| N2 | 1 ingesta por documento, una sola vez | Anclaje de tablas, repetido sin coste | 2 |
 | N3 | 0 | Recuperación pura por MCP | 3a |
-| N4 | 0 | Repuntuar respuestas guardadas (`--ask --json` guarda las tools) | 3b, 3c y 4 |
-| N5 | Claude (Aguja, ~78 min) | Campaña con el modelo | 3c y 4 |
-| N6 | Claude (~2,5 h) | Set oculto v2, **sesión aislada** | Todas, al final |
+| N4 | 0 | Repuntuar respuestas guardadas (`--ask --json` guarda las tools, `cli/salida.rs:159-175`) | 3b, 3c y 4 |
+| N5 | Aguja 5 × 3 (~78 min) | Con el modelo | 1, 3c y 4 |
+| N6 | Sesión evaluadora | Subconjunto del set oculto (§6.7) | Al final |
 
-### 5.2 Corpus público para N1 (no está en el set oculto)
+### 6.2 N1: lote de control y corpus público
 
-Entre 12 y 20 PDF públicos, descargados a `.cache/datasets/legibilidad/`, registrados en `benchmarks/manifiesto_datasets.json` con su sha256 (como `aguja_base`) y **sin versionar su texto**. Deben cubrir:
-- artículos LaTeX con fuentes Type1/CFF, el caso que motivó la pieza;
-- griego, cirílico, CJK, árabe y devanagari;
-- un PDF con muchas fórmulas;
-- unos estados financieros con muchas tablas;
-- un PDF con iconos en la PUA;
-- uno escaneado sin texto;
-- MIL-STD-882E (`aguja_base`).
+- **Lote de control:** griego, cirílico, CJK, un paper LaTeX con fórmulas (Type1/CFF), una tabla financiera numérica y MIL-STD-882E (`aguja_base`).
+- **Corpus público:** de 12 a 20 PDF, más árabe, devanagari, iconos en la PUA y un escaneado.
+- **Almacenamiento:** en `.cache/datasets/legibilidad/`, registrados con su sha256 en `benchmarks/manifiesto_datasets.json` y **sin versionar su texto**.
+- **Exclusión:** se pide a la sesión evaluadora la lista de **sha256** del corpus del set oculto, sin nombres, y se sustituye cualquier PDF que coincida.
+- **Herramienta:** `cargo run --example medir_extraccion -- <carpeta>`. Por cada PDF y página da la clase, las métricas, los títulos de sección detectados y 20 frases de muestra con su página, en JSONL y en segundos.
+- **Comparación antes y después:**
+  - las secciones;
+  - la página de cada frase, frente a `pypdf`;
+  - las clases.
+- **Calibración:** los umbrales se calibran **aquí** y nunca con el set oculto.
 
-**Exclusión:** no conocemos los PDF del set oculto. Se pide a la sesión evaluadora una lista de **sha256** de su corpus (sin nombres). Cualquier PDF que coincida se sustituye.
+### 6.3 N2: anclaje de tablas
 
-**Herramienta:** `cargo run --example medir_extraccion -- <carpeta>`. Es sencilla, conforme a §4 de `CLAUDE.md`. Por cada PDF y página da el hash del texto, las métricas y el veredicto, en formato JSONL, en unos segundos. Antes y después se comparan los hashes y los veredictos.
+- Se crea una vez un **centro de medición** con PDF públicos con tablas: MIL-STD-882E y 2 o 3 del corpus.
+- **Herramienta:** `cargo run --example medir_anclaje -- <centro>` lee 02 y 05 en solo lectura, ejecuta `anclar_tabla` y escribe el bloque y la página de cada fila.
+- **Oráculo:** un script con `pypdf` que localiza la coincidencia única de la clave y los valores de cada fila. Los casos ambiguos se excluyen y se informan.
+- **Métricas:** páginas falsas (criterio: 0) y cobertura.
+- Iterar sobre el algoritmo no exige volver a ingerir.
 
-### 5.3 N2: anclaje de páginas de tabla
+### 6.4 N3: cuota por documento
 
-- Se crea **una vez** un centro de medición con PDF públicos que tengan tablas: MIL-STD-882E (sus matrices de riesgo) y 2 o 3 del corpus de §5.2. Así se paga la destilación una sola vez.
-- **Herramienta:** `cargo run --example medir_anclaje -- <centro>` lee 02 (texto y saltos) y 05 (celdas) del centro **en solo lectura**, ejecuta `anclar_tabla` y escribe la página de cada fila.
-- **Oráculo:** la página de cada fila se verifica con un script en Python (`pypdf`) que busca la coincidencia única de los valores de la fila. Si es ambigua, el caso se excluye y se informa.
-- **Métricas:** páginas falsas (criterio: 0) y cobertura (porcentaje de filas con página, informado).
-- Iterar sobre el algoritmo **no** exige volver a ingerir.
+- Centro con varios documentos: el de §6.3 más los fixtures de `ciclo_de_vida` y `rgb_industrial`.
+- **Herramienta:** un script en Python con `benchmarks/lakehouse/mcp.py`, que llama a `search_normative_context` sin Claude (como `run_aguja._recuperacion_directa`).
+- **Métricas:**
+  - recall@8 del fragmento de referencia en las preguntas de un solo documento (Aguja y RGB). Criterio: **no baja**;
+  - porcentaje de respuestas con los dos documentos en el top 8, en preguntas cruzadas sintéticas (A + B). Se informa.
 
-### 5.4 N3: cuota multidocumento
+### 6.5 N4: repuntuación de respuestas guardadas
 
-- Centro de medición con varios documentos: el de §5.3, más `benchmarks/fixtures/ciclo_de_vida` y `rgb_industrial`.
-- **Herramienta:** un script en Python que llama a `search_normative_context` por MCP (`benchmarks/lakehouse/mcp.py`, como `run_aguja._recuperacion_directa`), sin Claude.
-- **Preguntas de un solo documento:** las del benchmark Aguja y las de RGB. Métrica: recall@8 del fragmento de referencia. Criterio: **no baja**.
-- **Preguntas cruzadas sintéticas:** concatenan una pregunta de A y otra de B. Métrica: porcentaje de respuestas con fragmentos de los dos documentos en el top 8. Se espera que suba; se informa.
+`benchmarks/evaluacion/repuntuar.py` añade un modo que vuelve a ejecutar las reglas puras de Rust sobre los JSON guardados (`respuesta` y `herramientas[].resultado`), con un binario auxiliar o un test `#[ignore]`:
+- el verificador de páginas (3c): notas antes y después, revisando a mano las eliminadas;
+- el detector de JSON embebido (3b);
+- el filtro literal y el endurecimiento de la abstención (4): cuántos turnos irían a Haiku y qué abstenciones cambian.
 
-### 5.5 N4 y N5
+No usa Claude.
 
-- **N4:** `benchmarks/evaluacion/repuntuar.py` se amplía con un modo que vuelve a ejecutar sobre los JSON guardados:
-  - el verificador de páginas (3c), contando las notas antes y después y revisando a mano las eliminadas;
-  - el detector de llamadas en crudo (3b);
-  - R2 de la Pieza 4, contando los turnos con sospecha.
+### 6.6 Línea base y criterios de no retroceso (`CLAUDE.md` §6)
 
-  Necesita un binario auxiliar `--revisar-guardado` o un test `#[ignore]` que lea los JSON. No usa Claude.
-- **N5:** Aguja 5 × 3, igual que la línea base de `benchmarks/informes/aguja_citas_pagina_20261110.md`.
+**Línea base**, en `main` (`62f3010`) y antes de cada pieza:
+- N0 completo, contando aprobados e ignorados;
+- los niveles N1 a N4 que correspondan, en `benchmarks/informes/linea_base_generalidad_<pieza>.md`.
 
-### 5.6 Línea base y criterios de no retroceso (`CLAUDE.md` §6)
+**Cualquier empeoramiento bloquea el merge.**
 
-**Antes de cada pieza,** en `main` (`62f3010`):
-- `cargo test` completo, contando aprobados e ignorados;
-- `clippy --all-targets -D warnings` y `fmt --check`;
-- los niveles N1 a N4 que correspondan, guardados en `benchmarks/informes/linea_base_generalidad_<pieza>.md`.
-
-| Pieza | Criterio de no retroceso (cualquier empeoramiento bloquea el merge) |
+| Pieza | Criterio |
 |---|---|
-| 1 | Todos los tests verdes. Hash de texto igual en toda página sin fuentes sin ToUnicode. 0 páginas dudosas en los PDF legibles. Aguja: `recall_aguja`, `pagina_exacta_estricta` y `seccion_real` iguales |
-| 2 | 0 páginas falsas en N2. RGB y `acceptance_8_problemas`: la recuperación de tablas no baja. Un centro v6 se rechaza con mensaje |
-| 3a | Recall@8 de un solo documento sin bajar. Centro de un documento: salida idéntica |
+| 1 | N0 en verde. Ninguna sección perdida. 100 % de las frases con la misma página. 0 páginas degradadas en los PDF legibles. El PDF LaTeX Type1/CFF, legible. Aguja igual (1,00) |
+| 2 | 0 páginas falsas. La recuperación de tablas en RGB y `acceptance_8_problemas` no baja. Un centro v6 se rechaza |
+| 3a | Recall@8 de un solo documento igual o mejor. Con un documento, salida idéntica |
 | 3b | 0 detecciones en las respuestas correctas guardadas |
-| 3c | Las `Discrepante` verdaderas de los tests se mantienen. Las notas eliminadas en N4 no eran errores reales (revisión manual). Aguja: 0 notas nuevas |
-| 4 | Trampas sintéticas: 100 % rechazadas. Benchmarks propios: 0 cifras inventadas (como en `rgb_arnes_corregido_20261109.md`). Abstenciones sin cifras. Ningún «no consta» se pierde |
+| 3c | Los `Discrepante` verdaderos se mantienen. Las notas eliminadas no eran errores reales. Aguja: 0 notas nuevas |
+| 4 | 100 % de las trampas sintéticas rechazadas. 0 cifras inventadas en los benchmarks propios. Abstenciones sin cifras de parámetros |
 
-Los tiempos son orientativos: el equipo del usuario tiene carga. Se dan con 3 o más ejecuciones y nunca se concluye con una sola.
+Los tiempos son orientativos, porque el equipo tiene carga: se dan con 3 o más ejecuciones.
 
-### 5.7 Qué debería medir la sesión evaluadora aislada
+### 6.7 Qué debería medir la sesión evaluadora aislada
 
-**Al final, no por cada cambio:**
-- **Subconjunto rápido** (se propone; la sesión evaluadora elige las preguntas sin decírnoslas): las preguntas de las 4 que fallan en `main`, por categoría (cálculo en tabla, dato repartido legal, PDF académico); las 8 trampas; las 9 sin respuesta; y las multidocumento. Unas 25 preguntas en 3 pasadas, que dan más señal que 61 en 2.
-- **Ingesta:** el número de documentos `LECTURA_DUDOSA` en su corpus y si coinciden con los ilegibles reales.
-- **Si el set v2 se usa para decidir un merge, deja de ser held-out.** Habrá que escribir el v3, como ya propone `situacion_rag_20261111.md` §7.
+- **Reutiliza los centros ya ingeridos** para 3a, 3b, 3c y 4, que solo tocan la recuperación o el arnés. **Las piezas 1 y 2 exigen centros v7 nuevos:** una sola ingesta con las dos integradas.
+- **Subconjunto rápido** (propuesta; la sesión evaluadora elige las preguntas sin comunicarlas):
+  - las preguntas de las categorías que fallan en `main` (cálculo en tabla, dato repartido legal, PDF académico);
+  - las 8 trampas;
+  - las 9 sin respuesta;
+  - las multidocumento;
+  - las respondidas con `lookup_double_entry_table`, para comprobar la página de la Pieza 2.
+
+  Unas 25-30 preguntas en 3 pasadas.
+- **Ingesta:** documentos y páginas `LECTURA_DEGRADADA` en su corpus, frente a los ilegibles reales. También la calibración de umbrales con sus 15 PDF.
+- **El set v3** (trampas en dos grupos y suites base y de estrés) lo hará la sesión evaluadora más adelante. **No entra en este SSD.**
 
 ---
 
-## 6. Independencia y orden
+## 7. Independencia y orden
 
 | Pieza | Archivos compartidos | Puede ir en paralelo con |
 |---|---|---|
-| 1 | `mapeo_destilacion.rs` (`mapear_con_estado`), `estructura_documental.rs`, regla 7 del prompt | 3a, 3c |
-| 2 | `mapeo_destilacion.rs` (`vincular_tablas`, otras funciones), esquemas, **v7** | 3a, 3c. Con la 1 es posible, pero una sola de las dos lleva la subida de versión |
+| 1 | `mapeo_destilacion.rs` (`mapear_con_estado`), `estructura_documental.rs`, `schemas.rs` (01), `estructura.rs` | 3a, 3c, 4. **Con la 2 comparte la v7**: una sola sube la versión |
+| 2 | `mapeo_destilacion.rs` (`vincular_tablas`, otras funciones), `schemas.rs` (04 y 05), `dtos/centros.rs` | 3a, 3c, 4 y, con coordinación, la 1 |
 | 3a | `busqueda.rs` | Todas |
-| 3b | `post_inference_guard.rs`, `agent_orchestrator.rs`, GUI | 1, 2, 3a, 3c. **No con la 4** |
+| 3b | `post_inference_guard.rs`, `agent_orchestrator.rs`, `claude_agent_runner.rs`, GUI | 1, 2, 3a, 3c. **Antes de la 4** |
 | 3c | `verificador_paginas.rs` | Todas |
-| 4 | `post_inference_guard.rs`, `agent_orchestrator.rs`, `cifras.rs`, `fechas.rs` | 1, 2, 3a, 3c. **Después de la 3b** |
+| 4 | `post_inference_guard.rs`, `agent_orchestrator.rs` | 1, 2, 3a, 3c. **Después de la 3b** |
 
 **Orden recomendado:**
-1. **3c + 3a + 1, en paralelo.** La 3c es pequeña y quita ruido. La 3a es independiente y se mide en N3. La 1 corrige 4 de los 8 fallos y fija el valor `LECTURA_DUDOSA`.
-2. **2.** Sube a v7, incluye el valor de la Pieza 1 y se recrean los centros una sola vez.
-3. **3b.** Crea `llamada_en_crudo.rs`, el evento `TextoEnVivoDescartado` y el invariante R1.
-4. **4.** El mayor riesgo. Antes de escribir el adaptador, se repuntúa R2 en N4 para conocer la frecuencia de microllamadas.
+1. **En paralelo: 3c, 3a y 1.** La 1 empieza por el spike de pdfium y el lote de control (N1). La 3c y la 3a son pequeñas y se miden sin Claude.
+2. **2.** Sube a v7 incluyendo los cambios de la 1. Después se recrean los centros una sola vez.
+3. **3b.**
+4. **4.** Antes del adaptador, la repuntuación N4 da la frecuencia de microllamadas y las abstenciones afectadas.
+5. **Pieza 5**, en otra rama, tras validar las piezas 1-4.
 
----
+## 8. Fuera de alcance
 
-## 7. Lo que este SSD no cubre (seguimiento)
-
-- Las listas de `intent_detector.rs`. Dejan de bloquear, pero siguen eligiendo el primer paso.
+- Las listas de `intent_detector.rs` (Pieza 5).
 - `PALABRAS_DE_PAGINA` (`verificador_paginas.rs:29`).
-- `INICIOS_DE_NOTA` y `PALABRAS_DE_CAPITULO` (`pdf_estructura.rs:33` y `:48`): heurísticas de estructura en español e inglés, ajenas a estas 4 piezas.
+- `INICIOS_DE_NOTA` y `PALABRAS_DE_CAPITULO` (`pdf_estructura.rs:33` y `:48`).
+- `PALABRAS_DE_ENLACE`, `UNIDADES`, `PALABRAS_SIN_CIFRA` y `MESES` (§4.5).
 - La página impresa (`/PageLabels`).
-- Tablas por regiones geométricas (requiere pdfium).
+- La extracción geométrica completa de tablas y la banda `y` de pdfium.
+- El set oculto v3.

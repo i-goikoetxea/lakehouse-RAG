@@ -1304,22 +1304,25 @@
 
 ### Sesión SSD de generalidad (2026-11-11): 4 piezas, solo diseño
 
-**Estado: borrador para aprobación del usuario. Sin código de producción, sin push ni merge.** Documento: `docs/arquitectura/ssd_generalidad_4_piezas.md`. Origen: la decisión del mentor externo sobre `docs/estado/situacion_rag_20261111.md` y `auditoria_generalidad_20261111.md`. La rama `claude/arreglos-rag-512d66` no se integra; de ella solo se rescata el silencio de `verificador_paginas.rs`.
+**Estado: SSD cerrado y pendiente de aprobación del usuario. Sin código de producción, sin push ni merge.** Documento: `docs/arquitectura/ssd_generalidad_4_piezas.md`. Incorpora las decisiones vinculantes del debate con el mentor técnico y el criterio del usuario para la Pieza 1 (calidad y seguridad; la DLL no cuenta como inconveniente).
 
-- [x] **Pieza 1: PDF.** Se recomienda la opción (b): ToUnicode propio inyectado en memoria, frente a pdfium. Compuerta de legibilidad sin léxico y estado nuevo `LECTURA_DUDOSA` por fila.
-  - **Hallazgo verificado en `pdf-extract` 0.12.1** (`lib.rs:406-434` y `:496-505`): en las fuentes CFF, la codificación interna gana a `/Differences`.
-  - La AGL solo se aplica por búsqueda exacta.
-- [x] **Pieza 2: página de la Capa 2.** Anclaje textual por coincidencia de 2 o más tokens con al menos uno distintivo; `None` si es ambiguo. Se eliminan los literales `"Tabla {id}"` (`mapeo_destilacion.rs:1252` y `:1077`). **Esquema v7: hay que recrear los centros.**
-- [x] **Pieza 3:**
-  - 3a: cuota con relleno en `fusionar`;
-  - 3b: detector estructural de *tool calls* embebidas y evento `TextoEnVivoDescartado` (el streaming filtra solo por el primer carácter, `stream_json.rs:80`);
-  - 3c: rescate y excepciones de metadatos y de posición de cabecera antes de `Discrepante`.
-- [x] **Pieza 4:** cascada de invariantes estructurales y microllamada a Haiku. El LLM propone una justificación y Rust la comprueba. Falla cerrada. Tabla de listas que se eliminan y que quedan.
-- [x] **Protocolo de validación rápida:** niveles N0 a N6, criterios de no retroceso por pieza y subconjunto propuesto para la sesión evaluadora.
+- [x] **Pieza 1: pdfium-render en un proceso hijo aislado**, con DLL por ruta absoluta y sha256 fijado. Se retira `pdf-extract`.
+  - Compuerta por página: `LEGIBLE`, `DEGRADADA` o `SIN_TEXTO`, con estas señales: `U+FFFD` y C0/C1, PUA, y red contra mojibake por vocales del alfabeto (latín, griego o cirílico).
+  - Estado `LECTURA_DEGRADADA` por fila, `paginas_degradadas` en el catálogo y propagación en `aviso_contenido`.
+  - **Defecto verificado en `pdf-extract` 0.12.1:** en CFF, la codificación interna gana a `/Differences` (`lib.rs:406-434` y `:496-505`).
+- [x] **Pieza 2:** se mantiene la destilación LLM. Bloque `[p_ini, p_fin]` por la ventana mínima con las cabeceras y la subsecuencia creciente más larga de las claves de fila. Página por fila con clave + 2 valores cercanos y desempate por monotonía; si no, `None`. Se eliminan los literales `"Tabla {id}"` (`mapeo_destilacion.rs:1252` y `:1077`).
+- [x] **Esquema v7:** **hay que recrear los centros**, una vez, con las piezas 1 y 2 integradas.
+- [x] **Pieza 3:** detector estructural de JSON embebido en `parsear_salida_claude` e invariante `LlamadaEnCrudo` en todas las intenciones; cuota con relleno en `fusionar`; silencio rescatado y excepciones de título y cabecera antes de `Discrepante`.
+- [x] **Pieza 4:** verificador híbrido de procedencia.
+  - El LLM solo propone trazas de 4 tipos (`formato_o_escala`, `aritmetica`, `referencia_estructural`, `conteo_elementos`) y Rust las comprueba sobre `RegistroTurno`.
+  - Haiku con timeout de 10 s y falla cerrada.
+  - `CifraEnAbstencion` se endurece y se elimina `PETICIONES_DE_REFERENCIA`.
+- [x] **Pieza 5** (tool use nativo por MCP): solo diseño futuro, fuera de esta rama.
+- [x] **Protocolo de validación:** niveles N0-N6 sin Claude primero, criterios de no retroceso por pieza y subconjunto propuesto para la sesión evaluadora.
 
-**Tests:** no se han ejecutado porque no hay cambios de código; solo documentación. **No se ha leído `docs/validacion/set_oculto*`.**
+**Tests:** no se han ejecutado, porque no hay cambios de código. **No se ha leído `docs/validacion/set_oculto*`.**
 
 **Notas para la siguiente sesión:**
-- Las decisiones D1 a D7 del §0 del SSD son del usuario.
-- Orden recomendado: 3c, 3a y 1 en paralelo; después la 2; después la 3b; y por último la 4.
-- La latencia de Haiku sale del spike de la Fase 0 (6-9 s): no está medida con el prompt del verificador.
+- Las decisiones D1 a D6 del §0 del SSD son del usuario.
+- Orden recomendado: 3c, 3a y 1 en paralelo; después la 2 (v7); después la 3b; después la 4. La 5, en otra rama.
+- Sin verificar: la API y la versión de `pdfium-render` y el tamaño de la DLL (van al spike de la Pieza 1); la latencia real de Haiku con este prompt.
