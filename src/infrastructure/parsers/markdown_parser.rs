@@ -354,6 +354,8 @@ impl DocumentParserPort for MarkdownParser {
             contenido_completo: normalizado,
             avisos_extraccion: Vec::new(),
             requiere_ocr: false,
+            paginas_degradadas: Vec::new(),
+            paginas_sin_texto: Vec::new(),
         })
     }
 }

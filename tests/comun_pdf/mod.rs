@@ -27,12 +27,22 @@ fn latin1(linea: &str) -> Vec<u8> {
         .collect()
 }
 
+/// Altura de la página (A4 o más) para que todas las líneas queden dentro: un extractor como pdfium
+/// no lee el texto que cae fuera del `MediaBox`, porque no se ve
+fn altura_de_pagina(lineas: usize) -> i64 {
+    (inicio_del_texto(lineas) + 62).max(842)
+}
+
+fn inicio_del_texto(lineas: usize) -> i64 {
+    (14 * i64::try_from(lineas).unwrap_or(i64::MAX / 28) + 50).max(780)
+}
+
 fn contenido_de_pagina(lineas: &[&str]) -> Vec<u8> {
     let mut operaciones = vec![
         Operation::new("BT", vec![]),
         Operation::new("TL", vec![14.into()]),
         Operation::new("Tf", vec!["F1".into(), 10.into()]),
-        Operation::new("Td", vec![50.into(), 780.into()]),
+        Operation::new("Td", vec![50.into(), inicio_del_texto(lineas.len()).into()]),
     ];
     for linea in lineas {
         operaciones.push(Operation::new(
@@ -72,7 +82,7 @@ pub fn documento(paginas: &[&[&str]]) -> Document {
                 "Parent" => id_paginas,
                 "Contents" => contenido,
                 "Resources" => recursos,
-                "MediaBox" => vec![0.into(), 0.into(), 595.into(), 842.into()],
+                "MediaBox" => vec![0.into(), 0.into(), 595.into(), altura_de_pagina(lineas.len()).into()],
             })
             .into()
         })

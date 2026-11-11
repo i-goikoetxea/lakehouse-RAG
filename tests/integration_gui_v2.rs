@@ -147,7 +147,8 @@ async fn test_comandos_ciclo_crear_activar_ingerir_catalogo_integridad_y_elimina
 #[tokio::test]
 async fn test_lookup_por_codigo_4a_resuelve_a_la_primera_aunque_el_titulo_destilado_no_lo_lleve() {
     // Claude destila el título sin el código («Temperatura mínima…») y la tabla se guarda con
-    // id versionado: la ingesta debe conservar «Tabla 4-A» en el título (arreglo de la Fase 13)
+    // id versionado: la ingesta debe conservar la etiqueta «4-A» en el título (arreglo de la Fase 13; sin la
+    // palabra «Tabla», que es de un idioma: Pieza 2 de generalidad)
     let distiller = MockDistiller::new();
     let mut paquete = paquete_revision(4, "2026-09-15", "FOR-ALM-05");
     paquete.tablas[0].titulo = "Temperatura mínima de precalentamiento".to_string();
@@ -181,7 +182,7 @@ async fn test_lookup_por_codigo_4a_resuelve_a_la_primera_aunque_el_titulo_destil
     assert_eq!(resultado.output["valor_resultado_texto"], "100 (*)");
     assert_eq!(
         resultado.output["tabla"]["titulo_tabla"],
-        "Tabla 4-A — Temperatura mínima de precalentamiento"
+        "4-A — Temperatura mínima de precalentamiento"
     );
 }
 

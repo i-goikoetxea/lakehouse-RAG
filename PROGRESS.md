@@ -1350,3 +1350,73 @@
 - No hay ningún `Discrepante` real en los datos guardados, y las excepciones a) y b) no se activaron. Su efecto real queda para la sesión evaluadora (propuesta en el §4 del informe).
 - `PALABRAS_DE_PAGINA` sigue siendo deuda (SSD §3c.3).
 - `ssd_citas_pagina.md` §5 describe todavía las notas de duda. Manda el SSD de generalidad.
+
+### Sesión Pieza 1 de generalidad (2026-11-11): pdfium y compuerta de legibilidad
+
+**Estado: implementada y medida sin Claude, con una segunda iteración de la compuerta tras las decisiones del mentor. Pendiente de aprobación del usuario; sin push ni merge. Va antes de la Pieza 2.** Contrato: `docs/arquitectura/ssd_generalidad_4_piezas.md` §1. Informe: `benchmarks/informes/pieza_1_20261111.md`.
+
+**Errores y retrocesos (primero):**
+- **Limitación conocida, aceptada por el mentor:** en 3 papers TeX antiguos, pdfium separa subíndices y superíndices. 5 páginas pierden más de 2 puntos de cobertura de palabras (tokens de fórmulas; la prosa no cambia) y 1 frase de 240 deja de localizarse. No se reconstruyen líneas; anotado en el SSD (§1.3.1). En el mismo lote, MIL-STD-882E pasa de 0,898 a 0,998 de cobertura y el paper LaTeX moderno de 0,908 a 0,991.
+- **Falsos negativos:** en la 1.ª iteración, chino sin `ToUnicode` 0/7 y ruso 9/10. Tras la 2.ª (señal `IncoherenciaEstructural` por rachas de letras), chino 7/7, ruso 10/10, griego y polaco 9/9, con 0 falsos rechazos. Sin medir: basura sin letras o páginas de menos de 80 no blancos.
+- **Cambios de señal respecto al SSD (§1.3.1):** el control aislado entre blancos no cuenta; `SimbolosEnPalabras` solo cuenta símbolos entre dos letras, con zona gris 0,15-0,35 que exige confirmación; `IncoherenciaEstructural` mide la coherencia por rachas y no por tokens, como propuso el mentor, porque con tokens una página de código fuente se degradaba (0,19 frente a 0,91). Queda un solapamiento con la regla b) de la red de vocales del SSD.
+- pdfium no extrae texto fuera del `MediaBox`; se corrigió el generador de PDF sintéticos de los tests.
+
+**Cambios:**
+- [x] pdfium-render 0.9.5 + pdfium chromium/8125 (DLL de 7,6 MB, sha256 fijado) en un proceso hijo: `lakehouse_rag_cli --extraer-texto-pdf`, PDF por stdin, job object de 2 GiB, 300 s. DLL solo por ruta absoluta; `scripts/obtener_pdfium.ps1` y `build.rs`. Se retira `pdf-extract`.
+- [x] `legibilidad.rs`: `LEGIBLE`, `DEGRADADA` o `SIN_TEXTO`. `ParsedDocument.paginas_degradadas` y `paginas_sin_texto`, con avisos.
+- [x] `EstadoContenido::LecturaDegradada` en las filas 02 y 07 que cortan una página degradada; el informe deja de ser COMPLETO. `01.paginas_degradadas` (parte de la v7: **la versión la sube la Pieza 2**; esta rama no debe integrarse sola). `aviso_contenido` cita las páginas en búsqueda, subárbol y catálogo; regla 7 del system prompt.
+- [x] Herramientas N1: `examples/medir_extraccion`, `examples/metricas_legibilidad`, `benchmarks/legibilidad/comparar.py` y `aguja_sin_claude.py`.
+
+**Tests:** 975 pasan, 0 fallan, 34 `#[ignore]`, en una sola ejecución completa. En la 1.ª iteración, 14 tests de dos suites ajenas a los PDF fallaron por tiempo agotado mientras corría la Aguja; en solitario pasaron. 2.ª iteración: 6 tests rojos verificados y 8 tests nuevos de falsos rechazos y zona gris (software, códigos, unidades clínicas, referencias legales, tabla numérica y CJK real). `cargo clippy --all-targets -- -D warnings` y `cargo fmt --check`: OK. Línea base en `4989d5e`: 913 pasan, 34 ignorados. Rojo verificado: 11 unitarios de la compuerta con un stub, 4 de los dos ajustes de calibración y 1 del guion de corte. Suites nuevas: `tests/integration_pdfium.rs` (7) y `tests/adversarial_pdfium_tests.rs` (10).
+
+**Medido sin Claude:** N1 con 15 PDF públicos (286 páginas): 0 secciones perdidas, 239/240 frases en la misma página, **0 falsos rechazos**. Aguja con recuperación pura (5 × 3, sin `claude` en el PATH): `recall_mcp`, `pagina_mcp` y `seccion_mcp` en 1,00, antes y después. Está saturada: no ve la mejora de MIL-STD-882E. La Aguja con Claude (N5) no se ha ejecutado.
+
+**Notas para la siguiente sesión:**
+- Pieza 2: añade la subida a v7. Las columnas de la Pieza 1 están en `schemas.rs` (01) y `lotes_arrow.rs`. Nota de coordinación en la carpeta compartida.
+- Pieza 3a: esta rama toca `busqueda.rs` en `DatosRevision`, las dos llamadas a `explicacion_de_estado` y `tiene_capa_2`.
+- `bundle.resources` no se aplica mientras el bundle esté desactivado (informe §7).
+- Pendiente: CFF sintético diferencial; `reporte_ya_ingerido` no refleja `LECTURA_DEGRADADA`; calibración con el set oculto por la sesión evaluadora.
+- Compilación con el `target` propio de este worktree. FastEmbed: `FASTEMBED_CACHE_DIR` en `target/fastembed_cache` de `citas-pagina-209ed5`.
+
+### Sesión Pieza 2 de generalidad (2026-11-11): página exacta de la Capa 2 por ventana de tabla
+
+**Estado: implementada y medida sin Claude en sintéticos, y con una destilación Sonnet cacheada por PDF público. Pendiente de aprobación del usuario; sin push ni merge.** La rama parte de la Pieza 1 y **sube a v7 una sola vez con las dos piezas**. Queda lista para integrar en `main`, con recreación de centros. Contrato: SSD §2, con los ajustes de §2.3.1 y §2.4. Informe: `benchmarks/informes/pieza_2_20261111.md`.
+
+**Errores y retrocesos (primero):**
+- **0 páginas falsas en la versión final**:
+  - sintéticos: 6 semillas, unas 21 000 filas, 8 escrituras y 10 estructuras;
+  - PDF públicos: 95 celdas con página, las 95 correctas.
+- **Durante el desarrollo, la medición N2 encontró 51 páginas falsas, y luego 4,** con el algoritmo del SSD tal como estaba escrito. Las causaban las claves numéricas que reaparecen como valores en la página vecina. Se corrigieron con dos reglas generales (SSD §2.3.1):
+  - los valores deben ir detrás de la clave;
+  - se prefieren las apariciones que abren línea.
+
+  Se depuraron con una semilla y se comprobaron con 5 semillas no vistas.
+- **Retroceso evitado:** sin «Tabla» en el título, `busqueda_tabla` con «Tabla N-X …» (uso real del agente) dejaba de encontrar la tabla. Ahora cae al código de la consulta.
+- **Cobertura baja en PDF reales:**
+  - MIL-STD-882E: 0 de 44 celdas (matrices de riesgo con valores repetidos);
+  - tabla 2 del paper de Transformer: 0 de 26, sin diagnosticar.
+- Un test de tiempo de la línea base falló una vez con carga y pasó al repetirlo.
+- Sin medir con Claude: `acceptance_8_problemas` y RGB.
+
+**Cambios:**
+- [x] `domain/services/anclaje_tabla.rs`, puro: bloque por la subsecuencia creciente más larga y las cabeceras, página por fila, desempate por la posición entre vecinas, tabla transpuesta en `None` y anulación de inversiones. Tokens Unicode, coma y punto decimal equivalentes, CJK por carácter. Sin listas de idioma.
+- [x] `FilaTabla.paginas`, con `pagina_inicio` y `pagina_fin` en 04. `FilaCelda.pagina`, con `pagina` en 05. **`VERSION_ESQUEMA_CENTRO` = 7**: un centro v6 se rechaza.
+- [x] `lookup_double_entry_table`: `cita.paginas` con la página de la fila o el bloque. `tabla_id` y `busqueda_tabla` responden al código de la etiqueta en cualquier idioma (`normalizacion::codigos_de_etiqueta`).
+- [x] Se eliminan `"Tabla {etiqueta}"` y `TABLA-` de `mapeo_destilacion.rs` y `lookup.rs`. Título `"{etiqueta} — {título}"`. Vinculación por sección, por bloque (corta el bloque y menciona una clave) y por etiqueta distintiva.
+- [x] Herramientas N2:
+  - `examples/medir_anclaje.rs`, con los modos `sinteticos` y `pdf`;
+  - `benchmarks/anclaje/generar_sinteticos.py`, `puntuar.py` y `oraculo_pypdf.py`.
+
+**Tests:**
+- Línea base en `1f51bae`: 975 pasan, 0 fallan, 34 ignorados.
+- Final: **1015 pasan, 0 fallan, 34 ignorados**. En la ejecución completa pasaron 1014; el test adversarial de valores de 10 000 caracteres, escrito con la regla antigua, se corrigió y se repitió aparte.
+- Suites nuevas: `tests/integration_paginas_tabla.rs` (3) y `tests/adversarial_anclaje_tabla_tests.rs` (5).
+- Unitarios nuevos en `anclaje_tabla`, `normalizacion`, `mapeo_destilacion` y `lookup`.
+- Actualizados por el cambio de contrato: los tests de versión 6 → 7, el título sin «Tabla» (`integration_gui_v2`, `mapeo_destilacion`) y el centro rechazado, que ahora es v6.
+- `cargo clippy --all-targets -- -D warnings` y `cargo fmt --check`: OK.
+
+**Notas para la siguiente sesión:**
+- **Integrar las Piezas 1 y 2 juntas.** Después, recrear los centros y volver a ingerir: lo coordina la sesión principal.
+- Fuera de alcance, sin tocar: el literal `"Tabla {n}"` de `markdown_parser.rs:290` (título por defecto de una tabla Markdown sin título) y las listas de `intent_detector.rs` (Pieza 5).
+- Pendiente: diagnosticar la cobertura nula en matrices de riesgo y en la tabla 2 del paper. La sesión evaluadora debería comprobar la página de las respuestas con `lookup`.
+- Compilación con el `target` del worktree `pieza-1-pdfium-c5ed7b`. Los datos de N2 están en `benchmarks/.cache/anclaje/`, ignorado; los paquetes destilados se reutilizan sin Claude.

@@ -10,7 +10,9 @@ use serde::{Deserialize, Serialize};
 use crate::domain::errors::DomainError;
 
 /// Versión del esquema de tablas que escribe esta build (`center_manifest.json`)
-pub const VERSION_ESQUEMA_CENTRO: u32 = 6;
+/// v7: páginas de la Capa 2 (04 y 05) y lectura degradada (01 y estado de 02 y 07),
+/// `ssd_generalidad_4_piezas.md` §2.5
+pub const VERSION_ESQUEMA_CENTRO: u32 = 7;
 
 /// Nombre del manifiesto en la raíz de cada centro
 pub const ARCHIVO_MANIFIESTO: &str = "center_manifest.json";
@@ -170,9 +172,9 @@ mod tests {
     }
 
     #[test]
-    fn test_manifiesto_nuevo_usa_schema_version_6() {
+    fn test_manifiesto_nuevo_usa_schema_version_7() {
         let m = ManifiestoCentroDisco::nuevo("obra-a", "Obra A", &e5(), "2026-10-17".into());
-        assert_eq!(m.schema_version, 6);
+        assert_eq!(m.schema_version, 7);
         assert_eq!(m.modelo_embeddings, "MultilingualE5Large");
         assert_eq!(m.dimension_embeddings, 1024);
         assert!(m.validar_compatibilidad(&e5()).is_ok());

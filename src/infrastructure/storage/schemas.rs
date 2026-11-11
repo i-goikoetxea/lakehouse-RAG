@@ -33,6 +33,8 @@ pub const COLUMNA_NODO_ID: &str = "nodo_id";
 pub const COLUMNA_NODO_PADRE_ID: &str = "nodo_padre_id";
 pub const COLUMNA_TIPO_BLOQUE: &str = "tipo_bloque";
 pub const COLUMNA_DOC_ID_PROVISIONAL: &str = "doc_id_provisional";
+/// Páginas con texto degradado (`ssd_generalidad_4_piezas.md` §1.4); parte del esquema v7
+pub const COLUMNA_PAGINAS_DEGRADADAS: &str = "paginas_degradadas";
 /// Saltos de página dentro de cada chunk (`ssd_citas_pagina.md` §1)
 pub const COLUMNA_SALTOS_PAGINA: &str = "saltos_pagina";
 pub const CAMPO_SALTO_DESPLAZAMIENTO: &str = "desplazamiento";
@@ -62,6 +64,15 @@ fn lista_utf8(nombre: &str) -> Field {
         nombre,
         DataType::List(Arc::new(Field::new("item", DataType::Utf8, true))),
         false,
+    )
+}
+
+/// Lista de enteros que puede faltar (nula)
+fn lista_int32_nulable(nombre: &str) -> Field {
+    Field::new(
+        nombre,
+        DataType::List(Arc::new(Field::new("item", DataType::Int32, true))),
+        true,
     )
 }
 
@@ -124,6 +135,7 @@ pub fn schema_documentos_catalogo() -> SchemaRef {
             Field::new("fecha_derogacion", DataType::Date32, true),
             utf8("hash_sha256"),
             utf8_nulable(COLUMNA_DOC_ID_PROVISIONAL),
+            lista_int32_nulable(COLUMNA_PAGINAS_DEGRADADAS),
         ],
     )
 }
@@ -188,6 +200,8 @@ pub fn schema_catalogo_tablas() -> SchemaRef {
             utf8("valor_salida_nombre"),
             utf8("instrucciones_uso_sql"),
             vector_nulable("vector_tabla"),
+            Field::new("pagina_inicio", DataType::Int32, true),
+            Field::new("pagina_fin", DataType::Int32, true),
         ],
     )
 }
@@ -214,6 +228,7 @@ pub fn schema_celdas_doble_entrada() -> SchemaRef {
         utf8_nulable("unidad_medida"),
         utf8_nulable("nota_pie_condicion"),
         nivel_prelacion(),
+        Field::new("pagina", DataType::Int32, true),
     ]);
     esquema_con_comunes(Some("celda_id"), especificas)
 }
@@ -290,7 +305,7 @@ mod tests {
 
     #[test]
     fn test_version_y_nombres_de_tabla_de_la_especificacion() {
-        assert_eq!(VERSION_ESQUEMA, 6);
+        assert_eq!(VERSION_ESQUEMA, 7);
         assert_eq!(
             TODAS_LAS_TABLAS,
             [

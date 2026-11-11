@@ -200,6 +200,20 @@ pub(crate) fn entero(fila: &Map<String, Value>, columna: &str) -> Option<i64> {
     fila.get(columna).and_then(Value::as_i64)
 }
 
+/// Lista de páginas de una columna `List<Int32>` (nula o ausente: vacía)
+pub(crate) fn lista_de_paginas(fila: &Map<String, Value>, columna: &str) -> Vec<u32> {
+    fila.get(columna)
+        .and_then(Value::as_array)
+        .map(|valores| {
+            valores
+                .iter()
+                .filter_map(Value::as_u64)
+                .filter_map(|v| u32::try_from(v).ok())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 pub(crate) fn decimal(fila: &Map<String, Value>, columna: &str) -> Option<f64> {
     fila.get(columna).and_then(Value::as_f64)
 }

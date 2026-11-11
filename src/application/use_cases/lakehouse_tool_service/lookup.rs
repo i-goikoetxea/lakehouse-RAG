@@ -5,6 +5,7 @@ use std::collections::BTreeSet;
 
 use serde_json::{Map, Value, json};
 
+use super::estructura::campos_de_paginas;
 use super::{LakehouseToolService, booleano, decimal, entero, literal_sql, texto, texto_opcional};
 use crate::application::dtos::tools::{
     LakehouseToolName, LookupDoubleEntryTableParams, ValorEje, parsear_argumentos,
@@ -14,7 +15,9 @@ use crate::application::ports::lakehouse_store::{
 };
 use crate::domain::errors::DomainError;
 use crate::domain::models::double_entry_table::{LimiteRango, RangoNumerico};
-use crate::domain::services::normalizacion::{codigo_canonico, plegar_mayusculas};
+use crate::domain::services::normalizacion::{
+    codigo_canonico, codigo_de_palabras, codigos_de_etiqueta, plegar_mayusculas,
+};
 
 /// Valor de entrada ya validado: número finito y/o su forma textual normalizada
 #[derive(Debug, Clone, PartialEq)]
@@ -160,13 +163,54 @@ fn contiene_segmento(texto: &str, codigo: &str) -> bool {
         })
 }
 
+/// La tabla responde a un código canónico: su id versionado o un segmento de su título
+fn coincide_codigo(fila: &Map<String, Value>, codigo: &str) -> bool {
+    codigo_canonico(&texto(fila, "tabla_id")) == codigo
+        || contiene_segmento(&codigo_de_palabras(&texto(fila, "titulo_tabla")), codigo)
+}
+
 /// El agente puede nombrar la tabla por su id versionado (`PO-ALM-03@v4-TAB-0000`) o por el
-/// código del documento (`4-A`, `Tabla 4-A`), que figura en el título
+/// código del documento con o sin la palabra que la precede en cualquier idioma (`4-A`,
+/// `Table 4-A`, `Таблица 4-A`), que figura en el título
+#[cfg(test)]
 fn tabla_coincide(fila: &Map<String, Value>, tabla_id: &str) -> bool {
-    let buscado = codigo_canonico(tabla_id);
-    let buscado = buscado.strip_prefix("TABLA-").unwrap_or(&buscado);
-    codigo_canonico(&texto(fila, "tabla_id")) == buscado
-        || contiene_segmento(&codigo_canonico(&texto(fila, "titulo_tabla")), buscado)
+    codigos_de_etiqueta(tabla_id)
+        .iter()
+        .any(|codigo| coincide_codigo(fila, codigo))
+}
+
+/// Tablas que responden al nombre, con el código más específico que encuentre alguna
+fn tablas_por_nombre<'a>(
+    tablas: &'a [Map<String, Value>],
+    tabla_id: &str,
+) -> Vec<&'a Map<String, Value>> {
+    codigos_de_etiqueta(tabla_id)
+        .iter()
+        .map(|codigo| {
+            tablas
+                .iter()
+                .filter(|t| coincide_codigo(t, codigo))
+                .collect::<Vec<_>>()
+        })
+        .find(|elegidas| !elegidas.is_empty())
+        .unwrap_or_default()
+}
+
+/// Tablas que contienen todas las palabras de la búsqueda. Si ninguna, las que responden al código
+/// de la búsqueda (`Tabla 4-B precalentamiento` → `4-B`): la palabra que nombra la tabla, en el
+/// idioma que sea, no figura en el título
+fn tablas_por_busqueda<'a>(
+    tablas: &'a [Map<String, Value>],
+    busqueda: &str,
+) -> Vec<&'a Map<String, Value>> {
+    let por_palabras: Vec<&Map<String, Value>> = tablas
+        .iter()
+        .filter(|t| tabla_contiene_texto(t, busqueda))
+        .collect();
+    if !por_palabras.is_empty() || !busqueda.chars().any(char::is_numeric) {
+        return por_palabras;
+    }
+    tablas_por_nombre(tablas, busqueda)
 }
 
 fn tabla_contiene_texto(fila: &Map<String, Value>, busqueda: &str) -> bool {
@@ -183,11 +227,21 @@ fn tabla_contiene_texto(fila: &Map<String, Value>, busqueda: &str) -> bool {
         .all(|palabra| pajar.contains(palabra))
 }
 
+/// Páginas de la cita de una celda: la de su fila o, si no la tiene, el bloque de la tabla
+/// (`bloque_inicio` y `bloque_fin`, que añade `cruzar_tabla`). Sin ninguna, `None`
+fn paginas_de_celda(celda: &Map<String, Value>) -> Option<Value> {
+    let (inicio, fin) = match entero(celda, "pagina") {
+        Some(pagina) => (Some(pagina), Some(pagina)),
+        None => (entero(celda, "bloque_inicio"), entero(celda, "bloque_fin")),
+    };
+    inicio.map(|_| campos_de_paginas(inicio, fin)["paginas"].clone())
+}
+
 fn celda_salida(celda: &Map<String, Value>) -> Value {
     let nota = texto_opcional(celda, "nota_pie_condicion");
     let valor_texto = texto(celda, "valor_resultado_texto");
     let llamada_sin_nota = nota.is_none() && valor_texto.contains('(');
-    json!({
+    let mut salida = json!({
         "valor_resultado_texto": valor_texto,
         "valor_resultado_num": decimal(celda, "valor_resultado_num"),
         "unidad_medida": texto_opcional(celda, "unidad_medida"),
@@ -207,7 +261,11 @@ fn celda_salida(celda: &Map<String, Value>) -> Value {
             "tabla_id": texto(celda, "tabla_id"),
             "celda_id": texto(celda, "celda_id"),
         },
-    })
+    });
+    if let Some(paginas) = paginas_de_celda(celda) {
+        salida["cita"]["paginas"] = paginas;
+    }
+    salida
 }
 
 /// Marca `prevalece` en las candidatas del nivel de prelación más bajo si hay varios niveles
@@ -295,7 +353,7 @@ impl LakehouseToolService {
             .consultar(
                 &contexto,
                 &format!(
-                    "SELECT t.tabla_id, t.titulo_tabla, t.doc_id, t.version_num, d.revision, t.eje_x_nombre, t.eje_x_unidad, t.eje_y_nombre, t.eje_y_unidad, t.valor_salida_nombre FROM {} t {} WHERE {} ORDER BY d.nivel_prelacion, t.tabla_id",
+                    "SELECT t.tabla_id, t.titulo_tabla, t.doc_id, t.version_num, d.revision, t.eje_x_nombre, t.eje_x_unidad, t.eje_y_nombre, t.eje_y_unidad, t.valor_salida_nombre, t.pagina_inicio, t.pagina_fin FROM {} t {} WHERE {} ORDER BY d.nivel_prelacion, t.tabla_id",
                     contexto.vista(TABLA_CATALOGO_TABLAS),
                     contexto.union_catalogo("t", "d"),
                     contexto.predicado_firme("t", "d")
@@ -314,14 +372,8 @@ impl LakehouseToolService {
                 .map(str::trim)
                 .filter(|t| !t.is_empty()),
         ) {
-            (Some(tabla_id), _) => tablas
-                .iter()
-                .filter(|t| tabla_coincide(t, tabla_id))
-                .collect(),
-            (None, Some(busqueda)) => tablas
-                .iter()
-                .filter(|t| tabla_contiene_texto(t, busqueda))
-                .collect(),
+            (Some(tabla_id), _) => tablas_por_nombre(&tablas, tabla_id),
+            (None, Some(busqueda)) => tablas_por_busqueda(&tablas, busqueda),
             (None, None) => {
                 return Err(DomainError::ValidationError(
                     "Indica tabla_id o busqueda_tabla".to_string(),
@@ -388,6 +440,14 @@ impl LakehouseToolService {
                     texto(c, "doc_id"),
                     entero(c, "version_num").unwrap_or_default(),
                 ))
+            })
+            .map(|mut celda| {
+                celda.insert(
+                    "bloque_inicio".to_string(),
+                    json!(entero(tabla, "pagina_inicio")),
+                );
+                celda.insert("bloque_fin".to_string(), json!(entero(tabla, "pagina_fin")));
+                celda
             })
             .collect();
 
@@ -886,6 +946,86 @@ mod tests {
         for nombre in ["14-A", "4-AB", "B", ""] {
             assert!(!tabla_coincide(&fila, nombre), "{nombre}");
         }
+    }
+
+    #[test]
+    fn test_tabla_por_codigo_con_la_palabra_de_cualquier_idioma() {
+        let fila =
+            json!({ "tabla_id": "DOC@v1-TAB-0000", "titulo_tabla": "4-A — Preheat temperature" })
+                .as_object()
+                .unwrap()
+                .clone();
+        for nombre in ["4-A", "Table 4-A", "Tabla 4-A", "Таблица 4-A", "tabla 4 a"] {
+            assert!(tabla_coincide(&fila, nombre), "{nombre}");
+        }
+        let hungara =
+            json!({ "tabla_id": "DOC@v1-TAB-0001", "titulo_tabla": "3. táblázat — Nyomaték" })
+                .as_object()
+                .unwrap()
+                .clone();
+        assert!(tabla_coincide(&hungara, "3. táblázat"));
+        assert!(!tabla_coincide(&fila, "Table 14-A"));
+    }
+
+    #[test]
+    fn test_el_nombre_mas_especifico_gana_al_elegir_tabla() {
+        let tablas: Vec<Map<String, Value>> = ["4-A — Uno", "4-B — Dos"]
+            .iter()
+            .enumerate()
+            .map(|(i, titulo)| {
+                json!({ "tabla_id": format!("DOC@v1-TAB-000{i}"), "titulo_tabla": titulo })
+                    .as_object()
+                    .unwrap()
+                    .clone()
+            })
+            .collect();
+        let elegidas = tablas_por_nombre(&tablas, "tabla 4 a");
+        assert_eq!(elegidas.len(), 1);
+        assert_eq!(texto(elegidas[0], "titulo_tabla"), "4-A — Uno");
+    }
+
+    #[test]
+    fn test_busqueda_con_la_palabra_tabla_de_cualquier_idioma_cae_al_codigo() {
+        let tablas: Vec<Map<String, Value>> = [
+            "4-B — Temperatura de precalentamiento",
+            "2.1 — Densidades de ocupación",
+        ]
+        .iter()
+        .enumerate()
+        .map(|(i, titulo)| {
+            json!({ "tabla_id": format!("DOC@v1-TAB-000{i}"), "titulo_tabla": titulo })
+                .as_object()
+                .unwrap()
+                .clone()
+        })
+        .collect();
+        for (busqueda, esperado) in [
+            ("Tabla 4-B precalentamiento", 0),
+            ("Table 4-B preheat", 0),
+            ("Tabla 2.1 Densidades de ocupación DB-SI", 1),
+            ("densidades ocupación", 1),
+        ] {
+            let elegidas = tablas_por_busqueda(&tablas, busqueda);
+            assert_eq!(elegidas.len(), 1, "{busqueda}");
+            assert_eq!(elegidas[0], &tablas[esperado], "{busqueda}");
+        }
+        assert!(tablas_por_busqueda(&tablas, "Tabla de aluminio").is_empty());
+    }
+
+    #[test]
+    fn test_cita_de_la_celda_lleva_su_pagina_o_el_bloque_de_la_tabla() {
+        let con_pagina = json!({ "pagina": 22, "bloque_inicio": 21, "bloque_fin": 22 });
+        let solo_bloque = json!({ "bloque_inicio": 21, "bloque_fin": 22 });
+        let bloque_de_una = json!({ "bloque_inicio": 21, "bloque_fin": 21 });
+        let sin_nada = json!({ "bloque_inicio": null, "bloque_fin": null });
+        let cita = |v: Value| celda_salida(v.as_object().unwrap())["cita"].clone();
+        assert_eq!(cita(con_pagina)["paginas"], "22");
+        assert_eq!(cita(solo_bloque)["paginas"], "21-22");
+        assert_eq!(cita(bloque_de_una)["paginas"], "21");
+        assert!(
+            cita(sin_nada).get("paginas").is_none(),
+            "sin página no hay clave"
+        );
     }
 
     #[test]

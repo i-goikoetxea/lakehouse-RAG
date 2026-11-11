@@ -154,6 +154,34 @@ pub fn quitar_marcas(texto: &str) -> String {
         .collect()
 }
 
+/// Lista de páginas legible para un aviso: «Página 7» o «Páginas 2-4, 9». Ordena y quita
+/// duplicados
+pub fn describir_paginas(paginas: &[u32]) -> String {
+    let mut ordenadas = paginas.to_vec();
+    ordenadas.sort_unstable();
+    ordenadas.dedup();
+    let mut tramos: Vec<(u32, u32)> = Vec::new();
+    for pagina in ordenadas {
+        match tramos.last_mut() {
+            Some((_, fin)) if fin.checked_add(1) == Some(pagina) => *fin = pagina,
+            _ => tramos.push((pagina, pagina)),
+        }
+    }
+    let lista = tramos
+        .iter()
+        .map(|(inicio, fin)| {
+            if inicio == fin {
+                inicio.to_string()
+            } else {
+                format!("{inicio}-{fin}")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    let varias = tramos.len() > 1 || tramos.first().is_some_and(|(i, f)| i != f);
+    format!("{} {lista}", if varias { "Páginas" } else { "Página" })
+}
+
 /// `true` si el texto contiene alguna marca bien formada
 pub fn tiene_marcas(texto: &str) -> bool {
     siguiente_marca(texto).is_some()
@@ -195,6 +223,17 @@ fn leer_marca(texto: &str) -> Option<(u32, usize)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_describir_paginas_agrupa_tramos_consecutivos() {
+        assert_eq!(describir_paginas(&[7]), "Página 7");
+        assert_eq!(describir_paginas(&[4, 2, 3, 9, 3]), "Páginas 2-4, 9");
+        assert_eq!(describir_paginas(&[1, 5]), "Páginas 1, 5");
+        assert_eq!(
+            describir_paginas(&[u32::MAX, u32::MAX - 1]),
+            format!("Páginas {}-{}", u32::MAX - 1, u32::MAX)
+        );
+    }
 
     fn salto(desplazamiento: usize, pagina: u32) -> SaltoPagina {
         SaltoPagina {

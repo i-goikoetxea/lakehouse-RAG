@@ -87,6 +87,7 @@ pub fn fila_catalogo(doc_id: &str, version: u32, vigor: NaiveDate, hash: &str) -
         vigencia: VentanaVigencia::new(vigor, None).unwrap(),
         hash_sha256: hash.to_string(),
         doc_id_provisional: None,
+        paginas_degradadas: Vec::new(),
     }
 }
 
@@ -175,6 +176,7 @@ fn fila_tabla(doc_id: &str, version: u32) -> FilaTabla {
         valor_salida_nombre: "temperatura_minima_c".to_string(),
         instrucciones_uso_sql: "SELECT ...".to_string(),
         vector_tabla: None,
+        paginas: Some((21, 22)),
         clave: c,
     }
 }
@@ -200,6 +202,7 @@ fn fila_celda(doc_id: &str, version: u32, idx: usize) -> FilaCelda {
         unidad_medida: Some("°C".to_string()),
         nota_pie_condicion: (idx == 1).then(|| "(*) Requiere QA/QC".to_string()),
         nivel_prelacion: TipoDocumento::ProcedimientoObra.nivel_prelacion(),
+        pagina: (idx < 2).then_some(21 + idx as u32),
         clave: c,
     }
 }

@@ -73,7 +73,7 @@ fn procedimiento(revision: &str, con_archivo: bool) -> String {
     secciones
 }
 
-fn paquete(doc_id: &str, version: i64, fecha: &str) -> DistilledDocumentPackage {
+pub fn paquete(doc_id: &str, version: i64, fecha: &str) -> DistilledDocumentPackage {
     DistilledDocumentPackage {
         catalogo: CatalogoDestilado {
             doc_id: doc_id.to_string(),
@@ -98,7 +98,7 @@ pub fn paquete_manual() -> DistilledDocumentPackage {
 /// Destilador que falla (Claude caído) solo para los archivos sin respuesta conocida
 struct DestiladorSelectivo {
     conocido: MockDistiller,
-    archivos: Vec<String>,
+    archivos: std::sync::Mutex<Vec<String>>,
     /// Si es `false`, el manual tampoco se destila (simula el fallo en la primera ingesta)
     manual_disponible: std::sync::atomic::AtomicBool,
 }
@@ -112,7 +112,11 @@ impl LlmDistillerPort for DestiladorSelectivo {
         let manual_listo = self
             .manual_disponible
             .load(std::sync::atomic::Ordering::SeqCst);
-        if self.archivos.contains(&parsed.nombre_archivo)
+        if self
+            .archivos
+            .lock()
+            .unwrap()
+            .contains(&parsed.nombre_archivo)
             || (manual_listo && parsed.nombre_archivo == ARCHIVO_PROVISIONAL)
         {
             return self.conocido.distill(parsed).await;
@@ -138,6 +142,19 @@ impl EntornoStair {
         self.destilador
             .manual_disponible
             .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Claude destila `archivo` con `paquete` en las ingestas siguientes
+    #[allow(dead_code)]
+    pub fn registrar_destilacion(&self, archivo: &str, paquete: DistilledDocumentPackage) {
+        self.destilador
+            .conocido
+            .registrar_respuesta(archivo, paquete);
+        self.destilador
+            .archivos
+            .lock()
+            .unwrap()
+            .push(archivo.to_string());
     }
 
     pub fn escribir(&self, nombre: &str, contenido: &[u8]) -> PathBuf {
@@ -166,11 +183,11 @@ fn construir(raiz: tempfile::TempDir, config: ConfiguracionHerramientas) -> Ento
     conocido.registrar_respuesta(ARCHIVO_PROVISIONAL, paquete_manual());
     let destilador = Arc::new(DestiladorSelectivo {
         conocido,
-        archivos: vec![
+        archivos: std::sync::Mutex::new(vec![
             ARCHIVO_V1.to_string(),
             ARCHIVO_V2.to_string(),
             ARCHIVO_AJENO.to_string(),
-        ],
+        ]),
         manual_disponible: std::sync::atomic::AtomicBool::new(false),
     });
     let embeddings = Arc::new(MockEmbeddingEngine::new(Some(DIMENSION)));

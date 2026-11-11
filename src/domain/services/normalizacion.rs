@@ -104,9 +104,83 @@ fn leer_revision_desde(plegado: &[char], inicio: usize) -> Option<u32> {
     digitos.parse().ok()
 }
 
+/// Palabras de una etiqueta sin la puntuación de sus extremos (`3.` → `3`)
+fn palabras_de_etiqueta(etiqueta: &str) -> Vec<&str> {
+    etiqueta
+        .split_whitespace()
+        .map(|palabra| palabra.trim_matches(|c: char| !c.is_alphanumeric()))
+        .filter(|palabra| !palabra.is_empty())
+        .collect()
+}
+
+/// Código canónico de un texto sin la puntuación de los extremos de sus palabras
+/// (`3. táblázat — Nyomaték` → `3-TABLAZAT-NYOMATEK`)
+pub fn codigo_de_palabras(texto: &str) -> String {
+    codigo_canonico(&palabras_de_etiqueta(texto).join(" "))
+}
+
+fn tiene_cifras(palabra: &&str) -> bool {
+    palabra.chars().any(char::is_numeric)
+}
+
+/// Código de la etiqueta de una tabla: desde la primera palabra con cifras, sin las palabras
+/// anteriores que nombran el tipo de objeto en cualquier idioma (`Table 4-A` → `4-A`,
+/// `Таблица 4-A` → `4-A`, `3. táblázat` → `3-TABLAZAT`). Sin cifras, la etiqueta entera
+pub fn codigo_de_etiqueta(etiqueta: &str) -> String {
+    let palabras = palabras_de_etiqueta(etiqueta);
+    let inicio = palabras.iter().position(tiene_cifras).unwrap_or(0);
+    codigo_canonico(&palabras[inicio..].join(" "))
+}
+
+/// Códigos con los que puede nombrarse una tabla, del más al menos específico: el código de la
+/// etiqueta, su única palabra con cifras y la etiqueta entera
+pub fn codigos_de_etiqueta(etiqueta: &str) -> Vec<String> {
+    let palabras = palabras_de_etiqueta(etiqueta);
+    let con_cifras: Vec<&str> = palabras.iter().copied().filter(tiene_cifras).collect();
+    let palabra_unica = match con_cifras.as_slice() {
+        [palabra] => Some(codigo_canonico(palabra)),
+        _ => None,
+    };
+    let completa = codigo_canonico(&palabras.join(" "));
+    let mut codigos: Vec<String> = Vec::new();
+    for codigo in [
+        Some(codigo_de_etiqueta(etiqueta)),
+        palabra_unica,
+        Some(completa),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if !codigo.is_empty() && !codigos.contains(&codigo) {
+            codigos.push(codigo);
+        }
+    }
+    codigos
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_codigo_de_etiqueta_descarta_las_palabras_sin_cifras_iniciales_en_cualquier_idioma() {
+        for etiqueta in ["4-A", "Tabla 4-A", "Table 4-A", "Таблица 4-A", "tabla 4 a"] {
+            assert_eq!(codigo_de_etiqueta(etiqueta), "4-A", "{etiqueta}");
+        }
+        assert_eq!(codigo_de_etiqueta("3. táblázat"), "3-TABLAZAT");
+        assert_eq!(codigo_de_etiqueta("Anexo B"), "ANEXO-B");
+        assert_eq!(
+            codigo_de_etiqueta("PO-ALM-03@v4-TAB-0000"),
+            "PO-ALM-03-V4-TAB-0000"
+        );
+    }
+
+    #[test]
+    fn test_codigos_de_etiqueta_van_del_mas_al_menos_especifico() {
+        assert_eq!(codigos_de_etiqueta("Table 4-A"), ["4-A", "TABLE-4-A"]);
+        assert_eq!(codigos_de_etiqueta("3. táblázat"), ["3-TABLAZAT", "3"]);
+        assert!(codigos_de_etiqueta("  ").is_empty());
+    }
 
     #[test]
     fn test_normalizar_token_quita_tildes_y_unifica_separadores() {

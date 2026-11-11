@@ -3,7 +3,7 @@
 use serde_json::{Value, json};
 
 use super::estructura::explicacion_de_estado;
-use super::{LakehouseToolService, entero, texto, texto_opcional};
+use super::{LakehouseToolService, entero, lista_de_paginas, texto, texto_opcional};
 use crate::application::dtos::tools::{
     InspectCatalogParams, LakehouseToolName, parsear_argumentos,
 };
@@ -30,7 +30,7 @@ impl LakehouseToolService {
             .consultar(
                 &contexto,
                 &format!(
-                    "SELECT d.doc_id, d.titulo, d.tipo_documento, d.nivel_prelacion, d.revision, d.version_num, d.fecha_vigor, d.fecha_derogacion, d.vigente, d.doc_id_provisional, {} AS vigencia_no_declarada FROM {} d WHERE {} ORDER BY d.nivel_prelacion ASC, d.doc_id ASC, d.version_num DESC",
+                    "SELECT d.doc_id, d.titulo, d.tipo_documento, d.nivel_prelacion, d.revision, d.version_num, d.fecha_vigor, d.fecha_derogacion, d.vigente, d.doc_id_provisional, d.paginas_degradadas, {} AS vigencia_no_declarada FROM {} d WHERE {} ORDER BY d.nivel_prelacion ASC, d.doc_id ASC, d.version_num DESC",
                     contexto.marca_no_declarada("d"),
                     contexto.vista(TABLA_DOCUMENTOS_CATALOGO),
                     contexto.predicado_vigencia("d", "d")
@@ -46,9 +46,13 @@ impl LakehouseToolService {
                 let provisional = texto(&fila, "doc_id_provisional") == doc_id;
                 let version = entero(&fila, "version_num").unwrap_or_default();
                 let estado = estados.get(&(doc_id, version)).cloned();
-                let aviso = estado
-                    .as_deref()
-                    .and_then(|e| explicacion_de_estado(e, provisional));
+                let aviso = estado.as_deref().and_then(|e| {
+                    explicacion_de_estado(
+                        e,
+                        provisional,
+                        &lista_de_paginas(&fila, "paginas_degradadas"),
+                    )
+                });
                 let fecha_vigor = texto_opcional(&fila, "fecha_vigor");
                 fila.insert(
                     "fecha_vigor_texto".to_string(),

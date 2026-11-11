@@ -38,6 +38,8 @@ pub struct FilaCatalogo {
     pub hash_sha256: String,
     /// Identidad provisional (ver `docs/arquitectura/decisiones_stair.md`, D4)
     pub doc_id_provisional: Option<DocId>,
+    /// Páginas con texto degradado según la compuerta de legibilidad; vacío se guarda como nulo
+    pub paginas_degradadas: Vec<u32>,
 }
 
 /// Tabla 02: apartado de texto con su linaje jerárquico y su embedding
@@ -119,6 +121,9 @@ pub struct FilaTabla {
     pub valor_salida_nombre: String,
     pub instrucciones_uso_sql: String,
     pub vector_tabla: Option<Vec<f32>>,
+    /// Bloque físico `(página inicial, página final)` anclado por ventana de tabla; `None` si no es
+    /// inequívoco o el formato no tiene páginas (`ssd_generalidad_4_piezas.md` §2)
+    pub paginas: Option<(u32, u32)>,
 }
 
 /// Límites de una celda en un eje: categoría exacta o rango con inclusividad por extremo
@@ -145,6 +150,8 @@ pub struct FilaCelda {
     pub unidad_medida: Option<String>,
     pub nota_pie_condicion: Option<String>,
     pub nivel_prelacion: NivelPrelacion,
+    /// Página física de la fila de la celda; `None` antes que una página dudosa
+    pub pagina: Option<u32>,
 }
 
 /// Tipo de nodo en los extremos de una arista del grafo (§4, Tabla 6)

@@ -278,6 +278,8 @@ async fn adv_prompt_injection_en_el_documento_no_escapa_del_delimitador() {
         contenido_completo: documento.to_string(),
         avisos_extraccion: Vec::new(),
         requiere_ocr: false,
+        paginas_degradadas: Vec::new(),
+        paginas_sin_texto: Vec::new(),
     };
     let entrada = ClaudeHeadlessDistiller::construir_entrada(&parsed);
     assert_eq!(entrada.matches("</documento>").count(), 1);

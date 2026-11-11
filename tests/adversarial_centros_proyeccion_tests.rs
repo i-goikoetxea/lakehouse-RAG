@@ -249,7 +249,7 @@ async fn test_manifiesto_de_otro_modelo_impide_abrir_e_ingerir() {
             "\"dimension_embeddings\": 1024",
             "\"dimension_embeddings\": 384",
         ),
-        ("\"schema_version\": 6", "\"schema_version\": 5"),
+        ("\"schema_version\": 7", "\"schema_version\": 6"),
     ] {
         assert!(original.contains(de), "el manifiesto no trae {de}");
         std::fs::write(&ruta_manifiesto, original.replace(de, a)).unwrap();
@@ -260,9 +260,9 @@ async fn test_manifiesto_de_otro_modelo_impide_abrir_e_ingerir() {
             .expect_err(a)
             .to_string();
         if a.contains("schema_version") {
-            // Un centro v5 no se migra: el error pide recrearlo
+            // Un centro v6 (anterior a las páginas de la Capa 2) no se migra: el error pide recrearlo
             assert!(
-                error.contains("Crea un centro nuevo y reingiere") && error.contains("= 5"),
+                error.contains("Crea un centro nuevo y reingiere") && error.contains("= 6"),
                 "{error}"
             );
         }

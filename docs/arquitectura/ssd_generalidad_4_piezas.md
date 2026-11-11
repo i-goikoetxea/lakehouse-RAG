@@ -127,6 +127,22 @@ pub fn clasificar_pagina(texto_crudo: &str) -> (ClasePagina, MetricasPagina);
 
 **Prohibido** limitar la longitud de token: no existe esa señal, porque las escrituras CJK, tailandesa o jemer no usan espacios.
 
+#### 1.3.1 Ajustes tras la calibración N1 (11-11-2026, con las decisiones del mentor)
+
+Detalle y márgenes en `benchmarks/informes/pieza_1_20261111.md`.
+
+- **Reemplazo y control:** un control **aislado entre blancos** no cuenta. Los delimitadores de una fuente matemática sin Unicode salen así, en su propia línea, y no dañan ninguna palabra. Un control que es blanco para Unicode (`U+000C`, `U+0085`) no aísla a otro.
+- **`SimbolosEnPalabras` (señal nueva):** proporción de tokens con letras que tienen un símbolo anómalo **entre dos letras** (`$ @ # * ~ \ | { } [ ] ^ = + ; ? ! ( )`). Los conectores (`-`, `/`, `_`, `.`, `'`, `:`, `,`) no cuentan. Con al menos 40 tokens con letras:
+  - por encima de 0,35, degrada sola;
+  - entre 0,15 y 0,35 (zona gris), solo si la confirma otra señal: más del 15 % de palabras sin vocal de su alfabeto (con 20 o más evaluables) o el colapso de la coherencia.
+- **`IncoherenciaEstructural` (señal nueva):** una página está degradada si las letras no forman palabras y, además, hay ruido.
+  - **Ámbito:** 80 o más no blancos, 20 o más letras fuera de CJK, menos del 50 % de dígitos y menos del 30 % de CJK, Kana o Hangul.
+  - **Coherencia:** proporción de las letras no CJK que están en rachas de 3 o más letras seguidas de una misma escritura. Colapsa por debajo de 0,40.
+  - **Ruido:** el máximo entre los símbolos sueltos (los anteriores más `< > " % &`) y el ruido de Latin-1, sobre los no blancos, con un mínimo de 0,05. El ruido de Latin-1 son los signos `U+00A1..U+00BF` (salvo `°` y `±`), `×`, `÷` y las letras `U+00C0..U+00FF` sueltas (en tokens de 1 o 2 caracteres o pegadas a un símbolo).
+  - **Por qué rachas y no tokens:** el mentor propuso tokens puramente alfabéticos. Así, una página de código fuente (`crate::domain::models`) colapsaba a 0,19 y se degradaba. Con rachas sube a 0,91.
+  - Las marcas que no son letras (el virama índico) prolongan la racha si son de la misma escritura. La escritura se toma de los bloques del latín, el griego, el cirílico y el árabe; para el resto, de su bloque de 128 puntos de código.
+- **Limitación conocida, aceptada:** en los PDF TeX antiguos, pdfium separa subíndices y superíndices (`r2` → `r 2`). La prosa no cambia. No se reconstruyen líneas.
+
 ### 1.4 Efecto en la ingesta y contratos
 
 - **`ParsedDocument`** (`dtos/ingestion.rs:22`):
@@ -269,7 +285,21 @@ Si no lo es, `bloque = None` y todas las filas quedan en `None`.
 
 **4. Señal opcional:** la banda `y` de pdfium se deja para una versión posterior. Exigiría guardar coordenadas en `ParsedDocument`, y eso complica el contrato de ingesta. **No entra.**
 
+#### 2.3.1 Ajustes de la implementación (11-11-2026)
+
+Todos endurecen el algoritmo: solo pueden cambiar una página por `None`, nunca al revés.
+- **Bloque de una página:** solo reciben la página las filas cuya clave aparece en ella. Una fila destilada que no está en el texto (inventada o de otra página no reconocida) queda en `None`.
+- **Una aparición de la clave solo cuenta si sus valores van detrás:** en su línea, después de la clave, o en las 2 líneas siguientes **de la misma página**. Se exigen `min(2, valores)` valores distintos. Esto vale también para elegir el bloque: la subsecuencia creciente usa solo estas apariciones. Lo que precede a la clave es de otra fila. Sin esta regla, la medición N2 dio **51 páginas falsas** en tablas con claves numéricas que reaparecen como valores en la página vecina: el bloque de una página «contenía» todas las claves.
+- **Apariciones que abren línea:** si alguna aparición válida de una clave es el primer token de su línea (la primera celda de una fila), se descartan las que van en medio de otra línea. Quedaban 4 páginas falsas por claves que cerraban una línea ajena. Sin ninguna que abra línea («unter 40 kg»), valen todas.
+- **Desempate:** por la posición en el texto entre las filas vecinas ya ancladas (anterior y siguiente), no solo por su página. Si las vecinas están en páginas distintas, la página sola no decide.
+- **Tabla transpuesta:** si las claves de fila se amontonan en pocas líneas (menos de `max(2, ⌈encontradas/2⌉)` líneas distintas), las «filas» destiladas son columnas del texto. En un bloque de varias páginas, todas quedan en `None`.
+- **Inversiones:** una fila con una página menor que la de una fila anterior, o mayor que la de una posterior, queda en `None` junto con la que la contradice.
+- **Escrituras sin espacios (Han y kana):** un token por carácter. Con la búsqueda por secuencia contigua equivale a los bigramas del §2.2.
+- **Tokens:** se separan letras y cifras (`S275` → `S`, `275`) en la clave y en el texto por igual.
+
 ### 2.4 Vinculación y literales
+
+> **Implementado (11-11-2026), con dos precisiones.** La vinculación por bloque exige que el rango de páginas del chunk **corte** el bloque y que el chunk mencione la clave de alguna fila. «Contener el bloque» no vinculaba una tabla partida entre dos chunks, y varios chunks de la misma página la vinculaban sin mencionarla. La etiqueta se reduce a su código **desde la primera palabra con cifras** (`Table 4-A` → `4-A`, `3. táblázat` → `3-TABLAZAT`). Esto sustituye también el prefijo español `TABLA-` de `mapeo_destilacion.rs` y `lookup.rs`. El lookup prueba los códigos del más al menos específico: el código, la única palabra con cifras y la etiqueta entera. Como el título ya no lleva «Tabla», `busqueda_tabla` (consultas del tipo «Tabla 7-C espesores», que aparecen en las respuestas guardadas) cae al código de la consulta cuando ninguna tabla contiene todas sus palabras.
 
 - Se elimina `"Tabla {etiqueta}"` (`:1252`). La tabla se vincula al chunk:
   - por su sección declarada o la del parser, como hoy;

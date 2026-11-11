@@ -317,6 +317,8 @@ mod tests {
             contenido_completo: contenido.to_string(),
             avisos_extraccion: Vec::new(),
             requiere_ocr: false,
+            paginas_degradadas: Vec::new(),
+            paginas_sin_texto: Vec::new(),
         }
     }
 
