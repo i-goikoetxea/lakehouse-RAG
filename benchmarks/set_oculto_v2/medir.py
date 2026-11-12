@@ -65,8 +65,11 @@ def main():
         bin_dir = datos / f"bin_{et}"
         bin_dir.mkdir(exist_ok=True)
         binario = bin_dir / "lakehouse_rag_cli.exe"
-        if not binario.exists() or sha256(binario) != sha256(origen):
+        if origen.resolve() != binario.resolve() and (not binario.exists() or sha256(binario) != sha256(origen)):
             shutil.copy2(origen, binario)
+        for dll in origen.parent.glob("*.dll"):  # bibliotecas nativas que el binario carga (p. ej. pdfium)
+            if dll.resolve() != (bin_dir / dll.name).resolve():
+                shutil.copy2(dll, bin_dir / dll.name)
         (bin_dir / "sha256.txt").write_text(sha256(binario), encoding="utf-8")
         aislado = datos / f"aislado_{et}"
         aislado.mkdir(exist_ok=True)
