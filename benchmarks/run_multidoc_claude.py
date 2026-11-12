@@ -43,6 +43,7 @@ MODELO = "sonnet"
 VARIANTES = ("antes", "despues")
 BUSQUEDA = "search_normative_context"
 CATALOGO = "inspect_lakehouse_catalog"
+TABLA = "lookup_double_entry_table"
 PALABRAS_COMPARTIDAS_MINIMAS = 2
 LETRAS_MINIMAS_PALABRA = 4
 PATRON_PALABRA = re.compile(r"[^\W\d_]+")
@@ -112,12 +113,18 @@ def auditoria(registro):
     """
     consultas = consultas_de_busqueda(registro)
     partes = separar_por_entidad(registro["pregunta"])
-    if not consultas:
-        return [False] * len(partes)
+    con_tabla = TABLA in registro["herramientas"]
+
+    def de_parte(parte, candidatas):
+        # Resuelta por tabla: ninguna búsqueda la trata y hubo lookup. No cuenta en la auditoría
+        if con_tabla and not any(palabras(c) & palabras(parte) for c in consultas):
+            return None
+        return bool(candidatas) and conserva_idioma(candidatas[0], parte)
+
     if len(partes) == 1:
-        return [conserva_idioma(consultas[0], partes[0])]
+        return [de_parte(partes[0], consultas[:1])]
     return [
-        conserva_idioma(max(consultas, key=lambda c, p=parte: len(palabras(c) & palabras(p))), parte)
+        de_parte(parte, sorted(consultas, key=lambda c, p=parte: -len(palabras(c) & palabras(p)))[:1])
         for parte in partes
     ]
 
@@ -256,7 +263,8 @@ def resumen(registros):
         if r.get("fallo") is not None or "pregunta" not in r:
             continue
         for lengua, conserva in zip(idiomas_de_partes(r), auditoria(r), strict=False):
-            idioma.setdefault((r["variante"], lengua), []).append(conserva)
+            if conserva is not None:
+                idioma.setdefault((r["variante"], lengua), []).append(conserva)
     return filas, cambios, {clave: (sum(v), len(v)) for clave, v in sorted(idioma.items())}
 
 

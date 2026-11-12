@@ -61,6 +61,20 @@ class Auditoria(unittest.TestCase):
         )
         self.assertEqual(auditoria(registro), [False, True])
 
+    def test_una_parte_resuelta_por_tabla_no_cuenta(self):
+        registro = _r(
+            "t",
+            "antes",
+            1.0,
+            ["lookup_double_entry_table"],
+            [{"tabla_id": "T-4B"}],
+            pregunta="Según la Tabla 4-B, ¿qué temperatura mínima lleva el acero P-91?",
+        )
+        self.assertEqual(auditoria(registro), [None])
+
+    def test_sin_busquedas_ni_tabla_la_parte_no_se_conserva(self):
+        self.assertEqual(auditoria(_r("s", "antes", 0.0)), [False])
+
 
 if __name__ == "__main__":
     unittest.main()

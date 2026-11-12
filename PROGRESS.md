@@ -1437,3 +1437,20 @@
   - Decidir si se repite con 3 pasadas (unas 140 respuestas, en un centro con agujas de sujeto único) para separar el ruido del retroceso.
   - El problema dominante es la búsqueda en otro idioma que el del documento (informe §4).
 
+### Sesión Regla 15 v2 e idioma (2026-11-12)
+
+**Estado: `[COMPLETADO]`, pendiente de la decisión del mentor sobre 2 umbrales no cumplidos.** Rama `claude/regla15-v2-idioma`, creada desde `main` (`ad1fbb3`), sin push ni merge. Informe: `benchmarks/informes/regla15_v2_idioma_20261112.md`. No se ha leído `docs/validacion/set_oculto*`.
+
+- [x] Regla 15 v2 (búsquedas por entidad en el mismo `tool_calls`; antes de «no consta», catálogo y segunda búsqueda abierta sin `doc_id`, nunca por título) y regla 16, más la descripción de `consulta`: no traducir la consulta.
+- [x] Opción (b) sin esquema ni dependencias: `escritura_dominante` (bloques Unicode) y `muestra_texto` (prefijo literal de 150 caracteres como máximo, de texto corrido, sin líneas repetidas ni páginas degradadas) en `inspect_lakehouse_catalog`, calculados al vuelo desde 02. Servicio puro `domain/services/muestra_documento.rs`.
+- [x] Set N3 con agujas de sujeto único. Centro v7 reingerido con Sonnet.
+- [x] N0: 1033 aprobados, 0 fallos y 35 ignorados. `clippy` y `fmt` limpios.
+- **Errores y umbrales** (2 pasadas por binario, 196 respuestas, CPU al 29-40 % por la otra sesión):
+  - 0 respuestas incorrectas en las dos variantes (23/23 y 26/26 en cada pasada). **El set está saturado:** ya no distingue la corrección.
+  - Inglés conservado en la consulta: 32 % → 94 % (umbral: 100 %). Sin deriva en español.
+  - Búsquedas por pregunta de un documento: 0,93 → 1,33 (umbral: 1,1-1,2), por una segunda búsqueda con solo el código.
+- **Para la siguiente sesión:**
+  - El mentor decide sobre los 2 umbrales.
+  - Hace falta un set nuevo que discrimine, escrito por la sesión evaluadora (informe §4).
+  - Un primer lanzamiento de la ingesta quedó huérfano y no se pudo parar: la carpeta `n3_v7` del scratchpad se descarta.
+
