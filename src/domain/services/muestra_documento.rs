@@ -95,13 +95,21 @@ pub fn escritura_dominante(texto: &str) -> Option<Escritura> {
         .map(|(escritura, _)| *escritura)
 }
 
-/// Primera línea de texto corrido de los textos dados, acotada a [`LONGITUD_MAXIMA_MUESTRA`]
+/// Primera línea de texto corrido de los textos dados, acotada a [`LONGITUD_MAXIMA_MUESTRA`]. Una
+/// línea que aparece más de una vez es una cabecera o un pie de página repetido: no cuenta
 pub fn muestra_de_texto_corrido<'a>(textos: impl IntoIterator<Item = &'a str>) -> Option<String> {
-    textos
+    let lineas: Vec<&str> = textos
         .into_iter()
         .flat_map(str::lines)
         .map(str::trim)
-        .find(|linea| es_texto_corrido(linea))
+        .collect();
+    let mut apariciones: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    for linea in &lineas {
+        *apariciones.entry(linea).or_default() += 1;
+    }
+    lineas
+        .into_iter()
+        .find(|linea| apariciones[linea] == 1 && es_texto_corrido(linea))
         .map(acotar)
 }
 
@@ -226,6 +234,17 @@ mod tests {
         let griego = "Η δοκιμή πίεσης διαρκεί τριάντα λεπτά και καταγράφεται στο ημερολόγιο του έργου από τον υπεύθυνο. ".repeat(3);
         let muestra = muestra_de_texto_corrido([griego.as_str()]).unwrap();
         assert!(muestra.trim_end_matches('…').chars().count() <= LONGITUD_MAXIMA_MUESTRA);
+    }
+
+    #[test]
+    fn test_muestra_salta_lineas_repetidas_como_cabeceras_y_pies() {
+        let sello = "Check the source to verify that this is the current version before use of the standard.";
+        let pagina_1 = format!("{sello}\nSafety\n");
+        let pagina_2 = format!("{sello}\n{PARRAFO_EN}\n");
+        assert_eq!(
+            muestra_de_texto_corrido([pagina_1.as_str(), pagina_2.as_str()]).as_deref(),
+            Some(PARRAFO_EN)
+        );
     }
 
     #[test]
