@@ -1,5 +1,6 @@
 pub mod claude_agent_runner;
 pub mod claude_headless_distiller;
+pub mod claude_headless_procedencia;
 pub mod claude_model_catalog;
 pub mod mock_agent_runner;
 pub mod mock_distiller;
@@ -8,6 +9,7 @@ pub mod stream_json;
 
 pub use claude_agent_runner::{ClaudeAgentConfig, ClaudeAgentRunner};
 pub use claude_headless_distiller::{ClaudeHeadlessConfig, ClaudeHeadlessDistiller};
+pub use claude_headless_procedencia::ClaudeHeadlessProcedencia;
 pub use claude_model_catalog::{ClaudeHeadlessModelCatalog, ClaudeModelCatalogConfig};
 pub use mock_agent_runner::MockAgentRunner;
 pub use mock_distiller::MockDistiller;

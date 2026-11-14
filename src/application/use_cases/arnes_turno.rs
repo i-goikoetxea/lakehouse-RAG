@@ -4,14 +4,19 @@
 mod cifras;
 mod fechas;
 mod intent_detector;
+pub mod llamada_en_crudo;
 mod post_inference_guard;
 mod pre_inference_interceptor;
+pub mod procedencia;
+mod procedencia_determinista;
 mod texto_normalizado;
 mod verificador_paginas;
 
 pub use intent_detector::{IntencionTurno, IntentDetector};
+pub use llamada_en_crudo::LlamadaEmbebida;
 pub use post_inference_guard::{PostInferenceGuard, RegistroTurno, ViolacionArnes};
 pub use pre_inference_interceptor::{EleccionHerramienta, PlanTurno, PreInferenceInterceptor};
+pub use procedencia::CifraPendiente;
 pub use verificador_paginas::{
     CitaRevisada, ENCABEZADO_VERIFICACION_PAGINAS, Paginas, ResultadoCita, VerificadorPaginas,
     formatear_paginas,

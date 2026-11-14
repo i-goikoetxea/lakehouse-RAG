@@ -1420,3 +1420,29 @@
 - Fuera de alcance, sin tocar: el literal `"Tabla {n}"` de `markdown_parser.rs:290` (título por defecto de una tabla Markdown sin título) y las listas de `intent_detector.rs` (Pieza 5).
 - Pendiente: diagnosticar la cobertura nula en matrices de riesgo y en la tabla 2 del paper. La sesión evaluadora debería comprobar la página de las respuestas con `lookup`.
 - Compilación con el `target` del worktree `pieza-1-pdfium-c5ed7b`. Los datos de N2 están en `benchmarks/.cache/anclaje/`, ignorado; los paquetes destilados se reutilizan sin Claude.
+
+### Sesión Piezas 3b y 4 de generalidad (2026-11-14): llamadas en crudo y verificador de procedencia
+
+**Estado: implementadas y medidas sin Claude. Pendientes de aprobación del usuario; sin push ni merge.** Contrato: SSD §3b y §4, con D1-D6 y los ajustes del mentor. Informe: `benchmarks/informes/piezas_3b_4_20261114.md`.
+
+**Errores y retrocesos (primero):**
+- **Cuelgue de más de 7 h en `adversarial_arnes_tests`** con entradas de 1 MB: el Nivel 1 examinaba todas las cifras sin anclar (100 000) contra todos los textos y todas las citas. Se corrigió con las cotas `MAXIMO_CIFRAS_PENDIENTES` (64), `MAXIMO_CITAS` (64), `MAXIMO_BYTES_DE_REFERENCIA` (256 KiB) y `MAXIMO_BYTES_OBJETO` (64 KiB), y con una búsqueda binaria de oraciones. Lo cubren los tests rojos `test_cotas_*`, con un límite de 5 s.
+- **Test de telemetría intermitente** (2 de 7, por la carrera de caché de `tracing`): se corrige en el test con `rebuild_interest_cache`; después, 12 de 12.
+- **Respuestas guardadas:** 0 de aceptada a bloqueada. Los 7 rechazos de la base («-20» y «-30») pasan a aceptados: eran sufijos de códigos de documento presentes en las salidas (referencia tras `-`).
+- **Monte Carlo** (cifra cercana): 0,99 %, justo en el umbral del 1 %.
+- La prueba con datos reales se queda corta: hay pocas abstenciones con cálculo y 0 microllamadas.
+
+**Cambios:**
+- [x] **3b:** `arnes_turno/llamada_en_crudo.rs` detecta los objetos del protocolo (`tool_calls`/`tool_use`), completos o parciales, en cualquier punto del texto. `parsear_salida_claude` los ejecuta y `ViolacionArnes::LlamadaEnCrudo` los rechaza en cualquier intención. D4: `AgentExecutionEvent::TextoEnVivoDescartado`, `ChatStreamEvento::TextoDescartado` y la GUI vacía el texto emitido en vivo.
+- [x] **4, Nivel 1:** `arnes_turno/procedencia_determinista.rs`, con la clausura aritmética de pares (las salvaguardas (a) y (b)) y la referencia estructural sin listas.
+- [x] **4, Nivel 2:** el puerto `VerificadorProcedenciaPort` y el adaptador `ClaudeHeadlessProcedencia` (Haiku, `--tools ""`, `--json-schema` estricto con 4 tipos y timeout de 10 s). Rust comprueba la traza en `arnes_turno/procedencia.rs`. Nueva `EtapaArnes::VerificacionProcedencia`.
+- [x] D5: se elimina `PETICIONES_DE_REFERENCIA`.
+
+**Tests:**
+- Línea base en `ad1fbb3`: 1023 pasan, 0 fallan, 35 ignorados.
+- Final: **1090 pasan, 0 fallan, 35 ignorados**. Nueva suite: `tests/adversarial_procedencia_tests.rs` (14).
+- `cargo clippy --all-targets -- -D warnings` y `cargo fmt --check`: OK.
+
+**Notas para la siguiente sesión:**
+- Medir con un lote nuevo de preguntas con cálculo, escrito por la sesión evaluadora, y medir Haiku en real.
+- `anclaje_tabla.rs` y la Regla 15 quedan sin tocar.

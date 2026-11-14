@@ -20,7 +20,7 @@ use chrono::NaiveDate;
 use lakehouse_rag::application::dtos::tools::ToolResult;
 use lakehouse_rag::application::use_cases::arnes_turno::{
     CitaRevisada, ENCABEZADO_VERIFICACION_PAGINAS, IntentDetector, PostInferenceGuard,
-    RegistroTurno, ResultadoCita, VerificadorPaginas,
+    RegistroTurno, ResultadoCita, VerificadorPaginas, ViolacionArnes,
 };
 use serde_json::{Value, json};
 
@@ -168,6 +168,7 @@ fn repetir_respuestas_guardadas() {
     let mut filas = Vec::new();
     let (mut rechazos, mut avisos, mut con_bloque) = (0, 0, 0);
     let (mut mutadas_total, mut mutadas_con_nota) = (0, 0);
+    let (mut microllamadas, mut llamadas_en_crudo) = (0, 0);
     for ruta in rutas.split(';').filter(|r| !r.is_empty()) {
         for guardada in leer(ruta) {
             let (modelo, avisos_guardados) = sin_bloque_de_verificacion(&guardada.respuesta);
@@ -180,6 +181,21 @@ fn repetir_respuestas_guardadas() {
             );
             let revisadas = VerificadorPaginas::revisar(&modelo, &guardada.registro);
             let motivos: Vec<String> = revisadas.iter().filter_map(|r| r.motivo()).collect();
+            // Pieza 4: la microllamada al Nivel 2 se dispararía con cifras aún sin procedencia
+            let pendientes = match &veredicto {
+                Err(ViolacionArnes::CifraSinAnclar { .. })
+                | Err(ViolacionArnes::CifraEnAbstencion { .. }) => {
+                    PostInferenceGuard::cifras_pendientes(
+                        &modelo,
+                        &guardada.pregunta,
+                        &intencion,
+                        &guardada.registro,
+                    )
+                }
+                _ => Vec::new(),
+            };
+            microllamadas += usize::from(!pendientes.is_empty());
+            llamadas_en_crudo += usize::from(veredicto == Err(ViolacionArnes::LlamadaEnCrudo));
             rechazos += usize::from(veredicto.is_err());
             avisos += motivos.len();
             con_bloque += usize::from(!motivos.is_empty());
@@ -207,6 +223,10 @@ fn repetir_respuestas_guardadas() {
                 "puntuacion_guardada": guardada.puntuacion,
                 "intencion": format!("{intencion:?}"),
                 "rechazo": veredicto.err().map(|v| v.motivo()),
+                "pendientes_nivel_2": pendientes
+                    .iter()
+                    .map(|p| json!({ "cifra": p.literal, "solo_estructural": p.solo_estructural }))
+                    .collect::<Vec<_>>(),
                 "avisos_pagina": motivos,
                 "citas": citas,
                 "avisos_guardados": avisos_guardados,
@@ -217,6 +237,8 @@ fn repetir_respuestas_guardadas() {
     let resumen = json!({
         "respuestas": filas.len(),
         "rechazos_del_guard": rechazos,
+        "microllamadas_nivel_2": microllamadas,
+        "llamadas_en_crudo": llamadas_en_crudo,
         "avisos_de_pagina": avisos,
         "respuestas_con_bloque": con_bloque,
         "citas_mutadas": mutadas_total,
@@ -225,7 +247,7 @@ fn repetir_respuestas_guardadas() {
     });
     std::fs::write(&salida, serde_json::to_string_pretty(&resumen).unwrap()).unwrap();
     println!(
-        "{} respuestas; {rechazos} rechazos del guard; {avisos} avisos de página en {con_bloque} respuestas; {mutadas_con_nota}/{mutadas_total} citas mutadas con nota",
+        "{} respuestas; {rechazos} rechazos del guard; {microllamadas} microllamadas; {llamadas_en_crudo} llamadas en crudo; {avisos} avisos de página en {con_bloque} respuestas; {mutadas_con_nota}/{mutadas_total} citas mutadas con nota",
         resumen["respuestas"]
     );
 }

@@ -654,6 +654,11 @@
     if (datos.tipo === 'texto') {
       turno.texto += datos.texto;
       programarRender(turno);
+    } else if (datos.tipo === 'textoDescartado') {
+      // El texto ya mostrado se rechazó o era una petición de consulta: se vacía la burbuja
+      turno.texto = '';
+      if (turno.temporizador) { clearTimeout(turno.temporizador); turno.temporizador = null; }
+      turno.respuesta.textContent = '';
     } else if (datos.tipo === 'herramientaInicio') {
       const boton = el('div', 'tool-linea en-curso');
       boton.appendChild(el('span', 'estado', '●'));

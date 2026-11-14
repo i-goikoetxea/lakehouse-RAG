@@ -14,7 +14,7 @@ use crate::infrastructure::embeddings::fastembed_engine::MODELO_POR_DEFECTO;
 use crate::infrastructure::embeddings::lazy_engine::LazyFastEmbedEngine;
 use crate::infrastructure::llm::{
     ClaudeAgentConfig, ClaudeAgentRunner, ClaudeHeadlessConfig, ClaudeHeadlessDistiller,
-    ClaudeHeadlessModelCatalog, ClaudeModelCatalogConfig,
+    ClaudeHeadlessModelCatalog, ClaudeHeadlessProcedencia, ClaudeModelCatalogConfig,
 };
 use crate::infrastructure::parsers::ParserPorFormato;
 use crate::infrastructure::query_engine::datafusion_engine::DataFusionEngine;
@@ -107,6 +107,9 @@ pub fn composicion_real(config: &ConfiguracionComposicion) -> ComposicionReal {
                 ClaudeModelCatalogConfig::default(),
             )),
             reloj: Arc::new(RelojDelSistema),
+            verificador_procedencia: Some(Arc::new(ClaudeHeadlessProcedencia::new(
+                ClaudeAgentConfig::default().binary_path,
+            ))),
         },
         indice: motores.indice,
     }
