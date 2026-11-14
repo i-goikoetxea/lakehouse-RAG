@@ -297,6 +297,14 @@ Todos endurecen el algoritmo: solo pueden cambiar una página por `None`, nunca 
 - **Escrituras sin espacios (Han y kana):** un token por carácter. Con la búsqueda por secuencia contigua equivale a los bigramas del §2.2.
 - **Tokens:** se separan letras y cifras (`S275` → `S`, `275`) en la clave y en el texto por igual.
 
+#### 2.3.2 Cabeceras multinivel y potencias (14-11-2026, reglas aprobadas por el mentor)
+
+Diagnóstico: el destilador compone las cabeceras juntando niveles (`BLEU EN-DE`), que en el texto van en líneas distintas. Ninguna aparece contigua, `C = 0` y el bloque queda en `None`. Además, el texto aplana los superíndices (`1019`) mientras la celda dice `10^19`. Informe: `benchmarks/informes/pieza_2_cabeceras_20261114.md`.
+- **Cabecera compuesta presente:** todos sus tokens no triviales están, en cualquier orden, en las **4 líneas anteriores** a la primera fila anclada de la ventana, y solo en las páginas de la ventana. Son no triviales los de 2 o más caracteres y los de 1 que no son una letra minúscula (mayúsculas, cifras, CJK). Los conectores de 1 letra minúscula se ignoran.
+- **Al menos 2 cabeceras distintas** en esas mismas líneas. Si no, no cuenta ninguna compuesta: una frase de prosa con las palabras de una columna no activa `C > 0`.
+- **Refinamiento de la implementación:** la unión de los tokens de las cabeceras presentes **no puede caber en los de una sola cabecera**. Si cabe, no cuenta ninguna. Lo encontró la trampa de prosa sintética: la columna «ο Μέγιστη» se reduce a {Μέγιστη} al ignorar el artículo, y una frase con las palabras de «λειτουργίας Μέγιστη» contenía las dos. Solo endurece la regla.
+- **Potencias, solo celda → texto:** si el valor contiene `\d+\^\d+`, también se busca la variante sin el circunflejo (`2.3 × 10^19` → `2.3 × 1019`). El texto fuente no se transforma: un año o un código de 4 cifras sigue siendo lo que es.
+
 ### 2.4 Vinculación y literales
 
 > **Implementado (11-11-2026), con dos precisiones.** La vinculación por bloque exige que el rango de páginas del chunk **corte** el bloque y que el chunk mencione la clave de alguna fila. «Contener el bloque» no vinculaba una tabla partida entre dos chunks, y varios chunks de la misma página la vinculaban sin mencionarla. La etiqueta se reduce a su código **desde la primera palabra con cifras** (`Table 4-A` → `4-A`, `3. táblázat` → `3-TABLAZAT`). Esto sustituye también el prefijo español `TABLA-` de `mapeo_destilacion.rs` y `lookup.rs`. El lookup prueba los códigos del más al menos específico: el código, la única palabra con cifras y la etiqueta entera. Como el título ya no lleva «Tabla», `busqueda_tabla` (consultas del tipo «Tabla 7-C espesores», que aparecen en las respuestas guardadas) cae al código de la consulta cuando ninguna tabla contiene todas sus palabras.
