@@ -25,7 +25,7 @@
   - un bloqueo del arnés sobre una suma calculada;
   - la búsqueda que elige la cifra de otro perímetro.
 - **Las repeticiones no muestran retroceso**: en las preguntas de cálculo, 27/30, igual que la línea base.
-- **El replay ciego no se hizo:** está pendiente de la autorización del usuario para ejecutar la prueba ignorada que lo implementa. La entrada está preparada (apartado 6).
+- **Replay ciego (solo Nivel 1, sin Haiku):** 156 respuestas guardadas, 0 rechazos sobre las de `da66519` y 0 en trampas y cálculos. La sensibilidad del verificador de páginas es del 82 % sobre todas las mutaciones y del 98 % sobre las comprobables (apartado 6).
 - **El set satura otra vez** (98 %). Hace falta uno más duro para que discrimine.
 
 ## 1. Errores de respuesta
@@ -136,21 +136,50 @@ Propuesta de regla general: medir el tiempo de arranque de `claude -p` y fijar e
 - **Trampas:** 8/8 en las 2 pasadas, sin respuestas de memoria. En la pasada 2, una respuesta añade de forma explícita que «su recuerdo de la publicación original es otro» y no lo da como respuesta. Es el comportamiento correcto.
 - **«No consta»:** 9/9 abstenciones correctas en las 2 pasadas. En una, un valor conocido aparece solo como término de búsqueda (revisado a mano).
 
-## 6. Replay ciego
+## 6. Replay ciego (solo Nivel 1)
 
-- **No ejecutado: está pendiente de la autorización del usuario.**
-- La sesión principal indicó el punto de entrada: una prueba ignorada del checkout `da66519` (`cargo test --test repeticion_arnes_guardadas -- --ignored`, con `CRUDAS_GUARDADAS` y `SALIDA_REPETICION`).
-- El sistema de permisos bloqueó su ejecución. Es coherente con la regla del usuario de no lanzar `cargo test` sin su «sí» directo, y una aprobación retransmitida por otra sesión no lo sustituye.
-- **La entrada está preparada** en `docs/validacion/set_oculto_v2/replay/` (ignorado), con un índice de qué id corresponde a cada línea:
-  - **156 respuestas guardadas** de cálculo (V56, V58, V60), de las 8 trampas y de los 9 «no consta», de las 8 pasadas de `de9cae9`, arreglos, `ad1fbb3` y `da66519`;
-  - **4 omitidas** porque el arnés ya las había bloqueado y su texto original no se guardó.
-  - El convertidor es `benchmarks/set_oculto_v2/a_formato_replay.py`.
-- **Límite que habrá que declarar cuando se ejecute:** la repetición aplica solo el **Nivel 1** (arnés determinista en Rust y verificador de páginas). No llama a Haiku (Nivel 2), así que una cifra que en producción rescataría el Nivel 2 aparecerá como rechazada.
-- **Lo medido en su lugar, con respuestas nuevas por el arnés completo:**
-  - cálculos 27/30, con 3 bloqueos;
-  - trampas 16/16;
-  - «no consta» 18/18;
-  - 0 falsos aceptados en trampas y «no consta».
+**Qué se ejecutó y cómo.** Lo ejecutó la sesión principal, con el «sí» directo del usuario:
+
+- prueba ignorada `repeticion_arnes_guardadas` de `da66519`;
+- sobre la entrada preparada aquí: `docs/validacion/set_oculto_v2/replay/`, ignorada por git;
+- salida en `replay_salida_da66519.json`.
+
+**Límite:**
+
+- La repetición aplica solo el **Nivel 1**: el arnés determinista en Rust y el verificador de páginas.
+- **El Nivel 2 (Haiku) no se llamó** (0 microllamadas). Una cifra que en producción rescataría el Nivel 2 aparecería aquí como rechazada.
+
+**Entrada:**
+
+- **156 respuestas guardadas** de cálculo (V56, V58 y V60), de las 8 trampas y de los 9 «no consta». Proceden de las 8 pasadas de `de9cae9`, arreglos, `ad1fbb3` y `da66519`.
+- **4 omitidas**, porque el arnés ya las había bloqueado y no se guardó su texto original.
+
+| Resultado | Valor |
+|---|---|
+| Respuestas procesadas | 156 |
+| Rechazos del guard | **2**: ambos en el mismo «no consta» (V36), en las 2 pasadas de arreglos. Motivo: «no se consultó la Capa 2» (en producción, un reintento, no un bloqueo) |
+| Rechazos sobre las respuestas de `da66519` | **0** |
+| Rechazos sobre las de `de9cae9` y `ad1fbb3` | 0 |
+| Rechazos en trampas y en cálculos | 0 |
+| Falsos aceptados | 0 en trampas y en «no consta»: las 16 trampas y las 18 abstenciones guardadas eran correctas y ninguna se rechazó por error de contenido |
+| Llamadas en crudo detectadas | 0 |
+| Avisos de página | 1 |
+
+**El aviso de página.** Recae en una trampa (V04) de la pasada 2 de arreglos.
+
+- Revisado: es **correcto, pero de poco valor**. El título de la sección citada está en la página anterior, mientras que el dato que se citaba está en la página que daba la respuesta.
+- No es una página falsa.
+
+**Sensibilidad del verificador de páginas (mutación).** El replay cambió cada cita por una página ajena. De 228 citas mutadas:
+
+| Grupo | Citas | Qué son | Valoración |
+|---|---|---|---|
+| Con nota de «discrepante» | **188** (82 %) | — | Detectadas |
+| Sin nota, marcadas como `Ambigua` | 29 | El extracto aparece en varias páginas | Ninguna nota, por diseño de la pieza 3c: solo avisa con evidencia positiva |
+| Sin resultado | 11 | 8 son títulos de sección, rótulos o fechas que aparecen en 6 a 221 páginas del documento; **3 son extractos únicos** (una sola página): un rótulo de fila de tabla, una fecha de revisión de portada y un fragmento técnico corto | Las 8 primeras no pueden comprobarse. **Las 3 únicas son fallos reales de sensibilidad** |
+
+- Descontando los extractos que aparecen en varias páginas, el verificador detecta **188 de 191 mutaciones comprobables (98 %)**.
+- **Supuesto:** que omita los extractos cortos (de 14 a 45 caracteres), que es la longitud de los 3 fallos.
 
 ## 7. Línea base para la comparación con la API
 
@@ -249,5 +278,5 @@ El centro de `aislado_unificada` debe usarse tal cual; `--solo-puntuar` no reing
 1. **Verificador de procedencia (Nivel 2):** subir el límite de 10 s o medirlo contra la latencia real de arranque. Además, validar su señal con un set que tenga cifras erróneas: hoy da «0 de 2» en respuestas correctas.
 2. **Reintento «no consta + valor»:** excluir los valores derivables y las referencias estructurales. Queda como la última fuente de bloqueos falsos (3 en 30 cálculos).
 3. **Búsqueda entre perímetros** (V59): ante varias cifras del mismo concepto (entidad frente a grupo, antes frente a después de impuestos), que la búsqueda las traiga juntas y la respuesta las distinga.
-4. **Replay ciego:** exponer un punto de entrada documentado que pase respuestas guardadas por el arnés. Permitiría repuntuar el arnés sin gastar Claude.
+4. **Verificador de páginas:** cubrir los extractos cortos únicos (3 fallos de sensibilidad en el replay) y documentar el replay como herramienta de repuntuación del arnés sin gastar Claude.
 5. **Set v3**, más difícil: este satura al 98 %.
