@@ -38,7 +38,7 @@ Rama `claude/regla15-v2-idioma` desde `main` `ad1fbb3`, sin push ni merge. Lleva
   - `muestra_texto`, un prefijo literal de 150 caracteres como máximo de la primera línea de texto corrido.
 
   Se calcula al vuelo sobre los chunks de 02 ya indexados, sin caché porque no hizo falta. Salta las páginas `LECTURA_DEGRADADA`, los preámbulos, los índices, las tablas y las líneas repetidas (cabeceras y pies). No usa listas de palabras.
-  - En MIL-STD, la muestra es «1. This Standard is approved for use by all Military Departments and Defense Agencies».
+  - En MIL-STD, la muestra es la primera frase del texto corrido del alcance, en inglés (no se reproduce aquí).
   - En los fixtures, la frase inicial en español.
   - La salida del catálogo crece de 7088 a 8396 caracteres (+18 %).
 - **Set de prueba:** las 5 agujas tienen ahora sujetos distintos (un quinto sujeto solo para N3, sin tocar la pista Aguja).
