@@ -1479,3 +1479,23 @@
   - Hace falta un set nuevo que discrimine, escrito por la sesión evaluadora (informe §4).
   - Un primer lanzamiento de la ingesta quedó huérfano y no se pudo parar: la carpeta `n3_v7` del scratchpad se descarta.
 
+
+### Sesión Regla 15 con N≥2 (2026-11-14)
+
+**Estado: `[COMPLETADO]`, pendiente de aprobación.** Rama `claude/regla15-n2`, creada desde `claude/piezas-3b-4-arnes-a94894` (`a73e134`), sin push ni merge. Informe: `benchmarks/informes/regla15_n2_20261114.md`. No se ha leído `docs/validacion/set_oculto*`. La v2 no se integra (decisión del mentor).
+
+- [x] Cherry-pick de `claude/regla15-v2-idioma` y de sus antecesores. Solo hubo conflictos en `PROGRESS.md`.
+- [x] Regla 15:
+  - varias búsquedas en paralelo solo con N ≥ 2 sujetos, documentos o códigos; con N = 1, una sola búsqueda con el código y el concepto;
+  - la segunda búsqueda, solo si los fragmentos no contienen el código o no responden al atributo.
+- [x] Test de líneas repetidas con un sello inventado (antes, una frase casi literal de un documento real).
+- [x] N0: 1103 aprobados, 0 fallos y 35 ignorados. `clippy` y `fmt` limpios.
+- **Resultados** (una pasada con Sonnet frente a `main` `ad1fbb3`, CPU al 15 %):
+  - búsquedas por pregunta de un documento: 0,91 (v2: 1,33; criterio ≤ 1,10);
+  - correctas: 23/23 y 26/26 tras la revisión manual (3 falsos negativos del puntuador por valores citados como no aplicables);
+  - inglés conservado: 35/36; español: 33/33.
+  - El set sigue saturado.
+- **Para la siguiente sesión:**
+  - El puntuador da falsos negativos cuando la respuesta cita valores de otros documentos como no aplicables.
+  - Hace falta un set nuevo que discrimine, escrito por la sesión evaluadora.
+  - La integración la coordina la sesión principal; hay otra rama que toca `validar_con_procedencia`.
