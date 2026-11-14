@@ -238,7 +238,7 @@ mod tests {
 
     #[test]
     fn test_muestra_salta_lineas_repetidas_como_cabeceras_y_pies() {
-        let sello = "Check the source to verify that this is the current version before use of the standard.";
+        let sello = "Printed copy of the plant handbook, kept for reference only and not controlled by the quality office.";
         let pagina_1 = format!("{sello}\nSafety\n");
         let pagina_2 = format!("{sello}\n{PARRAFO_EN}\n");
         assert_eq!(
