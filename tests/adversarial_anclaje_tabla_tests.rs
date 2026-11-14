@@ -162,3 +162,57 @@ fn test_tabla_repetida_en_dos_anexos_lejanos_queda_sin_bloque() {
     let anclaje = anclar_tabla(&lineas(&texto), &tabla);
     assert_eq!(anclaje.bloque, None);
 }
+
+#[test]
+fn test_cabeceras_solo_de_conectores_o_simbolos_no_cuentan_como_compuestas() {
+    // Sin tokens no triviales, una cabecera no puede estar «presente» por composición. Sus letras
+    // están en la línea previa, pero no contiguas: solo la composición podría contarlas
+    let texto: Vec<(u32, String)> = vec![
+        (3, "e y u o".to_string()),
+        (3, "Lote 1 10 11".to_string()),
+        (3, "Lote 2 20 21".to_string()),
+        (3, "Lote 3 30 31".to_string()),
+    ];
+    let tabla = TablaParaAnclar {
+        cabeceras: vec!["y e".into(), "o u".into(), "— ·".into(), String::new()],
+        filas: (1..=3)
+            .map(|n| fila(&format!("Lote {n}"), &[format!("{n}0"), format!("{n}1")]))
+            .collect(),
+    };
+    assert_eq!(anclar_tabla(&lineas(&texto), &tabla).bloque, None);
+}
+
+#[test]
+fn test_2000_cabeceras_compuestas_en_1000_paginas_terminan_pronto() {
+    let mut texto = relleno(1000);
+    let grupos: Vec<String> = (0..40).map(|g| format!("Grupo{g}")).collect();
+    let subcolumnas: Vec<String> = (0..50).map(|s| format!("Sub{s}")).collect();
+    texto.push((700, grupos.join(" ")));
+    texto.push((700, subcolumnas.join(" ")));
+    let mut filas = Vec::new();
+    for f in 0..60 {
+        let valores: Vec<String> = (0..4).map(|c| format!("{}", f * 1000 + c)).collect();
+        texto.push((
+            700 + (f / 30) as u32,
+            format!("Fila{f} {}", valores.join(" ")),
+        ));
+        filas.push(fila(&format!("Fila{f}"), &valores));
+    }
+    texto.sort_by_key(|(pagina, _)| *pagina);
+    let cabeceras = grupos
+        .iter()
+        .flat_map(|g| subcolumnas.iter().map(move |s| format!("{g} {s}")))
+        .collect();
+    let tabla = TablaParaAnclar { cabeceras, filas };
+    let inicio = Instant::now();
+    let anclaje = anclar_tabla(&lineas(&texto), &tabla);
+    assert!(
+        inicio.elapsed() < Duration::from_secs(3),
+        "{:?}",
+        inicio.elapsed()
+    );
+    assert_eq!(anclaje.bloque, Some((700, 701)));
+    for (f, pagina) in anclaje.por_fila.iter().enumerate() {
+        assert!(pagina.is_none() || *pagina == Some(700 + (f / 30) as u32));
+    }
+}

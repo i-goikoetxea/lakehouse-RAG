@@ -4,7 +4,7 @@
 //! decimal equivalentes y un token por carácter en las escrituras sin espacios (CJK y kana). Entre
 //! una página dudosa y `None`, siempre `None`.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use crate::domain::services::normalizacion::plegar_mayusculas;
 
@@ -16,6 +16,11 @@ const RADIO_LINEAS_VALORES: usize = 2;
 const MIN_VALORES_CERCA: usize = 2;
 /// Filas mínimas de la subsecuencia creciente
 const MIN_FILAS_EN_ORDEN: usize = 2;
+/// Líneas anteriores a la primera fila del bloque en las que se busca una cabecera multinivel
+const LINEAS_CABECERA_COMPUESTA: usize = 4;
+/// Cabeceras distintas que deben estar en esas líneas para que cuenten las compuestas: las
+/// palabras de una sola columna pueden ser prosa
+const MIN_CABECERAS_COMPUESTAS: usize = 2;
 
 /// Línea del texto paginado con su página física
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -61,10 +66,10 @@ pub fn anclar_tabla(lineas: &[LineaPaginada], tabla: &TablaParaAnclar) -> Anclaj
         .iter()
         .map(|fila| FilaIndexada::new(&texto, fila))
         .collect();
-    let cabeceras: Vec<BTreeSet<u32>> = tabla
+    let cabeceras: Vec<CabeceraIndexada> = tabla
         .cabeceras
         .iter()
-        .map(|cabecera| texto.paginas_de(&[tokens(cabecera)]))
+        .map(|cabecera| CabeceraIndexada::new(&texto, cabecera))
         .collect();
     let Some(bloque) = elegir_bloque(&texto, &filas, &cabeceras) else {
         return sin_anclar;
@@ -89,7 +94,12 @@ pub fn anclar_tabla(lineas: &[LineaPaginada], tabla: &TablaParaAnclar) -> Anclaj
 /// y cifras, cifras decimales con punto (`0,45` y `0.45` → `0.45`) y un token por carácter en las
 /// escrituras sin espacios (CJK y kana)
 pub fn tokens(texto: &str) -> Vec<String> {
-    let caracteres: Vec<char> = plegar_mayusculas(texto).chars().collect();
+    trocear(&plegar_mayusculas(texto))
+}
+
+/// Rachas alfanuméricas del texto tal cual, sin plegar mayúsculas
+fn trocear(texto: &str) -> Vec<String> {
+    let caracteres: Vec<char> = texto.chars().collect();
     let mut resultado = Vec::new();
     let mut actual = String::new();
     for (indice, &caracter) in caracteres.iter().enumerate() {
@@ -118,6 +128,37 @@ pub fn tokens(texto: &str) -> Vec<String> {
 pub fn contiene_secuencia(texto: &str, patron: &str) -> bool {
     let aguja = tokens(patron);
     posicion_de(&tokens(texto), &aguja).is_some()
+}
+
+/// Variante de búsqueda de un valor con potencias (`10^19` → `1019`): el texto extraído aplana el
+/// superíndice. Solo se aplica a la celda, nunca al texto. `None` si no hay `\d+\^\d+`
+pub fn variante_sin_circunflejo(valor: &str) -> Option<String> {
+    let caracteres: Vec<char> = valor.chars().collect();
+    let es_potencia = |indice: usize| {
+        caracteres[indice] == '^'
+            && indice > 0
+            && caracteres[indice - 1].is_ascii_digit()
+            && caracteres.get(indice + 1).is_some_and(char::is_ascii_digit)
+    };
+    let variante: String = (0..caracteres.len())
+        .filter(|&indice| !es_potencia(indice))
+        .map(|indice| caracteres[indice])
+        .collect();
+    (variante.len() < valor.len()).then_some(variante)
+}
+
+/// Tokens que una cabecera multinivel debe tener en las líneas previas a la tabla: se ignoran los
+/// conectores de una letra minúscula; cuentan las palabras, las cifras y los símbolos o unidades
+/// de un carácter (mayúsculas, CJK)
+fn tokens_no_triviales(cabecera: &str) -> BTreeSet<String> {
+    trocear(cabecera)
+        .into_iter()
+        .filter(|token| {
+            let mut caracteres = token.chars();
+            !matches!((caracteres.next(), caracteres.next()), (Some(c), None) if c.is_lowercase())
+        })
+        .flat_map(|token| tokens(&token))
+        .collect()
 }
 
 fn cerrar_token(resultado: &mut Vec<String>, actual: &mut String) {
@@ -240,11 +281,21 @@ impl FilaIndexada {
             .map(|pieza| tokens(pieza))
             .filter(|pieza| !pieza.is_empty())
             .collect();
-        let mut valores: Vec<Vec<String>> = Vec::new();
-        for valor in fila.valores.iter().map(|v| tokens(v)) {
-            if !valor.is_empty() && !piezas.contains(&valor) && !valores.contains(&valor) {
-                valores.push(valor);
+        let mut valores: Vec<Vec<Vec<String>>> = Vec::new();
+        for valor in &fila.valores {
+            let principal = tokens(valor);
+            let repetido = valores.iter().any(|formas| formas[0] == principal);
+            if principal.is_empty() || piezas.contains(&principal) || repetido {
+                continue;
             }
+            let mut formas = vec![principal];
+            if let Some(variante) = variante_sin_circunflejo(valor).map(|v| tokens(&v))
+                && !variante.is_empty()
+                && !formas.contains(&variante)
+            {
+                formas.push(variante);
+            }
+            valores.push(formas);
         }
         let exigidos = MIN_VALORES_CERCA.min(valores.len());
         let fin_de_clave = piezas.first().map_or(0, Vec::len);
@@ -254,7 +305,11 @@ impl FilaIndexada {
             .filter(|&(linea, posicion)| {
                 valores
                     .iter()
-                    .filter(|valor| texto.contiene_tras(linea, posicion + fin_de_clave, valor))
+                    .filter(|formas| {
+                        formas
+                            .iter()
+                            .any(|forma| texto.contiene_tras(linea, posicion + fin_de_clave, forma))
+                    })
                     .count()
                     >= exigidos
             })
@@ -280,6 +335,89 @@ impl FilaIndexada {
     }
 }
 
+/// Cabecera de columna: páginas en las que aparece contigua y tokens con los que puede aparecer
+/// compuesta por niveles en varias líneas
+struct CabeceraIndexada {
+    contigua_en: BTreeSet<u32>,
+    no_triviales: BTreeSet<String>,
+}
+
+impl CabeceraIndexada {
+    fn new(texto: &TextoIndexado, cabecera: &str) -> Self {
+        Self {
+            contigua_en: texto.paginas_de(&[tokens(cabecera)]),
+            no_triviales: tokens_no_triviales(cabecera),
+        }
+    }
+}
+
+/// Cabeceras presentes en la ventana: contiguas en alguna de sus páginas o compuestas justo antes
+/// de su primera fila
+fn cabeceras_presentes(
+    texto: &TextoIndexado,
+    filas: &[FilaIndexada],
+    cabeceras: &[CabeceraIndexada],
+    (inicio, fin): (u32, u32),
+) -> usize {
+    let compuestas = cabeceras_compuestas(texto, filas, cabeceras, (inicio, fin));
+    cabeceras
+        .iter()
+        .enumerate()
+        .filter(|(indice, cabecera)| {
+            cabecera.contigua_en.range(inicio..=fin).next().is_some() || compuestas.contains(indice)
+        })
+        .count()
+}
+
+/// Cabeceras multinivel: todos sus tokens no triviales, en cualquier orden, en las
+/// `LINEAS_CABECERA_COMPUESTA` líneas de la ventana previas a su primera fila anclada. Solo
+/// cuentan si en esas líneas están las de `MIN_CABECERAS_COMPUESTAS` columnas distintas cuyos
+/// tokens, juntos, no caben en los de una sola cabecera
+fn cabeceras_compuestas(
+    texto: &TextoIndexado,
+    filas: &[FilaIndexada],
+    cabeceras: &[CabeceraIndexada],
+    (inicio, fin): (u32, u32),
+) -> BTreeSet<usize> {
+    let Some(primera) = filas
+        .iter()
+        .filter_map(|fila| fila.primera_entre((inicio, fin)))
+        .map(|(linea, _)| linea)
+        .min()
+    else {
+        return BTreeSet::new();
+    };
+    let previos: HashSet<&String> = (primera.saturating_sub(LINEAS_CABECERA_COMPUESTA)..primera)
+        .filter(|&linea| (inicio..=fin).contains(&texto.paginas[linea]))
+        .flat_map(|linea| &texto.lineas[linea])
+        .collect();
+    let presentes: BTreeSet<usize> = cabeceras
+        .iter()
+        .enumerate()
+        .filter(|(_, cabecera)| {
+            !cabecera.no_triviales.is_empty()
+                && cabecera.no_triviales.iter().all(|t| previos.contains(t))
+        })
+        .map(|(indice, _)| indice)
+        .collect();
+    let distintas: BTreeSet<&BTreeSet<String>> = presentes
+        .iter()
+        .map(|&indice| &cabeceras[indice].no_triviales)
+        .collect();
+    let union: BTreeSet<&String> = distintas.iter().copied().flatten().collect();
+    // Una frase con las palabras de una columna contiene también las columnas incluidas en ella
+    let caben_en_una = cabeceras.iter().any(|cabecera| {
+        union
+            .iter()
+            .all(|token| cabecera.no_triviales.contains(*token))
+    });
+    if distintas.len() >= MIN_CABECERAS_COMPUESTAS && !caben_en_una {
+        presentes
+    } else {
+        BTreeSet::new()
+    }
+}
+
 /// La clave de una fila es su primera celda: si alguna aparición abre su línea, las que van en
 /// medio de otra línea son de otra fila (un número que reaparece como valor) y se descartan
 fn preferir_las_que_abren_linea(apariciones: Vec<Posicion>) -> Vec<Posicion> {
@@ -297,7 +435,7 @@ fn preferir_las_que_abren_linea(apariciones: Vec<Posicion>) -> Vec<Posicion> {
 fn elegir_bloque(
     texto: &TextoIndexado,
     filas: &[FilaIndexada],
-    cabeceras: &[BTreeSet<u32>],
+    cabeceras: &[CabeceraIndexada],
 ) -> Option<(u32, u32)> {
     let paginas: Vec<u32> = texto
         .paginas
@@ -315,10 +453,7 @@ fn elegir_bloque(
         {
             let puntuacion = (
                 filas_en_orden(filas, (inicio, fin)),
-                cabeceras
-                    .iter()
-                    .filter(|p| p.range(inicio..=fin).next().is_some())
-                    .count(),
+                cabeceras_presentes(texto, filas, cabeceras, (inicio, fin)),
             );
             if puntuacion > mejor_puntuacion {
                 mejor_puntuacion = puntuacion;
@@ -966,6 +1101,247 @@ mod tests {
         let lineas = paginado(&[(2, "Clase Valor"), (2, "Única 5")]);
         let t = tabla(&["Valor"], vec![fila(&["Única"], &["5"])]);
         assert_eq!(anclar_tabla(&lineas, &t).bloque, None);
+    }
+
+    // Cabeceras compuestas de varios niveles
+
+    fn tabla_rendimiento_y_coste() -> TablaParaAnclar {
+        // El destilador compone cada cabecera juntando los niveles: ninguna aparece contigua
+        tabla(
+            &[
+                "Rendimiento ES-FR",
+                "Rendimiento ES-IT",
+                "Coste de cálculo ES-FR",
+                "Coste de cálculo ES-IT",
+            ],
+            vec![
+                fila(&["Modelo A"], &["21.4", "30.2"]),
+                fila(&["Modelo B"], &["22.8", "31.0"]),
+                fila(&["Modelo C"], &["23.5", "32.7"]),
+            ],
+        )
+    }
+
+    #[test]
+    fn test_cabecera_compuesta_en_dos_lineas_cuenta_como_presente() {
+        let lineas = paginado(&[
+            (8, "Tabla 2: comparación de modelos en las dos tareas."),
+            (8, "Sistema"),
+            (8, "Rendimiento Coste de cálculo (GFLOP)"),
+            (8, "ES-FR ES-IT ES-FR ES-IT"),
+            (8, "Modelo A 21.4 30.2"),
+            (8, "Modelo B 22.8 31.0"),
+            (8, "Modelo C 23.5 32.7"),
+        ]);
+        let anclaje = anclar_tabla(&lineas, &tabla_rendimiento_y_coste());
+        assert_eq!(anclaje.bloque, Some((8, 8)), "{anclaje:?}");
+        assert!(todas_en(&anclaje, 8));
+    }
+
+    #[test]
+    fn test_cabecera_compuesta_de_tres_niveles_con_unidades_en_linea_aparte() {
+        let lineas = paginado(&[
+            (14, "Ensayo de laboratorio"),
+            (14, "Tracción Compresión"),
+            (14, "Inicial Final Inicial Final"),
+            (14, "(MPa) (MPa) (MPa) (MPa)"),
+            (14, "Probeta 1 310 295 410 402"),
+            (14, "Probeta 2 305 290 415 398"),
+            (14, "Probeta 3 318 301 420 405"),
+        ]);
+        let t = tabla(
+            &[
+                "Ensayo Tracción Inicial MPa",
+                "Ensayo Tracción Final MPa",
+                "Ensayo Compresión Inicial MPa",
+                "Ensayo Compresión Final MPa",
+            ],
+            vec![
+                fila(&["Probeta 1"], &["310", "295", "410", "402"]),
+                fila(&["Probeta 2"], &["305", "290", "415", "398"]),
+                fila(&["Probeta 3"], &["318", "301", "420", "405"]),
+            ],
+        );
+        let anclaje = anclar_tabla(&lineas, &t);
+        assert_eq!(anclaje.bloque, Some((14, 14)), "{anclaje:?}");
+        assert!(todas_en(&anclaje, 14));
+    }
+
+    #[test]
+    fn test_prosa_con_las_palabras_de_una_sola_columna_no_activa_la_cabecera_compuesta() {
+        let lineas = paginado(&[
+            (
+                8,
+                "El coste de cálculo entre ES-FR fue menor que el previsto.",
+            ),
+            (8, "Modelo A 21.4 30.2"),
+            (8, "Modelo B 22.8 31.0"),
+            (8, "Modelo C 23.5 32.7"),
+        ]);
+        let anclaje = anclar_tabla(&lineas, &tabla_rendimiento_y_coste());
+        assert_eq!(anclaje.bloque, None, "{anclaje:?}");
+    }
+
+    #[test]
+    fn test_prosa_de_una_columna_no_activa_por_otra_columna_contenida_en_ella() {
+        // «e Máximo» se reduce a «Máximo», que está dentro de «Carga Máximo»: la frase sigue
+        // teniendo solo las palabras de una columna
+        let lineas = paginado(&[
+            (8, "Se revisó la carga y el máximo antes del turno."),
+            (8, "Lote 1 10 11 12 13"),
+            (8, "Lote 2 20 21 22 23"),
+            (8, "Lote 3 30 31 32 33"),
+        ]);
+        let t = tabla(
+            &["Carga Máximo", "Carga Mínimo", "e Máximo", "e Mínimo"],
+            vec![
+                fila(&["Lote 1"], &["10", "11", "12", "13"]),
+                fila(&["Lote 2"], &["20", "21", "22", "23"]),
+                fila(&["Lote 3"], &["30", "31", "32", "33"]),
+            ],
+        );
+        assert_eq!(anclar_tabla(&lineas, &t).bloque, None);
+    }
+
+    #[test]
+    fn test_cabecera_compuesta_a_mas_de_cuatro_lineas_de_la_primera_fila_no_cuenta() {
+        let lineas = paginado(&[
+            (8, "Rendimiento Coste de cálculo (GFLOP)"),
+            (8, "ES-FR ES-IT ES-FR ES-IT"),
+            (8, "Primera línea de notas sin relación."),
+            (8, "Segunda línea de notas sin relación."),
+            (8, "Tercera línea de notas sin relación."),
+            (8, "Cuarta línea de notas sin relación."),
+            (8, "Modelo A 21.4 30.2"),
+            (8, "Modelo B 22.8 31.0"),
+            (8, "Modelo C 23.5 32.7"),
+        ]);
+        let anclaje = anclar_tabla(&lineas, &tabla_rendimiento_y_coste());
+        assert_eq!(anclaje.bloque, None, "{anclaje:?}");
+    }
+
+    #[test]
+    fn test_cabecera_compuesta_ignora_los_conectores_de_una_letra_en_minuscula() {
+        let lineas = paginado(&[
+            (5, "Carga Descarga"),
+            (5, "Norte Sur Norte Sur"),
+            (5, "Lote 1 10 11 12 13"),
+            (5, "Lote 2 20 21 22 23"),
+            (5, "Lote 3 30 31 32 33"),
+        ]);
+        let t = tabla(
+            &[
+                "Carga y Norte",
+                "Carga y Sur",
+                "Descarga y Norte",
+                "Descarga y Sur",
+            ],
+            vec![
+                fila(&["Lote 1"], &["10", "11", "12", "13"]),
+                fila(&["Lote 2"], &["20", "21", "22", "23"]),
+                fila(&["Lote 3"], &["30", "31", "32", "33"]),
+            ],
+        );
+        let anclaje = anclar_tabla(&lineas, &t);
+        assert_eq!(anclaje.bloque, Some((5, 5)), "{anclaje:?}");
+    }
+
+    #[test]
+    fn test_cabecera_compuesta_exige_la_letra_mayuscula_de_una_cabecera() {
+        // «A» y «B» son símbolos de columna, no conectores: si faltan, la cabecera no está
+        let lineas = paginado(&[
+            (5, "Grupo Serie"),
+            (5, "Lote 1 10 11"),
+            (5, "Lote 2 20 21"),
+            (5, "Lote 3 30 31"),
+        ]);
+        let t = tabla(
+            &["Grupo Serie A", "Grupo Serie B"],
+            vec![
+                fila(&["Lote 1"], &["10", "11"]),
+                fila(&["Lote 2"], &["20", "21"]),
+                fila(&["Lote 3"], &["30", "31"]),
+            ],
+        );
+        assert_eq!(anclar_tabla(&lineas, &t).bloque, None);
+    }
+
+    #[test]
+    fn test_cabecera_compuesta_en_tabla_partida_ancla_cada_fila() {
+        let lineas = paginado(&[
+            (30, "Rendimiento Coste de cálculo (GFLOP)"),
+            (30, "ES-FR ES-IT ES-FR ES-IT"),
+            (30, "Modelo A 21.4 30.2"),
+            (30, "Modelo B 22.8 31.0"),
+            (31, "Modelo C 23.5 32.7"),
+            (31, "Modelo D 24.1 33.3"),
+        ]);
+        let mut t = tabla_rendimiento_y_coste();
+        t.filas.push(fila(&["Modelo D"], &["24.1", "33.3"]));
+        let anclaje = anclar_tabla(&lineas, &t);
+        assert_eq!(anclaje.bloque, Some((30, 31)), "{anclaje:?}");
+        assert_eq!(
+            anclaje.por_fila,
+            vec![Some(30), Some(30), Some(31), Some(31)]
+        );
+    }
+
+    // Potencias de la celda destilada frente al texto aplanado
+
+    #[test]
+    fn test_potencia_de_la_celda_se_busca_sin_el_circunflejo() {
+        let lineas = paginado(&[
+            (8, "Sistema Precisión Coste"),
+            (8, "Modelo A 21.4 2.3 · 1019"),
+            (8, "Modelo B 22.8 9.6 · 1018"),
+            (8, "Modelo C 23.5 1.2x1021"),
+        ]);
+        let t = tabla(
+            &["Precisión", "Coste"],
+            vec![
+                fila(&["Modelo A"], &["21.4", "2.3 × 10^19"]),
+                fila(&["Modelo B"], &["22.8", "9.6 × 10^18"]),
+                fila(&["Modelo C"], &["23.5", "1.2x10^21"]),
+            ],
+        );
+        let anclaje = anclar_tabla(&lineas, &t);
+        assert_eq!(anclaje.bloque, Some((8, 8)), "{anclaje:?}");
+        assert!(todas_en(&anclaje, 8));
+    }
+
+    #[test]
+    fn test_numero_de_cuatro_cifras_del_texto_no_se_convierte_en_potencia() {
+        // Solo la celda se transforma: un año del texto no equivale a una potencia ni al revés
+        let lineas = paginado(&[
+            (8, "Sistema Precisión Coste"),
+            (8, "Modelo A 21.4 10^19"),
+            (8, "Modelo B 22.8 10^18"),
+            (8, "Modelo C 23.5 10^21"),
+        ]);
+        let t = tabla(
+            &["Precisión", "Coste"],
+            vec![
+                fila(&["Modelo A"], &["21.4", "1019"]),
+                fila(&["Modelo B"], &["22.8", "1018"]),
+                fila(&["Modelo C"], &["23.5", "1021"]),
+            ],
+        );
+        assert_eq!(anclar_tabla(&lineas, &t).bloque, None);
+    }
+
+    #[test]
+    fn test_variante_sin_circunflejo_solo_entre_cifras() {
+        assert_eq!(
+            variante_sin_circunflejo("2.5x10^19").as_deref(),
+            Some("2.5x1019")
+        );
+        assert_eq!(
+            variante_sin_circunflejo("1.0 × 10^20").as_deref(),
+            Some("1.0 × 1020")
+        );
+        assert_eq!(variante_sin_circunflejo("10^-3"), None);
+        assert_eq!(variante_sin_circunflejo("x^2"), None);
+        assert_eq!(variante_sin_circunflejo("2024"), None);
     }
 
     #[test]

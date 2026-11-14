@@ -218,10 +218,105 @@ def generar(rnd, n):
     return casos
 
 
+UNIDADES = ["mm", "kg", "MPa", "°C", "%", "s", "kN", "h"]
+
+
+def niveles_de_cabecera(rnd, idioma, n_niveles):
+    """Niveles de una cabecera multinivel: superior (con 3 niveles), grupos y subcolumnas.
+
+    Los grupos y el nivel superior salen de la prosa del idioma; las subcolumnas, de su
+    vocabulario de columnas. Devuelve (superior o None, grupos, subcolumnas)"""
+    _, columnas_vocab, palabras = IDIOMAS[idioma]
+    elegidas = rnd.sample(palabras, 3)
+    superior = elegidas[2] if n_niveles == 3 else None
+    grupos = elegidas[:2]
+    subcolumnas = rnd.sample(columnas_vocab, rnd.randint(2, 3))
+    return superior, grupos, subcolumnas
+
+
+def lineas_de_cabecera(idioma, superior, grupos, subcolumnas, unidad):
+    """Cabecera física en varias líneas, como la extrae pdfium: un nivel por línea"""
+    lineas = []
+    if superior:
+        lineas.append(superior)
+    lineas.append(unir(idioma, grupos))
+    lineas.append(unir(idioma, subcolumnas * len(grupos)))
+    if unidad:
+        lineas.append(" ".join([f"({unidad})"] * (len(grupos) * len(subcolumnas))))
+    return lineas
+
+
+def cabeceras_compuestas(rnd, idioma, superior, grupos, subcolumnas, unidad):
+    """Cabeceras como las compone el destilador: niveles juntos, a veces con la unidad"""
+    con_unidad = unidad and rnd.random() < 0.5
+    cabeceras = []
+    for grupo in grupos:
+        for sub in subcolumnas:
+            partes = ([superior] if superior else []) + [grupo, sub] + ([unidad] if con_unidad else [])
+            cabeceras.append(unir(idioma, partes))
+    return cabeceras
+
+
+def generar_multinivel(rnd, n, desde):
+    """Casos con cabecera multinivel (2 y 3 niveles, unidades en línea aparte) y trampas de prosa.
+
+    - multinivel_2 / multinivel_3: tabla en 1 o 2 páginas; la cabecera se repite en la segunda.
+    - trampa_prosa: sin cabecera física; justo antes de las filas, una frase con las palabras de
+      una sola columna, desordenadas. La regla de 2 columnas debe dejarla en `None`; una página
+      aquí no es falsa (las filas están), pero indica que la trampa activó la cabecera.
+    """
+    casos = []
+    idiomas = list(IDIOMAS)
+    tipos = ["multinivel_2", "multinivel_3", "trampa_prosa"]
+    for k in range(n):
+        i = desde + k
+        tipo = tipos[k % len(tipos)]
+        idioma = idiomas[(k // len(tipos)) % len(idiomas)]
+        p0 = rnd.randint(20, 200)
+        n_niveles = 3 if tipo == "multinivel_3" else 2
+        superior, grupos, subcolumnas = niveles_de_cabecera(rnd, idioma, n_niveles)
+        unidad = rnd.choice(UNIDADES) if rnd.random() < 0.6 else None
+        columnas = cabeceras_compuestas(rnd, idioma, superior, grupos, subcolumnas, unidad)
+        _, filas = tabla_base(rnd, idioma, rnd.randint(3, 9), len(columnas))
+        lineas = []
+        if tipo == "trampa_prosa":
+            # sin prosa en la página anterior: la ventana solo ve la frase trampa
+            _, _, palabras = IDIOMAS[idioma]
+            reservadas = set(grupos) | set(subcolumnas) | ({superior} if superior else set())
+            relleno = [p for p in palabras if p not in reservadas][:5]
+            trampa = relleno + [subcolumnas[0], grupos[0]]
+            rnd.shuffle(trampa)
+            lineas.append((p0, unir(idioma, trampa)))
+            lineas += [(p0, linea_fila(idioma, f)) for f in filas]
+            validas = [[p0]] * len(filas)
+        else:
+            con_prosa(rnd, idioma, lineas, [p0 - 1], [])
+            cabecera = lineas_de_cabecera(idioma, superior, grupos, subcolumnas, unidad)
+            n_paginas = 2 if len(filas) >= 6 and rnd.random() < 0.5 else 1
+            cortes = sorted(rnd.sample(range(2, len(filas) - 1), n_paginas - 1)) if n_paginas == 2 else []
+            validas = []
+            inicio = 0
+            for j, fin in enumerate(cortes + [len(filas)]):
+                pagina = p0 + j
+                if rnd.random() < 0.5:
+                    lineas.append((pagina, prosa(rnd, idioma, [])))
+                lineas += [(pagina, texto) for texto in cabecera]
+                for f in filas[inicio:fin]:
+                    lineas.append((pagina, linea_fila(idioma, f)))
+                    validas.append([pagina])
+                inicio = fin
+        con_prosa(rnd, idioma, lineas, [p0 + 3], [])
+        lineas.sort(key=lambda par: par[0])
+        casos.append(caso(f"{tipo}-{idioma}-{i}", tipo, idioma, lineas, columnas, filas, validas))
+    return casos
+
+
 def main():
     destino = sys.argv[1]
     semilla = int(sys.argv[2]) if len(sys.argv) > 2 else 20261111
     casos = generar(random.Random(semilla), 400)
+    # Flujo aparte: los 400 casos anteriores no cambian para una semilla dada
+    casos += generar_multinivel(random.Random(semilla * 7919 + 1), 120, len(casos))
     with open(destino, "w", encoding="utf-8") as f:
         json.dump(casos, f, ensure_ascii=False)
     print(f"{len(casos)} casos, {sum(len(c['filas']) for c in casos)} filas -> {destino}")
