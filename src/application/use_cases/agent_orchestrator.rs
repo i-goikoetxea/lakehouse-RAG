@@ -110,7 +110,7 @@ impl AgentOrchestrator {
             12. REGLA DE AUDITORÍA: Aunque los datos o el texto de una tabla ya figuren en el historial de turnos previos, tienes PROHIBIDO resolver cruces tabulares leyendo del contexto de la conversación. Debes invocar obligatoriamente `lookup_double_entry_table` en el turno actual para garantizar la resolución determinista de Capa 2 y poblar la telemetría del Studio.\n\
             13. Ejes de tabla: si lookup_double_entry_table devuelve ejes_ambiguos, los dos órdenes de valor_x y valor_y dan celdas distintas. Decide qué valor corresponde a cada eje por las unidades o los nombres de los ejes y dilo en la respuesta, nombrando ambos ejes. Si no lo distinguen, muestra ambos valores o pregunta: nunca elijas uno en silencio. Si devuelve orden_invertido_resolveria, comprueba los ejes y, si estaban cambiados, repite la llamada con ese orden; no des un valor sin esa nueva llamada.\n\
             14. Lo que no consta: si las herramientas no devuelven el dato pedido, di que no consta y termina ahí, sin ofrecer valores de referencia, rangos típicos ni cifras de otros documentos o parámetros, salvo que el operador los pida. Si el operador los pide, di que no son datos del centro. Sí debes dar lo preguntado que sí consta, con sus cifras.\n\
-            15. Preguntas que cruzan varias partes: si la pregunta combina dos o más entidades, documentos o condiciones (por ejemplo, varias preguntas seguidas o datos de cosas distintas), lanza una search_normative_context separada para cada parte, con solo los términos de esa parte, en vez de una consulta que las mezcle; si no dependen unas de otras, pídelas juntas en el mismo array tool_calls. Antes de decir que una parte no consta, consulta inspect_lakehouse_catalog para ver qué documentos e idiomas hay y haz una segunda búsqueda abierta, sin doc_id, solo para esa parte (salvo que la pregunta nombre explícitamente un documento o código del catálogo): cambia los términos, usa el idioma del documento o prueba el modo EXACT_BM25. Nunca restrinjas la búsqueda a un documento por su título: un título genérico no dice qué contiene.\n\
+            15. Búsquedas por sujeto. Paso 1: si la pregunta compara, cruza o relaciona dos o más sujetos, documentos o códigos distintos (N ≥ 2), lanza una search_normative_context por cada uno, en paralelo en el mismo array tool_calls, con solo los términos de ese sujeto, en vez de una consulta que los mezcle. Si pregunta por uno o varios atributos de un único sujeto o código (N = 1), haz una sola búsqueda inicial con el código y el concepto juntos. Paso 2: Solo si los fragmentos devueltos no contienen el código o no responden al atributo preguntado, haz una segunda búsqueda abierta, sin doc_id (salvo que la pregunta nombre explícitamente un documento o código del catálogo): con el código aislado, con otros términos, en el idioma del documento o en modo EXACT_BM25. Antes de decir que una parte no consta, consulta inspect_lakehouse_catalog para ver qué documentos e idiomas hay y haz esa segunda búsqueda. Nunca restrinjas la búsqueda a un documento por su título: un título genérico no dice qué contiene.\n\
             16. Idioma de la búsqueda: escribe la consulta con el idioma y los términos técnicos de la pregunta o del documento objetivo; nunca traduzcas la consulta al idioma de estas instrucciones.\n\
             {1}",
             centro_id.as_str(),
@@ -1621,17 +1621,23 @@ mod tests {
             .find(|linea| linea.starts_with("15. "))
             .expect("falta la regla 15");
         for exigido in [
-            "dos o más entidades, documentos o condiciones",
-            "search_normative_context separada para cada parte",
-            "en vez de una consulta que las mezcle",
-            "en el mismo array tool_calls",
+            // Paso 1: varias búsquedas solo con N ≥ 2 sujetos; con N = 1, una sola
+            "compara, cruza o relaciona dos o más sujetos, documentos o códigos distintos (N ≥ 2)",
+            "una search_normative_context por cada uno",
+            "en paralelo en el mismo array tool_calls",
+            "en vez de una consulta que los mezcle",
+            "un único sujeto o código (N = 1)",
+            "una sola búsqueda inicial con el código y el concepto juntos",
+            // Paso 2: la segunda búsqueda es condicional
+            "Solo si los fragmentos devueltos no contienen el código o no responden al atributo preguntado",
+            "segunda búsqueda abierta, sin doc_id",
+            "salvo que la pregunta nombre explícitamente un documento o código del catálogo",
+            "el código aislado",
+            "en el idioma del documento",
+            "EXACT_BM25",
             "Antes de decir que una parte no consta",
             "inspect_lakehouse_catalog",
             "qué documentos e idiomas hay",
-            "segunda búsqueda abierta, sin doc_id",
-            "salvo que la pregunta nombre explícitamente un documento o código del catálogo",
-            "usa el idioma del documento",
-            "EXACT_BM25",
             "Nunca restrinjas la búsqueda a un documento por su título",
         ] {
             assert!(regla.contains(exigido), "{exigido}");
@@ -1639,6 +1645,10 @@ mod tests {
         assert!(
             !regla.contains("restringida con doc_id"),
             "la segunda búsqueda ya no se dirige por doc_id"
+        );
+        assert!(
+            !regla.contains("dos o más entidades, documentos o condiciones"),
+            "dos condiciones de un mismo sujeto ya no justifican búsquedas separadas"
         );
     }
 
