@@ -4,6 +4,7 @@ pub mod agent;
 pub mod centros;
 pub mod ingestion;
 pub mod lakehouse_filas;
+pub mod procedencia;
 pub mod tools;
 
 pub use agent::*;

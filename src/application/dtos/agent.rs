@@ -161,6 +161,8 @@ pub enum EtapaArnes {
     SalidaSegura,
     /// La respuesta se entrega con una nota: la página de algún extracto literal no se confirmó
     VerificacionPagina,
+    /// Microllamada del Nivel 2 del verificador de procedencia (Pieza 4)
+    VerificacionProcedencia,
 }
 
 /// Eventos emitidos durante la ejecución reactiva del agente (para TUI y streaming)
@@ -181,6 +183,9 @@ pub enum AgentExecutionEvent {
         is_error: bool,
     },
     TextDelta(String),
+    /// El texto ya emitido en vivo en este turno no vale (se rechazó o era una llamada): la
+    /// interfaz vacía la burbuja antes del texto nuevo (D4)
+    TextoEnVivoDescartado,
     Completed(String),
 }
 

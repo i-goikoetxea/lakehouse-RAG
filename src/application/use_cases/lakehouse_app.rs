@@ -36,6 +36,7 @@ use crate::application::ports::llm_distiller::LlmDistillerPort;
 use crate::application::ports::model_catalog::ModelCatalogPort;
 use crate::application::ports::reloj::RelojPort;
 use crate::application::ports::tool_server::ToolServerPort;
+use crate::application::ports::verificador_procedencia::VerificadorProcedenciaPort;
 use crate::application::use_cases::agent_orchestrator::{AgentOrchestrator, EventCallback};
 use crate::application::use_cases::document_ingestion_service::{
     DocumentIngestionService, IngestionReport,
@@ -84,6 +85,8 @@ pub struct DependenciasLakehouse {
     pub catalogo_modelos: Arc<dyn ModelCatalogPort>,
     /// Fecha de hoy con la que el arnés ancla las respuestas que la citen
     pub reloj: Arc<dyn RelojPort>,
+    /// Nivel 2 del verificador de procedencia (Pieza 4). `None`: solo el Nivel 1
+    pub verificador_procedencia: Option<Arc<dyn VerificadorProcedenciaPort>>,
 }
 
 /// Resultado de `ingestar`
@@ -182,9 +185,12 @@ pub struct LakehouseApp {
 
 impl LakehouseApp {
     pub fn new(dependencias: DependenciasLakehouse) -> Self {
-        let orquestador =
+        let mut orquestador =
             AgentOrchestrator::new(dependencias.agente, Arc::clone(&dependencias.herramientas))
                 .with_reloj(dependencias.reloj);
+        if let Some(verificador) = dependencias.verificador_procedencia {
+            orquestador = orquestador.with_verificador_procedencia(verificador);
+        }
         Self {
             registro: dependencias.registro,
             espacio: dependencias.espacio,

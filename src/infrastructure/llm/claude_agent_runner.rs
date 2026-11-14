@@ -13,6 +13,9 @@ use tokio::time::timeout;
 use crate::application::dtos::agent::{AgentMessage, AgentTurnOutput, ClaudeModel, TurnoDirigido};
 use crate::application::dtos::tools::{LakehouseToolName, ToolCall, ToolDefinition};
 use crate::application::ports::agent_runner::{AgentRunnerPort, ObservadorTexto};
+use crate::application::use_cases::arnes_turno::llamada_en_crudo::{
+    self, LlamadaEmbebida, llamadas_de_valor,
+};
 use crate::domain::errors::DomainError;
 use crate::infrastructure::llm::ocultar_consola_en_windows;
 use crate::infrastructure::llm::sesion_claude::{MENSAJE_SESION_CLAUDE, es_fallo_de_sesion};
@@ -76,70 +79,21 @@ impl ClaudeAgentRunner {
         }
     }
 
-    /// Intenta parsear si la respuesta del LLM es una solicitud de llamada a herramientas
+    /// Intenta parsear si la respuesta del LLM es una solicitud de llamada a herramientas. Si no
+    /// lo es entera, busca objetos del protocolo dentro de la prosa (SSD de generalidad §3b): uno
+    /// completo se ejecuta y la prosa se descarta; uno truncado llega como mensaje final y lo
+    /// rechaza el guard (`LlamadaEnCrudo`).
     pub fn parsear_salida_claude(stdout: &str) -> AgentTurnOutput {
         let limpio = Self::limpiar_json_markdown(stdout);
-
-        // 1. Intentar parsear como objeto JSON estructurado con "tool_calls" o "type": "tool_use"
-        if let Ok(val) = serde_json::from_str::<Value>(&limpio) {
-            if let Some(tool_calls_arr) = val.get("tool_calls").and_then(|v| v.as_array()) {
-                let mut llamadas = Vec::new();
-                for (idx, tc) in tool_calls_arr.iter().enumerate() {
-                    let name = tc
-                        .get("name")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("")
-                        .to_string();
-                    let id = tc
-                        .get("id")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or(&format!("call_{idx}"))
-                        .to_string();
-                    let arguments = tc
-                        .get("arguments")
-                        .or_else(|| tc.get("input"))
-                        .cloned()
-                        .unwrap_or(Value::Null);
-                    if !name.is_empty() {
-                        llamadas.push(ToolCall {
-                            id,
-                            name,
-                            arguments,
-                        });
-                    }
-                }
-                if !llamadas.is_empty() {
-                    return AgentTurnOutput::ToolCalls(llamadas);
-                }
-            }
-
-            if val.get("type").and_then(|v| v.as_str()) == Some("tool_use") {
-                let name = val
-                    .get("name")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                let id = val
-                    .get("id")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("call_0")
-                    .to_string();
-                let arguments = val
-                    .get("input")
-                    .or_else(|| val.get("arguments"))
-                    .cloned()
-                    .unwrap_or(Value::Null);
-                if !name.is_empty() {
-                    return AgentTurnOutput::ToolCalls(vec![ToolCall {
-                        id,
-                        name,
-                        arguments,
-                    }]);
-                }
+        if let Ok(valor) = serde_json::from_str::<Value>(&limpio) {
+            let llamadas = llamadas_de_valor(&valor);
+            if !llamadas.is_empty() {
+                return AgentTurnOutput::ToolCalls(llamadas);
             }
         }
-
-        // Si no es un bloque de llamadas a herramientas, es el mensaje final
+        if let Some(LlamadaEmbebida::Completa(llamadas)) = llamada_en_crudo::detectar(stdout) {
+            return AgentTurnOutput::ToolCalls(llamadas);
+        }
         AgentTurnOutput::FinalMessage(stdout.trim().to_string())
     }
 
@@ -380,7 +334,7 @@ impl ClaudeAgentRunner {
         args
     }
 
-    async fn ejecutar_cli(
+    pub(crate) async fn ejecutar_cli(
         &self,
         args: Vec<String>,
         entrada: String,
@@ -532,6 +486,35 @@ mod tests {
             }
             _ => panic!("Se esperaba ToolCalls"),
         }
+    }
+
+    #[test]
+    fn test_prosa_con_valla_json_del_protocolo_es_una_llamada() {
+        for prosa in ["Voy a buscarlo.", "Let me check.", "確認します。"] {
+            let raw = format!(
+                "{prosa}
+```json
+{{\"tool_calls\": [{{\"id\": \"c1\", \"name\": \"search_normative_context\", \"arguments\": {{}}}}]}}
+```"
+            );
+            match ClaudeAgentRunner::parsear_salida_claude(&raw) {
+                AgentTurnOutput::ToolCalls(llamadas) => {
+                    assert_eq!(llamadas[0].name, "search_normative_context")
+                }
+                otro => panic!("{prosa}: {otro:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn test_json_truncado_en_la_prosa_llega_como_mensaje_final() {
+        let raw = "Voy a buscarlo.
+```json
+{\"tool_calls\": [{\"name\": \"x\"";
+        assert_eq!(
+            ClaudeAgentRunner::parsear_salida_claude(raw),
+            AgentTurnOutput::FinalMessage(raw.to_string())
+        );
     }
 
     #[test]

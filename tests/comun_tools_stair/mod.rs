@@ -205,6 +205,7 @@ fn construir(raiz: tempfile::TempDir, config: ConfiguracionHerramientas) -> Ento
         herramientas: herramientas.clone(),
         catalogo_modelos: Arc::new(CatalogoVacio),
         reloj: Arc::new(RelojDelSistema),
+        verificador_procedencia: None,
     });
     EntornoStair {
         raiz,

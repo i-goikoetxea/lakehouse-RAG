@@ -105,6 +105,7 @@ pub fn construir_app(
         herramientas: herramientas.clone(),
         catalogo_modelos: Arc::new(CatalogoVacio),
         reloj: Arc::new(RelojDelSistema),
+        verificador_procedencia: None,
     });
     (app, herramientas)
 }

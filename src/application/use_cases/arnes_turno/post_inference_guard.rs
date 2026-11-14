@@ -8,6 +8,11 @@ use serde_json::Value;
 
 use super::cifras::{extraer_cifras, lecturas_de_fuente};
 use super::intent_detector::IntencionTurno;
+use super::llamada_en_crudo;
+use super::procedencia::{CifraPendiente, MAXIMO_CIFRAS_PENDIENTES};
+use super::procedencia_determinista::{
+    ContextoProcedencia, RespuestaAnalizada, es_derivada, es_referencia_estructural,
+};
 use super::texto_normalizado::plegar_texto;
 use super::verificador_paginas::{textos_de_metadatos, textos_marcables};
 use crate::application::dtos::tools::{LakehouseToolName, ToolResult};
@@ -50,26 +55,6 @@ const LOCUCIONES_DE_ABSTENCION: &[&str] = &[
     "sin coincidencia",
     "sin datos",
 ];
-const PETICIONES_DE_REFERENCIA: &[&str] = &[
-    "valor de referencia",
-    "valores de referencia",
-    "cifra de referencia",
-    "cifras de referencia",
-    "como referencia",
-    "a modo de referencia",
-    "orientativo",
-    "orientativa",
-    "orientativos",
-    "orientativas",
-    "aproximado",
-    "aproximada",
-    "aproximados",
-    "aproximadas",
-    "valor tipico",
-    "valores tipicos",
-    "valor habitual",
-    "valores habituales",
-];
 /// Valor de `origen_responsable` que la regla 9 del prompt lee como «no consta».
 const IDENTIFICADORES_DE_ABSTENCION: &[(&str, &str)] = &[("no_consta", "no consta")];
 /// Tools cuyos campos `texto` llevan marcas de página
@@ -105,6 +90,11 @@ impl RegistroTurno {
 
     pub fn registrar(&mut self, resultado: ToolResult) {
         self.resultados.push(resultado);
+    }
+
+    /// Todas las salidas del turno, también las de error
+    pub fn resultados(&self) -> &[ToolResult] {
+        &self.resultados
     }
 
     /// Un error o un `sin_coincidencia` cuentan: se exige haberlo intentado, no haber acertado.
@@ -151,10 +141,16 @@ fn es_matriz_sin_responsable(resultado: &ToolResult) -> bool {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ViolacionArnes {
     CapaDosNoIntentada,
-    CifraSinAnclar { cifra: String },
+    CifraSinAnclar {
+        cifra: String,
+    },
     RolSinRespaldo,
     EjesAmbiguosSinAclarar,
-    CifraEnAbstencion { cifra: String },
+    CifraEnAbstencion {
+        cifra: String,
+    },
+    /// La respuesta lleva, en la prosa, un JSON con las claves del protocolo de herramientas
+    LlamadaEnCrudo,
 }
 
 impl ViolacionArnes {
@@ -176,6 +172,9 @@ impl ViolacionArnes {
             Self::CifraEnAbstencion { cifra } => format!(
                 "la respuesta declara que algo no consta y añade «{cifra}», que no aparece en la pregunta ni en ninguna salida de herramienta de este turno: di que no consta, sin ofrecer valores de referencia"
             ),
+            Self::LlamadaEnCrudo => {
+                "la respuesta mezcla texto con un JSON del protocolo de herramientas: responde solo con el JSON del protocolo o solo con texto".to_string()
+            }
         }
     }
 }
@@ -189,6 +188,21 @@ impl PostInferenceGuard {
         intencion: &IntencionTurno,
         registro: &RegistroTurno,
     ) -> Result<(), ViolacionArnes> {
+        Self::validar_con_verificadas(respuesta, pregunta, intencion, registro, &HashSet::new())
+    }
+
+    /// Como `validar`, dando por buenas las cifras cuya traza del Nivel 2 comprobó Rust
+    pub fn validar_con_verificadas(
+        respuesta: &str,
+        pregunta: &str,
+        intencion: &IntencionTurno,
+        registro: &RegistroTurno,
+        verificadas: &HashSet<String>,
+    ) -> Result<(), ViolacionArnes> {
+        // Antes del cortocircuito de `Ninguna`: el protocolo en crudo nunca llega al operador
+        if llamada_en_crudo::detectar(respuesta).is_some() {
+            return Err(ViolacionArnes::LlamadaEnCrudo);
+        }
         if *intencion == IntencionTurno::Ninguna {
             return Ok(());
         }
@@ -196,13 +210,35 @@ impl PostInferenceGuard {
         if herramientas.is_some_and(|exigidas| !registro.intento_alguna(exigidas)) {
             return Err(ViolacionArnes::CapaDosNoIntentada);
         }
-        comprobar_abstencion_sin_cifras_ajenas(respuesta, pregunta, registro)?;
+        comprobar_abstencion_sin_cifras_ajenas(respuesta, pregunta, registro, verificadas)?;
         if herramientas.is_none() {
             return Ok(());
         }
         comprobar_respaldo_de_rol(respuesta, registro)?;
-        comprobar_cifras_ancladas(respuesta, pregunta, registro)?;
+        comprobar_cifras_ancladas(respuesta, pregunta, registro, verificadas)?;
         comprobar_ejes_aclarados(respuesta, registro)
+    }
+
+    /// Cifras que el Nivel 2 podría rescatar: las que hoy causan `CifraEnAbstencion` o
+    /// `CifraSinAnclar`, con el modo de cada una. Vacío si la respuesta no tiene ese defecto.
+    pub fn cifras_pendientes(
+        respuesta: &str,
+        pregunta: &str,
+        intencion: &IntencionTurno,
+        registro: &RegistroTurno,
+    ) -> Vec<CifraPendiente> {
+        if *intencion == IntencionTurno::Ninguna || llamada_en_crudo::detectar(respuesta).is_some()
+        {
+            return Vec::new();
+        }
+        let ninguna = HashSet::new();
+        if contiene_locucion(respuesta, LOCUCIONES_DE_ABSTENCION) {
+            return cifras_sin_resolver(respuesta, pregunta, registro, true, &ninguna);
+        }
+        if herramientas_de_capa_dos(intencion).is_some() {
+            return cifras_sin_resolver(respuesta, pregunta, registro, false, &ninguna);
+        }
+        Vec::new()
     }
 }
 
@@ -224,29 +260,116 @@ fn comprobar_cifras_ancladas(
     respuesta: &str,
     pregunta: &str,
     registro: &RegistroTurno,
+    verificadas: &HashSet<String>,
 ) -> Result<(), ViolacionArnes> {
-    match primera_cifra_sin_anclar(respuesta, pregunta, registro) {
+    match primera(cifras_sin_resolver(
+        respuesta,
+        pregunta,
+        registro,
+        false,
+        verificadas,
+    )) {
         Some(cifra) => Err(ViolacionArnes::CifraSinAnclar { cifra }),
         None => Ok(()),
     }
 }
 
-/// Las cifras ancladas pasan aunque sean de otra entidad: es lo que permite la respuesta parcial,
-/// y distinguir de quién es cada cifra no se puede hacer con reglas (SSD §3.3).
+/// Las cifras ancladas literalmente pasan aunque sean de otra entidad: es lo que permite la
+/// respuesta parcial (SSD §3.3). Pedir un valor de referencia ya no autoriza una cifra (D5).
 fn comprobar_abstencion_sin_cifras_ajenas(
     respuesta: &str,
     pregunta: &str,
     registro: &RegistroTurno,
+    verificadas: &HashSet<String>,
 ) -> Result<(), ViolacionArnes> {
-    if !contiene_locucion(respuesta, LOCUCIONES_DE_ABSTENCION)
-        || contiene_locucion(pregunta, PETICIONES_DE_REFERENCIA)
-    {
+    if !contiene_locucion(respuesta, LOCUCIONES_DE_ABSTENCION) {
         return Ok(());
     }
-    match primera_cifra_sin_anclar(respuesta, pregunta, registro) {
+    match primera(cifras_sin_resolver(
+        respuesta,
+        pregunta,
+        registro,
+        true,
+        verificadas,
+    )) {
         Some(cifra) => Err(ViolacionArnes::CifraEnAbstencion { cifra }),
         None => Ok(()),
     }
+}
+
+fn primera(pendientes: Vec<CifraPendiente>) -> Option<String> {
+    pendientes.into_iter().next().map(|pendiente| {
+        pendiente
+            .literal
+            .chars()
+            .take(LONGITUD_MAXIMA_CIFRA_INFORMADA)
+            .collect()
+    })
+}
+
+/// Cifras de la respuesta sin procedencia: ni ancladas literalmente, ni verificadas por el Nivel
+/// 2, ni rescatadas por el Nivel 1 (referencia estructural o clausura aritmética).
+///
+/// En una abstención, la salvaguarda (b) es estricta (solo referencias estructurales) si todas
+/// las tools volvieron vacías, si la primera oración declara la ausencia o si la cifra está en la
+/// oración de la locución. Una cita en esa oración no respalda una derivación.
+fn cifras_sin_resolver(
+    respuesta: &str,
+    pregunta: &str,
+    registro: &RegistroTurno,
+    en_abstencion: bool,
+    verificadas: &HashSet<String>,
+) -> Vec<CifraPendiente> {
+    let anclas = lecturas_ancladas(pregunta, registro);
+    let analizada = RespuestaAnalizada::nueva(respuesta);
+    let sin_anclar: Vec<usize> = (0..analizada.cifras.len())
+        .filter(|i| {
+            let cifra = &analizada.cifras[*i];
+            !cifra.lecturas.iter().any(|l| anclas.contains(l))
+                && !verificadas.contains(&cifra.literal)
+        })
+        .collect();
+    if sin_anclar.is_empty() {
+        return Vec::new();
+    }
+    let contexto = ContextoProcedencia::desde(registro.resultados());
+    let con_locucion: Vec<bool> = if en_abstencion {
+        analizada
+            .oraciones()
+            .map(|oracion| contiene_locucion(&oracion, LOCUCIONES_DE_ABSTENCION))
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let en_oracion_de_locucion =
+        |posicion: usize| con_locucion.get(analizada.oracion_de(posicion)) == Some(&true);
+    let estricta_global =
+        en_abstencion && (contexto.sin_operandos() || con_locucion.first() == Some(&true));
+    sin_anclar
+        .into_iter()
+        .enumerate()
+        .filter_map(|(orden, indice)| {
+            let cifra = &analizada.cifras[indice];
+            let estricta = estricta_global || en_oracion_de_locucion(cifra.posicion);
+            // Más allá de la cota, la cifra queda pendiente sin examinar (coste acotado)
+            if orden >= MAXIMO_CIFRAS_PENDIENTES {
+                return Some(CifraPendiente {
+                    literal: cifra.literal.clone(),
+                    solo_estructural: estricta,
+                });
+            }
+            if es_referencia_estructural(&analizada, indice, &contexto) {
+                return None;
+            }
+            if !estricta && es_derivada(&analizada, indice, &contexto, en_oracion_de_locucion) {
+                return None;
+            }
+            Some(CifraPendiente {
+                literal: cifra.literal.clone(),
+                solo_estructural: estricta,
+            })
+        })
+        .collect()
 }
 
 /// Por palabras completas: da igual cómo se separen y `noconsta` no cuenta. Un identificador con
@@ -271,24 +394,6 @@ fn palabras_con_identificadores(plegado: &str) -> Vec<String> {
                 .to_string()
         })
         .collect()
-}
-
-fn primera_cifra_sin_anclar(
-    respuesta: &str,
-    pregunta: &str,
-    registro: &RegistroTurno,
-) -> Option<String> {
-    let anclas = lecturas_ancladas(pregunta, registro);
-    extraer_cifras(respuesta)
-        .into_iter()
-        .find(|cifra| !cifra.lecturas.iter().any(|l| anclas.contains(l)))
-        .map(|cifra| {
-            cifra
-                .literal
-                .chars()
-                .take(LONGITUD_MAXIMA_CIFRA_INFORMADA)
-                .collect()
-        })
 }
 
 fn lecturas_ancladas(pregunta: &str, registro: &RegistroTurno) -> HashSet<String> {
@@ -555,6 +660,45 @@ mod tests {
     }
 
     #[test]
+    fn test_llamada_en_crudo_se_rechaza_en_cualquier_intencion() {
+        let truncada =
+            "Voy a buscarlo.\n```json\n{\"tool_calls\": [{\"name\": \"search_normative_context\"";
+        let completa =
+            "Primero: {\"tool_calls\": [{\"id\": \"a\", \"name\": \"x\", \"arguments\": {}}]}";
+        for respuesta in [truncada, completa] {
+            for intencion in [
+                IntencionTurno::Ninguna,
+                IntencionTurno::DatoConcreto,
+                cruzable(),
+            ] {
+                assert_eq!(
+                    PostInferenceGuard::validar(
+                        respuesta,
+                        "¿Qué es?",
+                        &intencion,
+                        &lookup_resuelto()
+                    ),
+                    Err(ViolacionArnes::LlamadaEnCrudo),
+                    "{intencion:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_json_de_ejemplo_sin_claves_del_protocolo_no_es_llamada_en_crudo() {
+        assert_eq!(
+            PostInferenceGuard::validar(
+                "Ejemplo:\n```json\n{\"umbral\": 30}\n```",
+                "¿Qué es?",
+                &IntencionTurno::Ninguna,
+                &RegistroTurno::default()
+            ),
+            Ok(())
+        );
+    }
+
+    #[test]
     fn test_turno_sin_intencion_no_se_valida() {
         assert_eq!(
             PostInferenceGuard::validar(
@@ -773,6 +917,20 @@ mod tests {
             }] }] }),
             false,
         )
+    }
+
+    fn primera_cifra_sin_anclar(
+        respuesta: &str,
+        pregunta: &str,
+        registro: &RegistroTurno,
+    ) -> Option<String> {
+        primera(cifras_sin_resolver(
+            respuesta,
+            pregunta,
+            registro,
+            false,
+            &HashSet::new(),
+        ))
     }
 
     #[test]
@@ -1122,7 +1280,9 @@ mod tests {
     }
 
     #[test]
-    fn test_si_el_operador_pide_referencias_la_abstencion_puede_llevar_cifras() {
+    /// D5: pedir un «valor de referencia» que el documento no contiene ya no autoriza una cifra
+    /// de memoria. Antes este test esperaba `Ok(())`.
+    fn test_pedir_referencias_ya_no_autoriza_cifras_en_la_abstencion() {
         for pregunta in [
             "¿Qué presión tiene la línea L-999? Si no consta, dame un valor de referencia",
             "¿Qué presión tiene? Dame VALORES DE REFERENCIA",
@@ -1137,7 +1297,7 @@ mod tests {
                     &IntencionTurno::DatoConcreto,
                     &busqueda("")
                 ),
-                Ok(()),
+                abstencion_con("7,5"),
                 "{pregunta}"
             );
         }
@@ -1181,6 +1341,7 @@ mod tests {
     }
 
     #[test]
+    /// D5: sin la exención, la abstención se juzga primero (antes, `CifraSinAnclar`)
     fn test_referencia_pedida_no_exime_del_anclaje_en_un_turno_tabular() {
         assert_eq!(
             PostInferenceGuard::validar(
@@ -1189,9 +1350,7 @@ mod tests {
                 &cruzable(),
                 &lookup_resuelto()
             ),
-            Err(ViolacionArnes::CifraSinAnclar {
-                cifra: "180".to_string()
-            })
+            abstencion_con("180")
         );
     }
 

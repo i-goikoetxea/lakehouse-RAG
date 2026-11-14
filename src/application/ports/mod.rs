@@ -13,6 +13,7 @@ pub mod model_catalog;
 pub mod reloj;
 pub mod semantic_index;
 pub mod tool_server;
+pub mod verificador_procedencia;
 
 pub use agent_runner::*;
 pub use model_catalog::*;

@@ -7,6 +7,8 @@ use super::fechas::{FechaHallada, fecha_iso_en, fecha_textual_en};
 pub(super) struct CifraHallada {
     pub literal: String,
     pub lecturas: Vec<String>,
+    /// Inicio de la cifra en el texto, en caracteres
+    pub posicion: usize,
 }
 
 /// Unidades que pueden ir pegadas a una cifra: `30mm` es una cifra y `3D` no.
@@ -39,6 +41,7 @@ pub(super) fn extraer_cifras(texto: &str) -> Vec<CifraHallada> {
             cifras.push(CifraHallada {
                 literal: letras[posicion..fecha.fin].iter().collect(),
                 lecturas: vec![fecha.iso],
+                posicion,
             });
             posicion = fecha.fin;
             continue;
@@ -47,7 +50,7 @@ pub(super) fn extraer_cifras(texto: &str) -> Vec<CifraHallada> {
         let fin_sufijo = fin_de_sufijo(&letras, fin_numero);
         if es_cifra(&letras, posicion, fin_numero, fin_sufijo) {
             let cuerpo = cuerpo_de_numero(&letras[posicion..fin_numero]);
-            if let Some(cifra) = interpretar(&cuerpo, tiene_signo(&letras, posicion)) {
+            if let Some(cifra) = interpretar(&cuerpo, tiene_signo(&letras, posicion), posicion) {
                 cifras.push(cifra);
             }
         }
@@ -250,11 +253,12 @@ fn tiene_signo(letras: &[char], inicio: usize) -> bool {
             .is_none_or(|i| !es_parte_de_identificador(letras[i]))
 }
 
-fn interpretar(cuerpo: &str, negativa: bool) -> Option<CifraHallada> {
+fn interpretar(cuerpo: &str, negativa: bool, posicion: usize) -> Option<CifraHallada> {
     let signo = if negativa { "-" } else { "" };
     Some(CifraHallada {
         literal: format!("{signo}{cuerpo}"),
         lecturas: con_signo(lecturas_de_magnitud(cuerpo)?, negativa),
+        posicion,
     })
 }
 

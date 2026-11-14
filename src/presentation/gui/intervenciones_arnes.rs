@@ -33,6 +33,9 @@ pub fn explicar_intervencion(etapa: EtapaArnes, motivo: &str) -> String {
         EtapaArnes::VerificacionPagina => {
             "Se comprobó la página de las citas literales y alguna no coincide con el documento: el detalle está al final de la respuesta.".to_string()
         }
+        EtapaArnes::VerificacionProcedencia => {
+            "Se comprobó de dónde salen las cifras calculadas o citadas que no aparecen tal cual en los datos consultados.".to_string()
+        }
     }
 }
 
@@ -48,6 +51,8 @@ fn causa_del_rechazo(motivo: &str) -> &'static str {
         "nombraba un responsable que no consta en los datos consultados"
     } else if motivo.contains("ejes_ambiguos") {
         "daba un único valor de la tabla sin aclarar a qué eje corresponde cada dato"
+    } else if motivo.contains("JSON del protocolo") {
+        "mezclaba la respuesta con una petición interna de consulta"
     } else {
         "no coincidía con los datos consultados"
     }
@@ -80,6 +85,7 @@ mod tests {
             ViolacionArnes::CifraEnAbstencion {
                 cifra: "999".to_string(),
             },
+            ViolacionArnes::LlamadaEnCrudo,
         ]
     }
 

@@ -2,18 +2,24 @@
 
 use std::borrow::Cow;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::application::dtos::agent::{
     AgentExecutionEvent, AgentMessage, AgentRole, AgentTurnOutput, ClaudeModel, EtapaArnes,
     TurnoDirigido,
 };
+use crate::application::dtos::procedencia::SolicitudProcedencia;
 use crate::application::dtos::tools::{LakehouseToolName, ToolDefinition};
 use crate::application::ports::agent_runner::{AgentRunnerPort, ObservadorTexto};
 use crate::application::ports::reloj::RelojPort;
 use crate::application::ports::tool_server::ToolServerPort;
+use crate::application::ports::verificador_procedencia::VerificadorProcedenciaPort;
+use crate::application::use_cases::arnes_turno::procedencia::{
+    MAXIMO_CIFRAS_PENDIENTES, cifras_verificadas, salidas_del_turno,
+};
 use crate::application::use_cases::arnes_turno::{
-    CitaRevisada, EleccionHerramienta, IntentDetector, PostInferenceGuard, PreInferenceInterceptor,
-    RegistroTurno, VerificadorPaginas, ViolacionArnes,
+    CitaRevisada, EleccionHerramienta, IntencionTurno, IntentDetector, PostInferenceGuard,
+    PreInferenceInterceptor, RegistroTurno, VerificadorPaginas, ViolacionArnes,
 };
 use crate::domain::errors::DomainError;
 use crate::domain::models::center::CenterId;
@@ -31,6 +37,8 @@ pub struct AgentOrchestrator {
     max_steps: usize,
     /// Sin reloj, el guard no ancla la fecha de hoy
     reloj: Option<Arc<dyn RelojPort>>,
+    /// Nivel 2 del verificador de procedencia. Sin él, el comportamiento es el del Nivel 1
+    verificador: Option<Arc<dyn VerificadorProcedenciaPort>>,
 }
 
 /// Tablas v2 que `execute_athena_sql` acepta por su nombre canónico (esquema §4)
@@ -45,6 +53,7 @@ impl AgentOrchestrator {
             tools,
             max_steps: Self::DEFAULT_MAX_STEPS,
             reloj: None,
+            verificador: None,
         }
     }
 
@@ -55,6 +64,14 @@ impl AgentOrchestrator {
 
     pub fn with_reloj(mut self, reloj: Arc<dyn RelojPort>) -> Self {
         self.reloj = Some(reloj);
+        self
+    }
+
+    pub fn with_verificador_procedencia(
+        mut self,
+        verificador: Arc<dyn VerificadorProcedenciaPort>,
+    ) -> Self {
+        self.verificador = Some(verificador);
         self
     }
 
@@ -123,6 +140,7 @@ impl AgentOrchestrator {
         while paso < self.max_steps {
             paso += 1;
 
+            let emitido_en_vivo = Arc::new(AtomicBool::new(false));
             let turn_output = match std::mem::replace(&mut eleccion, EleccionHerramienta::Libre) {
                 EleccionHerramienta::Dirigida(dirigida) => {
                     self.paso_dirigido(
@@ -144,18 +162,30 @@ impl AgentOrchestrator {
                         &herramientas_disponibles,
                         &on_event,
                         plan.retener_texto,
+                        &emitido_en_vivo,
                     )
                     .await?
+                }
+            };
+            let descartar_en_vivo = || {
+                if emitido_en_vivo.load(Ordering::SeqCst)
+                    && let Some(cb) = &on_event
+                {
+                    cb(AgentExecutionEvent::TextoEnVivoDescartado);
                 }
             };
 
             match turn_output {
                 AgentTurnOutput::FinalMessage(candidata) => {
-                    let respuesta = match PostInferenceGuard::validar(
-                        &candidata, &pregunta, &intencion, &registro,
-                    ) {
-                        Ok(()) => candidata,
+                    let veredicto = self
+                        .validar_con_procedencia(
+                            &candidata, &pregunta, &intencion, &registro, &on_event,
+                        )
+                        .await;
+                    let (respuesta, reemplazada) = match veredicto {
+                        Ok(()) => (candidata, false),
                         Err(violacion) if recordatorio.is_none() => {
+                            descartar_en_vivo();
                             notificar_arnes(&on_event, EtapaArnes::Reintento, violacion.motivo());
                             recordatorio =
                                 Some(RecordatorioReintento::nuevo(historial.len(), &violacion));
@@ -167,13 +197,17 @@ impl AgentOrchestrator {
                                 EtapaArnes::SalidaSegura,
                                 violacion.motivo(),
                             );
-                            MENSAJE_RESPUESTA_NO_VALIDADA.to_string()
+                            (MENSAJE_RESPUESTA_NO_VALIDADA.to_string(), true)
                         }
                     };
                     let nota = nota_de_paginas(&respuesta, &registro, &on_event);
                     let respuesta = respuesta + nota.as_deref().unwrap_or_default();
                     if let Some(cb) = &on_event {
                         if plan.retener_texto {
+                            cb(AgentExecutionEvent::TextDelta(respuesta.clone()));
+                        } else if reemplazada {
+                            // Lo emitido en vivo no vale: se vacía y se emite el mensaje fijo
+                            descartar_en_vivo();
                             cb(AgentExecutionEvent::TextDelta(respuesta.clone()));
                         } else if let Some(nota) = nota {
                             // El texto del modelo ya se emitió en vivo: la nota es un fragmento más
@@ -185,6 +219,8 @@ impl AgentOrchestrator {
                     return Ok(respuesta);
                 }
                 AgentTurnOutput::ToolCalls(calls) => {
+                    // Prosa seguida de una llamada embebida: lo mostrado no era la respuesta
+                    descartar_en_vivo();
                     if calls.is_empty() {
                         return Err(DomainError::AgentError(
                             "El modelo emitió un turno de herramientas sin ninguna llamada"
@@ -229,6 +265,70 @@ impl AgentOrchestrator {
         )))
     }
 
+    /// Guard con el Nivel 2 de procedencia: si solo fallan cifras sin anclar, una microllamada
+    /// propone trazas y Rust las comprueba. Un error o un timeout del verificador dejan la
+    /// violación de hoy (falla cerrada).
+    async fn validar_con_procedencia(
+        &self,
+        candidata: &str,
+        pregunta: &str,
+        intencion: &IntencionTurno,
+        registro: &RegistroTurno,
+        on_event: &Option<EventCallback>,
+    ) -> Result<(), ViolacionArnes> {
+        let violacion = match PostInferenceGuard::validar(candidata, pregunta, intencion, registro)
+        {
+            Ok(()) => return Ok(()),
+            Err(violacion) => violacion,
+        };
+        let es_de_cifras = matches!(
+            violacion,
+            ViolacionArnes::CifraSinAnclar { .. } | ViolacionArnes::CifraEnAbstencion { .. }
+        );
+        let Some(verificador) = self.verificador.as_ref().filter(|_| es_de_cifras) else {
+            return Err(violacion);
+        };
+        let pendientes =
+            PostInferenceGuard::cifras_pendientes(candidata, pregunta, intencion, registro);
+        // Sin pendientes o con más de la cota (las sobrantes no se examinan): sin microllamada
+        if pendientes.is_empty() || pendientes.len() > MAXIMO_CIFRAS_PENDIENTES {
+            return Err(violacion);
+        }
+        let solicitud = SolicitudProcedencia {
+            pregunta: pregunta.to_string(),
+            salidas: salidas_del_turno(registro.resultados()),
+            borrador: candidata.to_string(),
+            cifras: pendientes.iter().map(|p| p.literal.clone()).collect(),
+        };
+        let verificadas = match verificador.proponer_trazas(&solicitud).await {
+            Ok(trazas) => cifras_verificadas(&solicitud, &pendientes, &trazas),
+            Err(error) => {
+                notificar_arnes(
+                    on_event,
+                    EtapaArnes::VerificacionProcedencia,
+                    format!("sin trazas de procedencia: {error}"),
+                );
+                return Err(violacion);
+            }
+        };
+        notificar_arnes(
+            on_event,
+            EtapaArnes::VerificacionProcedencia,
+            format!(
+                "{} de {} cifras con procedencia comprobada",
+                verificadas.len(),
+                pendientes.len()
+            ),
+        );
+        PostInferenceGuard::validar_con_verificadas(
+            candidata,
+            pregunta,
+            intencion,
+            registro,
+            &verificadas,
+        )
+    }
+
     /// Sin llamada, el texto del modelo se descarta: el mensaje vacío lo juzga el guard
     /// (`CapaDosNoIntentada`), que aplica el mismo reintento único que a cualquier respuesta.
     async fn paso_dirigido(
@@ -263,6 +363,7 @@ impl AgentOrchestrator {
     }
 
     /// Un turno retenido no pasa observador: ningún fragmento sale antes de validar la respuesta
+    #[allow(clippy::too_many_arguments)]
     async fn paso_libre(
         &self,
         modelo: &ClaudeModel,
@@ -271,11 +372,14 @@ impl AgentOrchestrator {
         herramientas: &[ToolDefinition],
         on_event: &Option<EventCallback>,
         retener_texto: bool,
+        emitido_en_vivo: &Arc<AtomicBool>,
     ) -> Result<AgentTurnOutput, DomainError> {
         match on_event {
             Some(cb) if !retener_texto => {
                 let cb = Arc::clone(cb);
+                let emitido = Arc::clone(emitido_en_vivo);
                 let observador: ObservadorTexto = Arc::new(move |fragmento: &str| {
+                    emitido.store(true, Ordering::SeqCst);
                     cb(AgentExecutionEvent::TextDelta(fragmento.to_string()))
                 });
                 self.runner
@@ -1113,6 +1217,289 @@ mod tests {
         assert!(etapas(&eventos).is_empty());
     }
 
+    // --- Pieza 4, Nivel 2: verificador de procedencia falso ---
+
+    use crate::application::dtos::procedencia::{Literal, TipoTraza, Traza, TrazasPropuestas};
+
+    struct VerificadorFalso {
+        respuesta: Result<TrazasPropuestas, DomainError>,
+        llamadas: Mutex<usize>,
+    }
+
+    #[async_trait]
+    impl VerificadorProcedenciaPort for VerificadorFalso {
+        async fn proponer_trazas(
+            &self,
+            _solicitud: &SolicitudProcedencia,
+        ) -> Result<TrazasPropuestas, DomainError> {
+            *self.llamadas.lock().unwrap() += 1;
+            self.respuesta.clone()
+        }
+    }
+
+    fn conteo(cifra: &str, elementos: &[&str]) -> TrazasPropuestas {
+        TrazasPropuestas {
+            trazas: vec![Traza {
+                cifra: cifra.into(),
+                tipo: TipoTraza::ConteoElementos {
+                    elementos: elementos
+                        .iter()
+                        .map(|e| Literal {
+                            origen: "t0".into(),
+                            texto: e.to_string(),
+                        })
+                        .collect(),
+                },
+            }],
+        }
+    }
+
+    const EQUIPOS: &str = "Requisitos de la línea: casco, guantes y gafas.";
+
+    async fn turno_con_verificador(
+        respuestas: Vec<AgentTurnOutput>,
+        verificador: Arc<VerificadorFalso>,
+    ) -> (Result<String, DomainError>, Vec<AgentExecutionEvent>) {
+        let mut guion = vec![AgentTurnOutput::ToolCalls(vec![llamada_lookup()])];
+        guion.extend(respuestas);
+        let orquestador = AgentOrchestrator::new(
+            RunnerDelArnes::con_guion(vec![], guion),
+            Arc::new(ToolsConSalida {
+                salida: json!({ "estado": "resuelto", "texto": EQUIPOS, "valor_resultado_texto": "125" }),
+            }),
+        )
+        .with_verificador_procedencia(verificador);
+        let eventos: Eventos = Arc::default();
+        let destino = eventos.clone();
+        let mut historial = vec![AgentMessage::user(DATO_CONCRETO)];
+        let resultado = orquestador
+            .procesar_turno(
+                &ClaudeModel::new("haiku").unwrap(),
+                &CenterId::new("planta_1").unwrap(),
+                &mut historial,
+                Some(Arc::new(move |e| destino.lock().unwrap().push(e))),
+            )
+            .await;
+        let eventos = eventos.lock().unwrap().clone();
+        (resultado, eventos)
+    }
+
+    fn verificador(respuesta: Result<TrazasPropuestas, DomainError>) -> Arc<VerificadorFalso> {
+        Arc::new(VerificadorFalso {
+            respuesta,
+            llamadas: Mutex::new(0),
+        })
+    }
+
+    #[tokio::test]
+    async fn test_traza_comprobada_por_rust_entrega_sin_reintento() {
+        let falso = verificador(Ok(conteo("3", &["casco", "guantes", "gafas"])));
+        let (respuesta, eventos) = turno_con_verificador(
+            vec![libre_final("Se exigen 3 equipos. La presión no consta.")],
+            falso.clone(),
+        )
+        .await;
+        assert_eq!(
+            respuesta.unwrap(),
+            "Se exigen 3 equipos. La presión no consta."
+        );
+        assert_eq!(etapas(&eventos), vec![EtapaArnes::VerificacionProcedencia]);
+        assert_eq!(*falso.llamadas.lock().unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_traza_inventada_se_rechaza_y_hay_reintento() {
+        let falso = verificador(Ok(conteo("4", &["casco", "guantes", "gafas", "botas"])));
+        let (respuesta, eventos) = turno_con_verificador(
+            vec![
+                libre_final("Se exigen 4 equipos. La presión no consta."),
+                libre_final("La presión no consta."),
+            ],
+            falso,
+        )
+        .await;
+        assert_eq!(respuesta.unwrap(), "La presión no consta.");
+        assert_eq!(
+            etapas(&eventos),
+            vec![EtapaArnes::VerificacionProcedencia, EtapaArnes::Reintento]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_error_del_verificador_deja_el_comportamiento_de_hoy() {
+        let falso = verificador(Err(DomainError::AgentError("timeout".into())));
+        let (respuesta, eventos) = turno_con_verificador(
+            vec![
+                libre_final("Se exigen 3 equipos. La presión no consta."),
+                libre_final("La presión no consta."),
+            ],
+            falso,
+        )
+        .await;
+        assert_eq!(respuesta.unwrap(), "La presión no consta.");
+        assert!(etapas(&eventos).contains(&EtapaArnes::Reintento));
+    }
+
+    #[tokio::test]
+    async fn test_respuesta_anclada_no_llama_al_verificador() {
+        let falso = verificador(Ok(TrazasPropuestas::default()));
+        let (respuesta, eventos) = turno_con_verificador(
+            vec![libre_final("Son 125 °C; la presión no consta.")],
+            falso.clone(),
+        )
+        .await;
+        assert_eq!(respuesta.unwrap(), "Son 125 °C; la presión no consta.");
+        assert!(etapas(&eventos).is_empty());
+        assert_eq!(*falso.llamadas.lock().unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_en_abstencion_estricta_el_conteo_no_vale() {
+        let falso = verificador(Ok(conteo("3", &["casco", "guantes", "gafas"])));
+        let (respuesta, _) = turno_con_verificador(
+            vec![
+                libre_final("La presión no consta. Se exigen 3 equipos."),
+                libre_final("La presión no consta."),
+            ],
+            falso,
+        )
+        .await;
+        assert_eq!(respuesta.unwrap(), "La presión no consta.");
+    }
+
+    #[tokio::test]
+    async fn test_mas_cifras_pendientes_que_la_cota_no_llama_al_verificador() {
+        let falso = verificador(Ok(conteo("3", &["casco", "guantes", "gafas"])));
+        let cifras: String = (0..=MAXIMO_CIFRAS_PENDIENTES)
+            .map(|i| format!("{} ", 900 + i))
+            .collect();
+        let (respuesta, _) = turno_con_verificador(
+            vec![
+                libre_final(&format!("Se exigen {cifras}equipos. La presión no consta.")),
+                libre_final("La presión no consta."),
+            ],
+            falso.clone(),
+        )
+        .await;
+        assert_eq!(respuesta.unwrap(), "La presión no consta.");
+        assert_eq!(*falso.llamadas.lock().unwrap(), 0);
+    }
+
+    // --- Pieza 3b y D4: texto en vivo descartado ---
+
+    /// Emite en vivo la prosa de cada paso y devuelve su salida
+    struct RunnerProsaEnVivo {
+        pasos: Mutex<Vec<(String, AgentTurnOutput)>>,
+    }
+
+    #[async_trait]
+    impl AgentRunnerPort for RunnerProsaEnVivo {
+        async fn ejecutar_turno(
+            &self,
+            _modelo: &ClaudeModel,
+            _system_prompt: &str,
+            _historial: &[AgentMessage],
+            _herramientas: &[ToolDefinition],
+        ) -> Result<AgentTurnOutput, DomainError> {
+            Ok(self.pasos.lock().unwrap().remove(0).1)
+        }
+
+        async fn ejecutar_turno_en_vivo(
+            &self,
+            _modelo: &ClaudeModel,
+            _system_prompt: &str,
+            _historial: &[AgentMessage],
+            _herramientas: &[ToolDefinition],
+            observador: ObservadorTexto,
+        ) -> Result<AgentTurnOutput, DomainError> {
+            let (prosa, salida) = self.pasos.lock().unwrap().remove(0);
+            observador(&prosa);
+            Ok(salida)
+        }
+    }
+
+    async fn turno_en_vivo(pasos: Vec<(&str, AgentTurnOutput)>) -> Vec<AgentExecutionEvent> {
+        let runner = RunnerProsaEnVivo {
+            pasos: Mutex::new(pasos.into_iter().map(|(p, s)| (p.to_string(), s)).collect()),
+        };
+        let orquestador = AgentOrchestrator::new(
+            Arc::new(runner),
+            Arc::new(ToolsConSalida {
+                salida: json!({ "texto": "Un cordón de refuerzo." }),
+            }),
+        );
+        let eventos: Eventos = Arc::default();
+        let destino = eventos.clone();
+        let mut historial = vec![AgentMessage::user(SIN_INTENCION)];
+        orquestador
+            .procesar_turno(
+                &ClaudeModel::new("haiku").unwrap(),
+                &CenterId::new("planta_1").unwrap(),
+                &mut historial,
+                Some(Arc::new(move |e| destino.lock().unwrap().push(e))),
+            )
+            .await
+            .unwrap();
+        eventos.lock().unwrap().clone()
+    }
+
+    fn posicion(eventos: &[AgentExecutionEvent], buscado: &AgentExecutionEvent) -> usize {
+        eventos.iter().position(|e| e == buscado).expect("evento")
+    }
+
+    #[tokio::test]
+    async fn test_prosa_en_vivo_seguida_de_llamada_se_descarta_antes_del_texto_nuevo() {
+        let eventos = turno_en_vivo(vec![
+            (
+                "Voy a buscarlo.",
+                AgentTurnOutput::ToolCalls(vec![llamada_lookup()]),
+            ),
+            (
+                "Es un cordón de refuerzo.",
+                libre_final("Es un cordón de refuerzo."),
+            ),
+        ])
+        .await;
+        let descartado = posicion(&eventos, &AgentExecutionEvent::TextoEnVivoDescartado);
+        let nuevo = posicion(
+            &eventos,
+            &AgentExecutionEvent::TextDelta("Es un cordón de refuerzo.".into()),
+        );
+        assert!(descartado < nuevo, "{eventos:?}");
+    }
+
+    #[tokio::test]
+    async fn test_llamada_truncada_en_vivo_se_descarta_y_reintenta_sin_intencion() {
+        let truncada = "Voy a buscarlo. {\"tool_calls\": [{\"name\": \"x\"";
+        let eventos = turno_en_vivo(vec![
+            (truncada, libre_final(truncada)),
+            (
+                "Es un cordón de refuerzo.",
+                libre_final("Es un cordón de refuerzo."),
+            ),
+        ])
+        .await;
+        assert_eq!(etapas(&eventos), vec![EtapaArnes::Reintento]);
+        let descartado = posicion(&eventos, &AgentExecutionEvent::TextoEnVivoDescartado);
+        let nuevo = posicion(
+            &eventos,
+            &AgentExecutionEvent::TextDelta("Es un cordón de refuerzo.".into()),
+        );
+        assert!(descartado < nuevo, "{eventos:?}");
+        assert_eq!(
+            eventos.last(),
+            Some(&AgentExecutionEvent::Completed(
+                "Es un cordón de refuerzo.".into()
+            ))
+        );
+    }
+
+    #[tokio::test]
+    async fn test_respuesta_en_vivo_valida_no_se_descarta() {
+        let eventos = turno_en_vivo(vec![("Es un cordón.", libre_final("Es un cordón."))]).await;
+        assert!(!eventos.contains(&AgentExecutionEvent::TextoEnVivoDescartado));
+    }
+
     struct RelojFijo;
 
     impl RelojPort for RelojFijo {
@@ -1175,6 +1562,9 @@ mod tests {
             .with_ansi(false)
             .finish();
         tracing::subscriber::with_default(suscriptor, || {
+            // Otro test en paralelo pudo registrar el callsite sin suscriptor y dejar su interés
+            // en caché como «nunca»: se recalcula con este suscriptor vivo
+            tracing::callsite::rebuild_interest_cache();
             notificar_arnes(
                 &None,
                 EtapaArnes::SalidaSegura,

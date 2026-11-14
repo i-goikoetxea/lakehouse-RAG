@@ -35,6 +35,8 @@ type EventosRegistrados = Arc<StdMutex<Vec<(AgentExecutionEvent, Instant)>>>;
 pub enum ChatStreamEvento {
     /// Fragmento de texto de la respuesta (Markdown parcial, sin renderizar)
     Texto { turno_id: String, texto: String },
+    /// El texto mostrado hasta ahora en este turno no vale: la ventana vacía la burbuja (D4)
+    TextoDescartado { turno_id: String },
     /// El agente empieza a ejecutar una herramienta del Lakehouse
     HerramientaInicio { turno_id: String, nombre: String },
     /// La herramienta ha terminado
@@ -241,6 +243,9 @@ impl GuiChatService {
                 turno_id,
                 texto: texto.clone(),
             }),
+            AgentExecutionEvent::TextoEnVivoDescartado => {
+                Some(ChatStreamEvento::TextoDescartado { turno_id })
+            }
             AgentExecutionEvent::CallingTool { name, .. } => {
                 Some(ChatStreamEvento::HerramientaInicio {
                     turno_id,
