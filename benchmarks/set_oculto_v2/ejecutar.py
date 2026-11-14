@@ -12,6 +12,8 @@ CPU del equipo antes de la consulta. Reanuda: salta los `id` que ya estén en la
 
 import argparse
 import json
+import os
+import shutil
 import subprocess
 import sys
 import time
@@ -35,7 +37,18 @@ def carga_cpu():
 
 
 def cliente(args):
-    return ClienteCli(comando_de_binario(args.binario), args.aislado, timeout_consulta_s=900, timeout_ingesta_s=3600)
+    c = ClienteCli(comando_de_binario(args.binario), args.aislado, timeout_consulta_s=900, timeout_ingesta_s=3600)
+    original = c._invocar
+
+    def invocar_guardando_sobre(argumentos, timeout_s):
+        # Conserva el sobre JSON completo de la CLI (modelo resuelto, uso, coste, pasos...) para auditar
+        salida, latencia_ms = original(argumentos, timeout_s)
+        c.ultimo_sobre = salida
+        return salida, latencia_ms
+
+    c._invocar = invocar_guardando_sobre
+    c.ultimo_sobre = None
+    return c
 
 
 def ingestar(args):
@@ -54,7 +67,19 @@ def ingestar(args):
         print(json.dumps({"archivo": pdf.name, "segundos": round(time.time() - t0, 1), "cpu_previa": carga, **estado}, ensure_ascii=False), flush=True)
 
 
+def activar_registro_claude(args):
+    """Antepone al PATH el envoltorio `claude.exe` (claude_shim/) que registra cada `claude -p`."""
+    if not args.envoltorio_claude:
+        return
+    real = shutil.which("claude")
+    if not real or Path(real).resolve().parent == Path(args.envoltorio_claude).resolve():
+        raise SystemExit("No encuentro el claude.exe real en el PATH")
+    os.environ["CLAUDE_REAL"] = real
+    os.environ["PATH"] = str(Path(args.envoltorio_claude).resolve()) + os.pathsep + os.environ["PATH"]
+
+
 def preguntar(args):
+    activar_registro_claude(args)
     c = cliente(args)
     preguntas = json.loads(Path(args.set).read_text(encoding="utf-8"))
     salida = Path(args.salida)
@@ -69,12 +94,19 @@ def preguntar(args):
             if (time.time() - inicio) / 60 > args.limite_min:
                 print(f"Límite de {args.limite_min} min alcanzado; parada.", flush=True)
                 break
+            if args.envoltorio_claude:
+                registro = Path(args.salida).with_suffix("") / p["id"]
+                registro.mkdir(parents=True, exist_ok=True)
+                os.environ["LAKEHOUSE_SHIM_LOG"] = str(registro)
             fila = {"id": p["id"], "pregunta": p["pregunta"], "modelo_pedido": args.modelo, "cpu_previa": carga_cpu(), "inicio": time.strftime("%Y-%m-%dT%H:%M:%S")}
             try:
                 r = c.preguntar(p["pregunta"], args.centro, args.modelo)
                 fila |= {"respuesta": r.texto, "modelo": r.modelo, "herramientas": r.herramientas, "arnes": r.arnes, "latencia_ms": r.latencia_ms}
+                sobre = c.ultimo_sobre or {}
+                fila["sobre"] = {k: v for k, v in sobre.items() if k not in ("respuesta", "herramientas", "arnes")}
             except FalloEjecucion as e:
                 fila |= {"fallo": e.tipo, "detalle": str(e)[:2000]}
+            fila["cpu_posterior"] = carga_cpu()
             f.write(json.dumps(fila, ensure_ascii=False) + "\n")
             f.flush()
             print(p["id"], fila.get("fallo", "ok"), round(fila.get("latencia_ms", 0) / 1000, 1), "s", flush=True)
@@ -92,6 +124,7 @@ def main():
     ap.add_argument("--salida")
     ap.add_argument("--modelo", default="sonnet")
     ap.add_argument("--limite-min", type=float, default=120)
+    ap.add_argument("--envoltorio-claude", help="carpeta con el claude.exe de claude_shim/: registra cada claude -p en <salida>/<id>/")
     args = ap.parse_args()
     ingestar(args) if args.accion == "ingestar" else preguntar(args)
 

@@ -31,7 +31,7 @@ from pathlib import Path
 
 ENCABEZADO = "Verificación automática de páginas"
 ABSTENCION = re.compile(
-    r"no (consta|aparece|figura|encuentro|he encontrado|se (ha )?encontr|se especifica|se indica|se establece|"
+    r"no (consta|aparece|figura|indica|encuentro|he encontrado|se (ha )?encontr|se especifica|se indica|se establece|"
     r"contiene|establece|fija|recoge|incluye|hay (informaci|datos|ning|valor)|dispongo|puedo (confirmar|responder))|"
     r"not (found|specified|stated|provided|contain|include|set out|give)|does not (specify|state|contain|set|give|provide|include)|"
     r"no (information|numerical|specific|such)|isn.t (specified|stated)|no se puede (responder|determinar)",
@@ -54,8 +54,24 @@ def texto_modelo(respuesta):
     return respuesta[:i] if i >= 0 else respuesta
 
 
+def _paginas_de_tablas(texto):
+    """Páginas en la columna «Página»/«Page» de tablas markdown (| … | 232 | … |)."""
+    res, columna = set(), None
+    for linea in texto.splitlines():
+        if not linea.strip().startswith("|"):
+            columna = None
+            continue
+        celdas = [c.strip() for c in linea.strip().strip("|").split("|")]
+        if columna is None:
+            idx = [i for i, c in enumerate(celdas) if re.fullmatch(r"p[áa]g(ina)?s?\.?|pages?", c, re.I)]
+            columna = idx[0] if idx else -1
+        elif 0 <= columna < len(celdas):
+            res.update(int(n) for n in re.findall(r"\b(\d{1,3})\b", celdas[columna]))
+    return res
+
+
 def paginas_citadas(texto):
-    res = set()
+    res = set(_paginas_de_tablas(texto))
     for m in PAGINAS.finditer(texto):
         a = int(m.group(1))
         b = int(m.group(2)) if m.group(2) else a

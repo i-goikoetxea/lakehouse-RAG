@@ -52,6 +52,7 @@ def main():
     ap.add_argument("--pasadas", type=int, default=2)
     ap.add_argument("--modelo", default="sonnet")
     ap.add_argument("--base", default="main")
+    ap.add_argument("--envoltorio-claude", help="carpeta con el claude.exe de claude_shim/ (registra cada claude -p)")
     ap.add_argument("--datos", default=str(REPO / "docs" / "validacion" / "set_oculto_v2"))
     a = ap.parse_args()
     datos = Path(a.datos)
@@ -65,8 +66,11 @@ def main():
         bin_dir = datos / f"bin_{et}"
         bin_dir.mkdir(exist_ok=True)
         binario = bin_dir / "lakehouse_rag_cli.exe"
-        if not binario.exists() or sha256(binario) != sha256(origen):
+        if origen.resolve() != binario.resolve() and (not binario.exists() or sha256(binario) != sha256(origen)):
             shutil.copy2(origen, binario)
+        for dll in origen.parent.glob("*.dll"):  # bibliotecas nativas que el binario carga (p. ej. pdfium)
+            if dll.resolve() != (bin_dir / dll.name).resolve():
+                shutil.copy2(dll, bin_dir / dll.name)
         (bin_dir / "sha256.txt").write_text(sha256(binario), encoding="utf-8")
         aislado = datos / f"aislado_{et}"
         aislado.mkdir(exist_ok=True)
@@ -80,7 +84,8 @@ def main():
                 correr([*PY, AQUI / "ejecutar.py", "ingestar", "--binario", binario, "--aislado", aislado, "--corpus", datos / "corpus"], stdout=f, check=True)
         for k in range(1, a.pasadas + 1):
             correr([*PY, AQUI / "ejecutar.py", "preguntar", "--binario", binario, "--aislado", aislado, "--set", preguntas,
-                    "--salida", datos / f"crudas_{et}_p{k}.jsonl", "--modelo", a.modelo, "--limite-min", "600"], check=True)
+                    "--salida", datos / f"crudas_{et}_p{k}.jsonl", "--modelo", a.modelo, "--limite-min", "600",
+                    *(["--envoltorio-claude", a.envoltorio_claude] if a.envoltorio_claude else [])], check=True)
 
     puntuaciones = []
     revision = datos / f"revision_{et}.json"
@@ -89,6 +94,9 @@ def main():
         extra = ["--revision", datos / f"revision_{et}_p{k}.json"] if (datos / f"revision_{et}_p{k}.json").exists() else (["--revision", revision] if revision.exists() else [])
         correr([*PY, AQUI / "puntuar.py", preguntas, datos / f"crudas_{et}_p{k}.jsonl", salida, *extra], check=True, stdout=subprocess.DEVNULL)
         puntuaciones.append(salida)
+    for k in range(1, a.pasadas + 1):
+        if (datos / f"crudas_{et}_p{k}").is_dir():
+            correr([*PY, AQUI / "metricas_claude.py", datos / f"crudas_{et}_p{k}.jsonl", "--salida", datos / f"metricas_{et}_p{k}.json"])
     base = [] if a.base in ("ninguna", et) else ["--base", datos / f"resumen_{a.base}.json"]
     r = correr([*PY, AQUI / "resumen.py", preguntas, *puntuaciones, "--salida", datos / f"resumen_{et}.json", *base])
     return r.returncode
