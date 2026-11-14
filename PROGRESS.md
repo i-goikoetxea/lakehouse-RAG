@@ -1420,3 +1420,36 @@
 - Fuera de alcance, sin tocar: el literal `"Tabla {n}"` de `markdown_parser.rs:290` (título por defecto de una tabla Markdown sin título) y las listas de `intent_detector.rs` (Pieza 5).
 - Pendiente: diagnosticar la cobertura nula en matrices de riesgo y en la tabla 2 del paper. La sesión evaluadora debería comprobar la página de las respuestas con `lookup`.
 - Compilación con el `target` del worktree `pieza-1-pdfium-c5ed7b`. Los datos de N2 están en `benchmarks/.cache/anclaje/`, ignorado; los paquetes destilados se reutilizan sin Claude.
+
+### Sesión Pieza 2, ajuste de cabeceras (2026-11-14): cabeceras multinivel y potencias en el anclaje
+
+**Estado: implementado y medido sin Claude, con los paquetes Sonnet cacheados. Pendiente de aprobación del usuario; sin push ni merge.** Reglas aprobadas por el mentor, en el SSD §2.3.2. Informe: `benchmarks/informes/pieza_2_cabeceras_20261114.md`. Resultado: «funciona en los casos conocidos», no «funciona en general».
+
+**Errores y retrocesos (primero):**
+- **0 páginas falsas y 0 retrocesos:**
+  - sintéticos: 9 semillas, 38 213 filas, comparadas fila a fila con la línea base;
+  - PDF públicos: las 95 celdas previas no cambian.
+- **La trampa de prosa se activó una vez con la regla escrita:** 8 filas en la semilla de depuración, sin ser páginas falsas. Las causó una columna reducida a un subconjunto de otra al ignorar un conector de 1 letra («ο Μέγιστη»). Se endurece con una regla general: la unión de los tokens presentes no puede caber en una sola cabecera. Tiene test rojo propio, con otros datos. Después: 0 de 2 157 filas trampa con página.
+- **Cobertura:**
+  - la Tabla 2 del paper de Transformer pasa de 0 a 31 de 31 celdas (p. 8); son 27 de 27 por el oráculo;
+  - MIL-STD-882E sigue en 0 de 44;
+  - la regla multinivel solo está probada en un PDF real, en inglés.
+- **Entorno:** el disco D: se llenó durante la línea base. Solo se borró el `target/` de este worktree; la compilación va en C:. D: sigue casi lleno.
+
+**Cambios:**
+- [x] `domain/services/anclaje_tabla.rs`:
+  - cabecera compuesta presente: tokens no triviales en las 4 líneas previas a la primera fila de la ventana, con al menos 2 cabeceras distintas que no quepan en una;
+  - variante de potencias solo de la celda al texto (`variante_sin_circunflejo`).
+- [x] `benchmarks/anclaje/generar_sinteticos.py`: tipos `multinivel_2`, `multinivel_3` y `trampa_prosa`, en un flujo aparte. Los 400 casos antiguos por semilla no cambian.
+- [x] SSD §2.3.2.
+
+**Tests:**
+- Línea base en `ad1fbb3`: 1023 pasan, 0 fallan, 35 ignorados.
+- Final: **1036 pasan, 0 fallan, 35 ignorados**. Se añaden 11 unitarios y 2 adversariales.
+- `cargo clippy --all-targets -- -D warnings` y `cargo fmt --check`: OK.
+
+**Notas para la siguiente sesión:**
+- Después de integrar, reingerir los centros una vez. No hay cambio de esquema: sigue en v7.
+- Propuesto: medir con más PDF públicos que tengan cabeceras multinivel, en otros idiomas y dominios. Requiere una destilación Sonnet por documento en un centro aislado.
+- Propuesto: sintéticos que la regla pueda fallar: cabecera a más de 4 líneas, tablas apiladas, multinivel duplicada en un anexo, potencias y trampa CJK.
+- Pendientes: la Tabla 1 del paper (6 de 12) y MIL-STD-882E.
