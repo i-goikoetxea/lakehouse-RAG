@@ -221,6 +221,35 @@ fn test_trampa_cercana_al_valor_del_documento_se_rechaza() {
     );
 }
 
+// --- Los dos operandos van citados cerca de la cifra derivada ---
+
+#[test]
+fn test_diferencia_con_los_dos_operandos_citados_se_acepta() {
+    let r = registro(vec![busqueda(
+        "IND-7",
+        &["Índice 2024: 85. Índice 2025: 120."],
+    )]);
+    assert_eq!(
+        dato(
+            "La diferencia entre 120 y 85 es 35. No consta la causa.",
+            &r
+        ),
+        Ok(())
+    );
+}
+
+#[test]
+fn test_diferencia_con_un_solo_operando_citado_se_rechaza() {
+    let r = registro(vec![busqueda(
+        "IND-7",
+        &["Índice 2024: 85. Índice 2025: 120."],
+    )]);
+    assert_eq!(
+        dato("Sube 35 puntos respecto a 85. No consta la causa.", &r),
+        en_abstencion("35")
+    );
+}
+
 // --- Salvaguarda (c): Monte Carlo ---
 
 /// xorshift64*: determinista y sin dependencias
@@ -296,11 +325,16 @@ fn tasa_de_falsos_aceptados(semilla: u64, cerca_de_los_citados: bool) -> f64 {
         } else {
             cifra_aleatoria(&mut azar)
         };
-        // Una cifra que ya está en el contexto se ancla literalmente: no es una inyección
+        // Una cifra que ya está en la salida se ancla literalmente: no es una inyección. Cuenta
+        // también el campo `total` de la búsqueda (sin él, el 80 % de los «falsos aceptados»
+        // eran un `3` anclado por `"total": 3`, no un rescate del Nivel 1)
         let valor = |texto: &str| texto.replace(',', ".").parse::<f64>().unwrap();
+        let total = textos.len() as f64;
         if cifras
             .iter()
-            .any(|c| (valor(c) - valor(&inyectada)).abs() < 1e-9)
+            .map(|c| valor(c))
+            .chain([total])
+            .any(|v| (v - valor(&inyectada)).abs() < 1e-9)
         {
             continue;
         }
@@ -328,26 +362,32 @@ fn tasa_de_falsos_aceptados(semilla: u64, cerca_de_los_citados: bool) -> f64 {
 }
 
 #[test]
-fn test_monte_carlo_falsos_aceptados_por_debajo_del_uno_por_ciento() {
-    for semilla in [0x5EED_0001, 0x5EED_0002, 0x5EED_0003] {
+fn test_monte_carlo_falsos_aceptados_por_debajo_del_tres_por_mil() {
+    for semilla in [
+        0x5EED_0001,
+        0x5EED_0002,
+        0x5EED_0003,
+        0x5EED_0021,
+        0x5EED_0022,
+    ] {
         let tasa = tasa_de_falsos_aceptados(semilla, false);
         println!(
             "Monte Carlo (cifra aleatoria), semilla {semilla:#x}: {:.3} %",
             tasa * 100.0
         );
-        assert!(tasa <= 0.01, "tasa de falsos aceptados {tasa} > 1 %");
+        assert!(tasa <= 0.003, "tasa de falsos aceptados {tasa} > 0,3 %");
     }
 }
 
 #[test]
-fn test_monte_carlo_cifra_cercana_a_las_citadas_por_debajo_del_uno_por_ciento() {
-    for semilla in [0x5EED_0011, 0x5EED_0012, 0x5EED_0013] {
+fn test_monte_carlo_cifra_cercana_a_las_citadas_por_debajo_del_tres_por_mil() {
+    for semilla in [0x5EED_0011, 0x5EED_0012, 0x5EED_0013, 0x5EED_0031] {
         let tasa = tasa_de_falsos_aceptados(semilla, true);
         println!(
             "Monte Carlo (cifra cercana), semilla {semilla:#x}: {:.3} %",
             tasa * 100.0
         );
-        assert!(tasa <= 0.01, "tasa de falsos aceptados {tasa} > 1 %");
+        assert!(tasa <= 0.003, "tasa de falsos aceptados {tasa} > 0,3 %");
     }
 }
 
