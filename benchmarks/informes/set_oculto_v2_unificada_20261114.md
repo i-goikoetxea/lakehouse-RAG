@@ -25,7 +25,7 @@
   - un bloqueo del arnés sobre una suma calculada;
   - la búsqueda que elige la cifra de otro perímetro.
 - **Las repeticiones no muestran retroceso**: en las preguntas de cálculo, 27/30, igual que la línea base.
-- **El replay ciego no se hizo:** no encontré un punto de entrada para pasar respuestas guardadas por el arnés sin leer el código. Lo pregunté a la sesión principal y no tuve respuesta durante la medición.
+- **El replay ciego no se hizo:** está pendiente de la autorización del usuario para ejecutar la prueba ignorada que lo implementa. La entrada está preparada (apartado 6).
 - **El set satura otra vez** (98 %). Hace falta uno más duro para que discrimine.
 
 ## 1. Errores de respuesta
@@ -138,9 +138,15 @@ Propuesta de regla general: medir el tiempo de arranque de `claude -p` y fijar e
 
 ## 6. Replay ciego
 
-- **No ejecutado.** La CLI de `da66519` solo expone `--ask`, `--ingest` y `--mcp-server`. No encontré, sin leer el código, una forma de pasar una respuesta guardada por el arnés sin llamar al modelo.
-- Pregunté a la sesión principal cómo hacerlo. Si existe el punto de entrada, el replay de V56, V58 y V60, de las 8 trampas y de los 9 «no consta» puede ejecutarse sobre las respuestas crudas ya guardadas sin gastar Claude.
-- Lo medido en su lugar, con respuestas nuevas:
+- **No ejecutado: está pendiente de la autorización del usuario.**
+- La sesión principal indicó el punto de entrada: una prueba ignorada del checkout `da66519` (`cargo test --test repeticion_arnes_guardadas -- --ignored`, con `CRUDAS_GUARDADAS` y `SALIDA_REPETICION`).
+- El sistema de permisos bloqueó su ejecución. Es coherente con la regla del usuario de no lanzar `cargo test` sin su «sí» directo, y una aprobación retransmitida por otra sesión no lo sustituye.
+- **La entrada está preparada** en `docs/validacion/set_oculto_v2/replay/` (ignorado), con un índice de qué id corresponde a cada línea:
+  - **156 respuestas guardadas** de cálculo (V56, V58, V60), de las 8 trampas y de los 9 «no consta», de las 8 pasadas de `de9cae9`, arreglos, `ad1fbb3` y `da66519`;
+  - **4 omitidas** porque el arnés ya las había bloqueado y su texto original no se guardó.
+  - El convertidor es `benchmarks/set_oculto_v2/a_formato_replay.py`.
+- **Límite que habrá que declarar cuando se ejecute:** la repetición aplica solo el **Nivel 1** (arnés determinista en Rust y verificador de páginas). No llama a Haiku (Nivel 2), así que una cifra que en producción rescataría el Nivel 2 aparecerá como rechazada.
+- **Lo medido en su lugar, con respuestas nuevas por el arnés completo:**
   - cálculos 27/30, con 3 bloqueos;
   - trampas 16/16;
   - «no consta» 18/18;
