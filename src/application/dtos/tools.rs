@@ -407,7 +407,7 @@ impl ToolDefinition {
                 esquema_objeto(
                     json!({
                         "centro_id": propiedad_centro(),
-                        "consulta": { "type": "string", "description": "Pregunta o términos a buscar." },
+                        "consulta": { "type": "string", "description": "Pregunta o términos a buscar, con el idioma y los términos técnicos de la pregunta o del documento objetivo: nunca la traduzcas al idioma de estas instrucciones." },
                         "modo": { "type": "string", "enum": ["HYBRID", "SEMANTIC_ONLY", "EXACT_BM25"], "description": "Motor de búsqueda (por defecto HYBRID)." },
                         "top_k": { "type": "integer", "minimum": 1, "maximum": 20, "description": "Resultados (por defecto 8)." },
                         "nivel_prelacion_max": { "type": "integer", "minimum": 1, "maximum": 5, "description": "Solo documentos con nivel de prelación <= este valor." },
@@ -465,6 +465,24 @@ mod tests {
         }
         let err = LakehouseToolName::from_str_name("herramienta_fantasma").unwrap_err();
         assert!(matches!(err, DomainError::ToolExecutionError(_)));
+    }
+
+    #[test]
+    fn test_la_consulta_de_busqueda_no_se_traduce() {
+        let busqueda = ToolDefinition::lakehouse_tools()
+            .into_iter()
+            .find(|t| t.name == LakehouseToolName::SearchNormativeContext.as_str())
+            .unwrap();
+        let descripcion = busqueda.parameters["properties"]["consulta"]["description"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        for exigido in [
+            "idioma y los términos técnicos de la pregunta o del documento objetivo",
+            "nunca la traduzcas al idioma de estas instrucciones",
+        ] {
+            assert!(descripcion.contains(exigido), "{exigido}");
+        }
     }
 
     #[test]

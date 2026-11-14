@@ -42,7 +42,7 @@ fn procedimiento(revision: &str) -> String {
     )
 }
 
-const PLIEGO: &str = "# PCC-01 Pliego de condiciones del cliente\n\n## 5. Ensayos no destructivos\nSe debe ensayar el 100 % de las soldaduras a tope mediante radiografía.\n";
+pub const PLIEGO: &str = "# PCC-01 Pliego de condiciones del cliente\n\n## 5. Ensayos no destructivos\nSe debe ensayar el 100 % de las soldaduras a tope mediante radiografía.\n";
 const NORMA: &str = "# UNE-EN 1090-2 Ejecución de estructuras de acero\n\n## 12. Ensayos no destructivos\nSe debe ensayar el 10 % de las soldaduras a tope.\n";
 const HUB: &str =
     "# NORMA-HUB Índice general de normas\n\n## 1. Remisiones\nRelación de documentos citados.\n";
