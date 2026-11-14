@@ -290,8 +290,14 @@ impl AgentOrchestrator {
         };
         let pendientes =
             PostInferenceGuard::cifras_pendientes(candidata, pregunta, intencion, registro);
-        // Sin pendientes o con más de la cota (las sobrantes no se examinan): sin microllamada
-        if pendientes.is_empty() || pendientes.len() > MAXIMO_CIFRAS_PENDIENTES {
+        // Sin microllamada: sin pendientes, con más de la cota (las sobrantes no se examinan) o con
+        // alguna en modo estricto de la salvaguarda (b) (abstención total, primera oración que
+        // declara la ausencia o cifra en la oración de la locución). Ninguna traza la levanta:
+        // solo la referencia estructural del Nivel 1, que ya se comprobó en Rust.
+        if pendientes.is_empty()
+            || pendientes.len() > MAXIMO_CIFRAS_PENDIENTES
+            || pendientes.iter().any(|p| p.solo_estructural)
+        {
             return Err(violacion);
         }
         let solicitud = SolicitudProcedencia {
@@ -1260,13 +1266,21 @@ mod tests {
         respuestas: Vec<AgentTurnOutput>,
         verificador: Arc<VerificadorFalso>,
     ) -> (Result<String, DomainError>, Vec<AgentExecutionEvent>) {
+        let salida =
+            json!({ "estado": "resuelto", "texto": EQUIPOS, "valor_resultado_texto": "125" });
+        turno_con_verificador_y_salida(respuestas, verificador, salida).await
+    }
+
+    async fn turno_con_verificador_y_salida(
+        respuestas: Vec<AgentTurnOutput>,
+        verificador: Arc<VerificadorFalso>,
+        salida: serde_json::Value,
+    ) -> (Result<String, DomainError>, Vec<AgentExecutionEvent>) {
         let mut guion = vec![AgentTurnOutput::ToolCalls(vec![llamada_lookup()])];
         guion.extend(respuestas);
         let orquestador = AgentOrchestrator::new(
             RunnerDelArnes::con_guion(vec![], guion),
-            Arc::new(ToolsConSalida {
-                salida: json!({ "estado": "resuelto", "texto": EQUIPOS, "valor_resultado_texto": "125" }),
-            }),
+            Arc::new(ToolsConSalida { salida }),
         )
         .with_verificador_procedencia(verificador);
         let eventos: Eventos = Arc::default();
@@ -1361,10 +1375,43 @@ mod tests {
                 libre_final("La presión no consta. Se exigen 3 equipos."),
                 libre_final("La presión no consta."),
             ],
-            falso,
+            falso.clone(),
         )
         .await;
         assert_eq!(respuesta.unwrap(), "La presión no consta.");
+        // La primera oración declara la ausencia: rechazo en Rust, sin microllamada
+        assert_eq!(*falso.llamadas.lock().unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_cifra_en_la_oracion_de_la_locucion_no_llama_al_verificador() {
+        let falso = verificador(Ok(conteo("3", &["casco", "guantes", "gafas"])));
+        let (respuesta, _) = turno_con_verificador(
+            vec![
+                libre_final("Se exigen 3 equipos. La presión no consta; suele ser 7 bar."),
+                libre_final("La presión no consta."),
+            ],
+            falso.clone(),
+        )
+        .await;
+        assert_eq!(respuesta.unwrap(), "La presión no consta.");
+        assert_eq!(*falso.llamadas.lock().unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_abstencion_total_no_llama_al_verificador() {
+        let falso = verificador(Ok(conteo("3", &["casco", "guantes", "gafas"])));
+        let (respuesta, _) = turno_con_verificador_y_salida(
+            vec![
+                libre_final("Se exigen 3 equipos. La presión no consta."),
+                libre_final("La presión no consta."),
+            ],
+            falso.clone(),
+            json!({ "estado": "sin_coincidencia", "resultados": [] }),
+        )
+        .await;
+        assert_eq!(respuesta.unwrap(), "La presión no consta.");
+        assert_eq!(*falso.llamadas.lock().unwrap(), 0);
     }
 
     #[tokio::test]
@@ -1562,17 +1609,23 @@ mod tests {
             .with_ansi(false)
             .finish();
         tracing::subscriber::with_default(suscriptor, || {
-            // Otro test en paralelo pudo registrar el callsite sin suscriptor y dejar su interés
-            // en caché como «nunca»: se recalcula con este suscriptor vivo
-            tracing::callsite::rebuild_interest_cache();
-            notificar_arnes(
-                &None,
-                EtapaArnes::SalidaSegura,
-                ViolacionArnes::CifraSinAnclar {
-                    cifra: "999".to_string(),
+            // Otro test en paralelo puede estar registrando el callsite con una foto de
+            // dispatchers anterior a este suscriptor y dejar su interés en «nunca» después de
+            // una reconstrucción. Se reconstruye y se repite: el segundo intento ya lo ve.
+            for _ in 0..3 {
+                tracing::callsite::rebuild_interest_cache();
+                notificar_arnes(
+                    &None,
+                    EtapaArnes::SalidaSegura,
+                    ViolacionArnes::CifraSinAnclar {
+                        cifra: "999".to_string(),
+                    }
+                    .motivo(),
+                );
+                if !salida.lock().unwrap().is_empty() {
+                    break;
                 }
-                .motivo(),
-            );
+            }
         });
         let registro = String::from_utf8(salida.lock().unwrap().clone()).unwrap();
         assert!(registro.contains("WARN"), "{registro}");

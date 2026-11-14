@@ -313,6 +313,10 @@ fn primera(pendientes: Vec<CifraPendiente>) -> Option<String> {
 /// En una abstención, la salvaguarda (b) es estricta (solo referencias estructurales) si todas
 /// las tools volvieron vacías, si la primera oración declara la ausencia o si la cifra está en la
 /// oración de la locución. Una cita en esa oración no respalda una derivación.
+///
+/// Invariante: la salvaguarda (b) manda sobre el Nivel 2. Una cifra en modo estricto no la exime
+/// ninguna traza de `verificadas` (aunque la misma cifra se verificara en otra oración): solo la
+/// pregunta, el anclaje literal y la referencia estructural del Nivel 1.
 fn cifras_sin_resolver(
     respuesta: &str,
     pregunta: &str,
@@ -326,7 +330,6 @@ fn cifras_sin_resolver(
         .filter(|i| {
             let cifra = &analizada.cifras[*i];
             !cifra.lecturas.iter().any(|l| anclas.contains(l))
-                && !verificadas.contains(&cifra.literal)
         })
         .collect();
     if sin_anclar.is_empty() {
@@ -345,12 +348,18 @@ fn cifras_sin_resolver(
         |posicion: usize| con_locucion.get(analizada.oracion_de(posicion)) == Some(&true);
     let estricta_global =
         en_abstencion && (contexto.sin_operandos() || con_locucion.first() == Some(&true));
+    let estricta_de = |indice: usize| {
+        estricta_global || en_oracion_de_locucion(analizada.cifras[indice].posicion)
+    };
     sin_anclar
         .into_iter()
+        .filter(|indice| {
+            !verificadas.contains(&analizada.cifras[*indice].literal) || estricta_de(*indice)
+        })
         .enumerate()
         .filter_map(|(orden, indice)| {
             let cifra = &analizada.cifras[indice];
-            let estricta = estricta_global || en_oracion_de_locucion(cifra.posicion);
+            let estricta = estricta_de(indice);
             // Más allá de la cota, la cifra queda pendiente sin examinar (coste acotado)
             if orden >= MAXIMO_CIFRAS_PENDIENTES {
                 return Some(CifraPendiente {
@@ -1660,6 +1669,73 @@ El campo `vigencia_no_declarada` vino vacío.";
                 "¿Cuál es hoy la temperatura de la Tabla 4-A para 30 mm y CE 0,42 %, y cuál era el 1 de junio de 2026?",
                 &cruzable(),
                 &registro
+            ),
+            Ok(())
+        );
+    }
+
+    // --- Frontera Nivel 1 / Nivel 2: la salvaguarda (b) manda sobre las trazas ---
+
+    const L_104: &str = "La línea L-104 trabaja a 14,5 bar y se prueba a 12,0 bar.";
+
+    fn validar_dato_verificadas(
+        respuesta: &str,
+        verificadas: &[&str],
+    ) -> Result<(), ViolacionArnes> {
+        let verificadas: HashSet<String> = verificadas.iter().map(|c| c.to_string()).collect();
+        PostInferenceGuard::validar_con_verificadas(
+            respuesta,
+            PREGUNTA_DATO,
+            &IntencionTurno::DatoConcreto,
+            &busqueda(L_104),
+            &verificadas,
+        )
+    }
+
+    #[test]
+    fn test_traza_del_nivel_2_no_levanta_una_cifra_en_la_oracion_de_la_abstencion() {
+        // Pregunta por L-999 (no existe); la respuesta deriva una cifra de datos reales de L-104
+        assert_eq!(
+            validar_dato_verificadas(
+                "No consta la presión de la L-999; la de la L-104 baja 2,5 bar.",
+                &["2,5"]
+            ),
+            abstencion_con("2,5")
+        );
+    }
+
+    #[test]
+    fn test_traza_valida_en_una_oracion_lateral_no_exime_la_misma_cifra_en_la_abstencion() {
+        assert_eq!(
+            validar_dato_verificadas(
+                "La L-104 baja 2,5 bar en la prueba. No consta la de la L-999; suele bajar 2,5 bar.",
+                &["2,5"]
+            ),
+            abstencion_con("2,5")
+        );
+    }
+
+    #[test]
+    fn test_traza_valida_en_una_oracion_lateral_se_sigue_aceptando() {
+        assert_eq!(
+            validar_dato_verificadas(
+                "La L-104 trabaja a 14,5 bar y baja 2,5 bar en la prueba. No consta la de la L-999.",
+                &["2,5"]
+            ),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn test_en_la_abstencion_quedan_exentas_la_pregunta_y_la_referencia_estructural() {
+        let registro = busqueda("Art. 14 Presiones de prueba de las líneas de condensado");
+        assert_eq!(
+            PostInferenceGuard::validar_con_verificadas(
+                "No consta la presión a 30 °C de la L-999; el Art. 14 no la fija.",
+                "¿Presión de la L-999 a 30 °C?",
+                &IntencionTurno::DatoConcreto,
+                &registro,
+                &HashSet::new(),
             ),
             Ok(())
         );
