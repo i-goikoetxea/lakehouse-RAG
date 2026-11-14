@@ -1479,3 +1479,19 @@
 **Notas para la siguiente sesión:**
 - Medir con un lote nuevo de preguntas con cálculo, escrito por la sesión evaluadora, y medir Haiku en real.
 - `anclaje_tabla.rs` y la Regla 15 quedan sin tocar.
+
+### Sesión Frontera Nivel 1 / Nivel 2 (2026-11-14): la salvaguarda (b) manda sobre las trazas
+
+**Estado: implementada y medida sin Claude. Pendiente de aprobación; sin push ni merge.** Rama `claude/frontera-nivel-1-2` desde `abd12f7`. Adenda 2 en `benchmarks/informes/piezas_3b_4_20261114.md`.
+
+**Errores y retrocesos (primero):**
+- **Hueco cerrado:** una traza del Nivel 2 levantaba una `CifraEnAbstencion` de la salvaguarda (b), también cuando la misma cifra se verificaba en otra oración.
+- **Microllamadas cerradas:** había llamadas a Haiku con pendientes en modo estricto, que nada podía rescatar.
+- **Test de telemetría intermitente:** 1 fallo con carga. El test ahora reconstruye la caché y reintenta hasta 3 veces; después, 15 de 15 sin carga.
+- **Respuestas guardadas:** 0 de aceptada a bloqueada, y el Monte Carlo es idéntico. La prueba se queda corta: hay pocas abstenciones con cifras derivadas.
+
+**Cambios:**
+- [x] `cifras_sin_resolver`: `verificadas` solo exime las cifras que no están en modo estricto.
+- [x] `validar_con_procedencia`: no hay microllamada si alguna pendiente está en modo estricto.
+
+**Tests:** base `abd12f7` con 1105/0/35; después, 1110/1/35 (la telemetría, ya corregida). Clippy y fmt: OK. No se tocó la zona de la Regla 15.
