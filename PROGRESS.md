@@ -1549,3 +1549,36 @@
   - El puntuador da falsos negativos cuando la respuesta cita valores de otros documentos como no aplicables.
   - Hace falta un set nuevo que discrimine, escrito por la sesión evaluadora.
   - La integración la coordina la sesión principal; hay otra rama que toca `validar_con_procedencia`.
+
+
+### Sesión Pieza 5, Fase 5.1: procedencia por la API de Messages (2026-11-15)
+
+**Estado: `[COMPLETADO]` salvo la calibración real, pendiente de aprobación.** Rama `claude/pieza5-fase51-7335a5`, desde `main` `dfab51a`, sin push ni merge. Contrato: `docs/arquitectura/ssd_pieza5_fase51_procedencia_api.md`. Informe: `benchmarks/informes/pieza5_fase51_20261115.md`. No se ha leído el set oculto.
+
+- **Lo importante:**
+  - la calibración con Haiku real **no se ha ejecutado**, porque `ANTHROPIC_API_KEY` no existe en el entorno de la sesión. No hay latencia, tokens, coste ni puerta de cifras falsas medidos con el modelo;
+  - **no se envía `temperature: 0`**: Claude Haiku 5.5 y la versión de API `2026-10-21` lo rechazan con 400;
+  - para la 5.2: Sonnet 5.5 y Opus 5.5 rechazan `tool_choice` forzado.
+- [x] Verificación en la documentación oficial y SSD corto. Queda fijado:
+  - el modelo `claude-haiku-5-5`, sin alias;
+  - `tool_choice` forzado y admitido en Haiku 5.5;
+  - `cache_control: ephemeral`, con un prefijo mínimo de 512 tokens;
+  - `strict`, sin `oneOf`, `minimum`, `maximum` ni `maxItems`;
+  - la cabecera `anthropic-version: 2026-10-21`;
+  - las tarifas.
+- [x] `AnthropicHttpClient`:
+  - `base_url` configurable; timeouts de 10 s de conexión y 30 s de lectura;
+  - 3 reintentos en 429, 529 y 500-504, con `retry-after` y jitter; 400, 401 y 403 sin reintento y con un mensaje accionable;
+  - `max_tokens` y `refusal` nunca se aceptan;
+  - `SecretApiKey` escribe `[REDACTED]`; almacén `keyring`, sin GUI.
+- [x] `AnthropicProcedenciaVerifier` detrás de `VerificadorProcedenciaPort`, y `ModoLlm { Cli, Api }` con `LAKEHOUSE_RAG_MODO_LLM`. **Por defecto, `Cli`.** Si se pide `Api` y no hay key, vuelve a `Cli` con un aviso.
+- [x] Dependencias aprobadas: `reqwest` 0.12 (la 0.12.28 del árbol, con rustls), `keyring` 3 con `windows-native` y `wiremock` 0.6 en `dev-dependencies`.
+- [x] Batería sintética de 18 casos en 7 idiomas (`benchmarks/calibracion_procedencia/`), comprobada offline, y una herramienta de calibración (`examples/calibrar_procedencia_api.rs`), sin ejecutar.
+- [x] Guardián: la línea base da 1120 pasan, 2 fallan y 35 ignorados; después, 1148, 1 y 36.
+  - Los fallos son de entorno: falta `vendor/pdfium/` en el worktree, y un timeout sensible a la carga que aislado pasa.
+  - Ningún test previo empeora.
+  - `clippy -D warnings` y `fmt`, limpios.
+- **Para la siguiente sesión:**
+  - Ejecutar `cargo run --example calibrar_procedencia_api -- 2 <salida.jsonl>` con la key en el entorno y completar el informe §4.
+  - Límite real de Rust encontrado: en `contiene_los_digitos`, «Artículo 7.3» no respalda ni el «7» ni el «3». Hay una regla propuesta en el informe §3, sin aplicar. La decide quien coordina `arnes_turno`, porque hay otra rama en el Nivel 1.
+  - Candidato sin comprobar: `cifras_verificadas` compara `traza.cifra` byte a byte con la cifra pendiente.

@@ -12,9 +12,10 @@ use crate::application::use_cases::lakehouse_tool_service::{
 };
 use crate::infrastructure::embeddings::fastembed_engine::MODELO_POR_DEFECTO;
 use crate::infrastructure::embeddings::lazy_engine::LazyFastEmbedEngine;
+use crate::infrastructure::llm::modo_llm::{ModoLlm, verificador_procedencia_para};
 use crate::infrastructure::llm::{
     ClaudeAgentConfig, ClaudeAgentRunner, ClaudeHeadlessConfig, ClaudeHeadlessDistiller,
-    ClaudeHeadlessModelCatalog, ClaudeHeadlessProcedencia, ClaudeModelCatalogConfig,
+    ClaudeHeadlessModelCatalog, ClaudeModelCatalogConfig,
 };
 use crate::infrastructure::parsers::ParserPorFormato;
 use crate::infrastructure::query_engine::datafusion_engine::DataFusionEngine;
@@ -107,9 +108,11 @@ pub fn composicion_real(config: &ConfiguracionComposicion) -> ComposicionReal {
                 ClaudeModelCatalogConfig::default(),
             )),
             reloj: Arc::new(RelojDelSistema),
-            verificador_procedencia: Some(Arc::new(ClaudeHeadlessProcedencia::new(
+            // `LAKEHOUSE_RAG_MODO_LLM=api` elige la API de Messages; por defecto, `claude -p`
+            verificador_procedencia: Some(verificador_procedencia_para(
+                ModoLlm::desde_entorno(),
                 ClaudeAgentConfig::default().binary_path,
-            ))),
+            )),
         },
         indice: motores.indice,
     }

@@ -1,0 +1,494 @@
+//! Cliente base de `POST /v1/messages`: autenticación, timeouts, reintentos de transporte y
+//! validación de `stop_reason` (SSD de la Fase 5.1 §3). Lo compartirán los adaptadores de
+//! procedencia, agente y destilación.
+
+use std::time::{Duration, Instant};
+
+use reqwest::StatusCode;
+use reqwest::header::{HeaderMap, RETRY_AFTER};
+use serde_json::Value;
+
+use super::error::ErrorApiAnthropic;
+use super::mensajes::{PeticionMensajes, RespuestaMensajes};
+use super::secreto::SecretApiKey;
+
+pub const URL_BASE_POR_DEFECTO: &str = "https://api.anthropic.com";
+/// Versión de la API fijada (cabecera `anthropic-version`)
+pub const VERSION_API: &str = "2026-10-21";
+const LONGITUD_MAXIMA_DETALLE: usize = 400;
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct PoliticaReintentos {
+    /// Reintentos tras el primer intento (el contrato fija 3)
+    pub max_reintentos: u32,
+    pub espera_base: Duration,
+    pub espera_maxima: Duration,
+    /// Un `retry-after` mayor que esto se recorta
+    pub tope_retry_after: Duration,
+}
+
+impl Default for PoliticaReintentos {
+    fn default() -> Self {
+        Self {
+            max_reintentos: 3,
+            espera_base: Duration::from_millis(500),
+            espera_maxima: Duration::from_secs(8),
+            tope_retry_after: Duration::from_secs(60),
+        }
+    }
+}
+
+impl PoliticaReintentos {
+    /// Backoff exponencial con jitter completo: aleatorio en `[0, min(máx, base·2^n)]`
+    fn espera_exponencial(&self, reintento: u32) -> Duration {
+        let techo = self
+            .espera_base
+            .saturating_mul(2u32.saturating_pow(reintento))
+            .min(self.espera_maxima);
+        let azar = (uuid::Uuid::new_v4().as_u128() % 1_000_001) as f64 / 1_000_000.0;
+        techo.mul_f64(azar)
+    }
+
+    fn espera(&self, reintento: u32, indicada: Option<Duration>) -> Duration {
+        indicada.map_or_else(
+            || self.espera_exponencial(reintento),
+            |espera| espera.min(self.tope_retry_after),
+        )
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ConfigClienteAnthropic {
+    pub base_url: String,
+    pub timeout_conexion: Duration,
+    /// Máximo entre lecturas del socket
+    pub timeout_lectura: Duration,
+    pub reintentos: PoliticaReintentos,
+}
+
+impl ConfigClienteAnthropic {
+    /// Timeouts del contrato para procedencia: 10 s de conexión y 30 s de lectura
+    pub fn procedencia() -> Self {
+        Self {
+            base_url: URL_BASE_POR_DEFECTO.into(),
+            timeout_conexion: Duration::from_secs(10),
+            timeout_lectura: Duration::from_secs(30),
+            reintentos: PoliticaReintentos::default(),
+        }
+    }
+
+    pub fn con_base_url(mut self, base_url: impl Into<String>) -> Self {
+        self.base_url = base_url.into();
+        self
+    }
+}
+
+/// La respuesta válida y lo que costó obtenerla
+#[derive(Debug, Clone, PartialEq)]
+pub struct RespuestaConMetricas {
+    pub respuesta: RespuestaMensajes,
+    pub intentos: u32,
+    pub latencia: Duration,
+}
+
+enum FalloIntento {
+    Reintentable {
+        espera_indicada: Option<Duration>,
+        descripcion: String,
+    },
+    Definitivo(ErrorApiAnthropic),
+}
+
+pub struct AnthropicHttpClient {
+    http: reqwest::Client,
+    key: SecretApiKey,
+    config: ConfigClienteAnthropic,
+}
+
+impl AnthropicHttpClient {
+    pub fn new(
+        key: SecretApiKey,
+        config: ConfigClienteAnthropic,
+    ) -> Result<Self, ErrorApiAnthropic> {
+        let http = reqwest::Client::builder()
+            .connect_timeout(config.timeout_conexion)
+            .read_timeout(config.timeout_lectura)
+            .build()
+            .map_err(|e| ErrorApiAnthropic::RespuestaNoValida(format!("cliente HTTP: {e}")))?;
+        Ok(Self { http, key, config })
+    }
+
+    fn url_mensajes(&self) -> String {
+        format!("{}/v1/messages", self.config.base_url.trim_end_matches('/'))
+    }
+
+    /// Envía la petición con los reintentos de transporte y valida `stop_reason`
+    pub async fn crear_mensaje(
+        &self,
+        peticion: &PeticionMensajes,
+    ) -> Result<RespuestaConMetricas, ErrorApiAnthropic> {
+        let inicio = Instant::now();
+        let politica = &self.config.reintentos;
+        let mut intentos = 0;
+        loop {
+            intentos += 1;
+            match self.un_intento(peticion).await {
+                Ok(respuesta) => {
+                    return validar_stop_reason(respuesta).map(|respuesta| RespuestaConMetricas {
+                        respuesta,
+                        intentos,
+                        latencia: inicio.elapsed(),
+                    });
+                }
+                Err(FalloIntento::Definitivo(error)) => return Err(error),
+                Err(FalloIntento::Reintentable {
+                    espera_indicada,
+                    descripcion,
+                }) => {
+                    if intentos > politica.max_reintentos {
+                        return Err(ErrorApiAnthropic::ReintentosAgotados {
+                            intentos,
+                            ultimo: descripcion,
+                        });
+                    }
+                    let espera = politica.espera(intentos - 1, espera_indicada);
+                    tracing::warn!(
+                        intento = intentos,
+                        espera_ms = espera.as_millis() as u64,
+                        motivo = %descripcion,
+                        "API de Anthropic: reintento de transporte"
+                    );
+                    tokio::time::sleep(espera).await;
+                }
+            }
+        }
+    }
+
+    async fn un_intento(
+        &self,
+        peticion: &PeticionMensajes,
+    ) -> Result<RespuestaMensajes, FalloIntento> {
+        let respuesta = self
+            .http
+            .post(self.url_mensajes())
+            .header("x-api-key", self.key.exponer())
+            .header("anthropic-version", VERSION_API)
+            .json(peticion)
+            .send()
+            .await
+            .map_err(|e| self.fallo_de_transporte(&e))?;
+        let estado = respuesta.status();
+        let espera_indicada = leer_retry_after(respuesta.headers());
+        let cuerpo = respuesta
+            .text()
+            .await
+            .map_err(|e| self.fallo_de_transporte(&e))?;
+        if estado.is_success() {
+            return serde_json::from_str(&cuerpo).map_err(|e| {
+                FalloIntento::Definitivo(ErrorApiAnthropic::RespuestaNoValida(e.to_string()))
+            });
+        }
+        let detalle = self.sin_secreto(&detalle_de_error(&cuerpo));
+        Err(clasificar_estado(estado, detalle, espera_indicada))
+    }
+
+    fn fallo_de_transporte(&self, error: &reqwest::Error) -> FalloIntento {
+        let descripcion = self.sin_secreto(&error.to_string());
+        if error.is_timeout() || error.is_connect() || error.is_request() || error.is_body() {
+            FalloIntento::Reintentable {
+                espera_indicada: None,
+                descripcion,
+            }
+        } else {
+            FalloIntento::Definitivo(ErrorApiAnthropic::RespuestaNoValida(descripcion))
+        }
+    }
+
+    /// Defensa en profundidad: si un texto externo repitiera la key, no sale de aquí
+    fn sin_secreto(&self, texto: &str) -> String {
+        texto.replace(self.key.exponer(), "[REDACTED]")
+    }
+}
+
+fn leer_retry_after(cabeceras: &HeaderMap) -> Option<Duration> {
+    let valor = cabeceras.get(RETRY_AFTER)?.to_str().ok()?.trim();
+    valor
+        .parse::<f64>()
+        .ok()
+        .filter(|s| s.is_finite() && *s >= 0.0)
+        .map(Duration::from_secs_f64)
+}
+
+/// `error.message` del cuerpo de error de la API, o el cuerpo recortado
+fn detalle_de_error(cuerpo: &str) -> String {
+    let mensaje = serde_json::from_str::<Value>(cuerpo)
+        .ok()
+        .and_then(|v| v["error"]["message"].as_str().map(str::to_string))
+        .unwrap_or_else(|| cuerpo.to_string());
+    mensaje.chars().take(LONGITUD_MAXIMA_DETALLE).collect()
+}
+
+fn clasificar_estado(
+    estado: StatusCode,
+    detalle: String,
+    espera_indicada: Option<Duration>,
+) -> FalloIntento {
+    let codigo = estado.as_u16();
+    if ErrorApiAnthropic::estado_reintentable(codigo) {
+        return FalloIntento::Reintentable {
+            espera_indicada,
+            descripcion: format!("{codigo}: {detalle}"),
+        };
+    }
+    FalloIntento::Definitivo(match codigo {
+        400 => ErrorApiAnthropic::PeticionInvalida { detalle },
+        401 => ErrorApiAnthropic::Autenticacion,
+        403 => ErrorApiAnthropic::Permiso { detalle },
+        _ => ErrorApiAnthropic::EstadoNoReintentable {
+            estado: codigo,
+            detalle,
+        },
+    })
+}
+
+/// `max_tokens` nunca es un resultado válido; `refusal` es una salida controlada
+fn validar_stop_reason(
+    respuesta: RespuestaMensajes,
+) -> Result<RespuestaMensajes, ErrorApiAnthropic> {
+    match respuesta.stop_reason.as_deref() {
+        Some("max_tokens") => Err(ErrorApiAnthropic::RespuestaTruncada),
+        Some("refusal") => Err(ErrorApiAnthropic::Rechazo),
+        _ => Ok(respuesta),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+
+    use serde_json::json;
+    use wiremock::matchers::{header, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    use super::*;
+    use crate::infrastructure::llm::anthropic_api::mensajes::{BloqueRespuesta, MensajeEntrada};
+
+    const KEY_FALSA: &str = "sk-ant-test-NO-ES-REAL-7f3a9c";
+
+    fn config_rapida(base_url: &str) -> ConfigClienteAnthropic {
+        ConfigClienteAnthropic {
+            base_url: base_url.into(),
+            timeout_conexion: Duration::from_millis(300),
+            timeout_lectura: Duration::from_secs(2),
+            reintentos: PoliticaReintentos {
+                max_reintentos: 3,
+                espera_base: Duration::from_millis(1),
+                espera_maxima: Duration::from_millis(5),
+                tope_retry_after: Duration::from_millis(50),
+            },
+        }
+    }
+
+    fn cliente(servidor: &MockServer) -> AnthropicHttpClient {
+        AnthropicHttpClient::new(
+            SecretApiKey::new(KEY_FALSA).unwrap(),
+            config_rapida(&servidor.uri()),
+        )
+        .unwrap()
+    }
+
+    fn peticion() -> PeticionMensajes {
+        PeticionMensajes {
+            model: "claude-haiku-5-5".into(),
+            max_tokens: 64,
+            system: Vec::new(),
+            messages: vec![MensajeEntrada::usuario("hola")],
+            tools: Vec::new(),
+            tool_choice: None,
+        }
+    }
+
+    fn cuerpo_tool_use(stop_reason: &str) -> Value {
+        json!({
+            "id": "msg_1", "type": "message", "role": "assistant", "model": "claude-haiku-5-5",
+            "stop_reason": stop_reason,
+            "content": [{ "type": "tool_use", "id": "tu_1", "name": "emitir", "input": { "x": 1 } }],
+            "usage": { "input_tokens": 11, "cache_creation_input_tokens": 600,
+                       "cache_read_input_tokens": 0, "output_tokens": 22 },
+        })
+    }
+
+    fn error_api(tipo: &str, mensaje: &str) -> Value {
+        json!({ "type": "error", "error": { "type": tipo, "message": mensaje } })
+    }
+
+    async fn peticiones_recibidas(servidor: &MockServer) -> usize {
+        servidor.received_requests().await.map_or(0, |r| r.len())
+    }
+
+    #[tokio::test]
+    async fn test_tool_use_con_cabeceras_y_uso() {
+        let servidor = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/messages"))
+            .and(header("x-api-key", KEY_FALSA))
+            .and(header("anthropic-version", VERSION_API))
+            .and(header("content-type", "application/json"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(cuerpo_tool_use("tool_use")))
+            .mount(&servidor)
+            .await;
+        let resultado = cliente(&servidor).crear_mensaje(&peticion()).await.unwrap();
+        assert_eq!(resultado.intentos, 1);
+        assert_eq!(resultado.respuesta.stop_reason.as_deref(), Some("tool_use"));
+        assert!(matches!(
+            &resultado.respuesta.content[0],
+            BloqueRespuesta::ToolUse { name, .. } if name == "emitir"
+        ));
+        assert_eq!(resultado.respuesta.usage.cache_creation_input_tokens, 600);
+        assert_eq!(resultado.respuesta.usage.output_tokens, 22);
+    }
+
+    #[tokio::test]
+    async fn test_un_429_con_retry_after_y_luego_200() {
+        let servidor = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(
+                ResponseTemplate::new(429)
+                    .insert_header("retry-after", "0")
+                    .set_body_json(error_api("rate_limit_error", "despacio")),
+            )
+            .up_to_n_times(1)
+            .mount(&servidor)
+            .await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(cuerpo_tool_use("tool_use")))
+            .mount(&servidor)
+            .await;
+        let resultado = cliente(&servidor).crear_mensaje(&peticion()).await.unwrap();
+        assert_eq!(resultado.intentos, 2);
+        assert_eq!(peticiones_recibidas(&servidor).await, 2);
+    }
+
+    #[tokio::test]
+    async fn test_529_y_5xx_agotan_3_reintentos() {
+        for estado in [529u16, 503, 500] {
+            let servidor = MockServer::start().await;
+            Mock::given(method("POST"))
+                .respond_with(
+                    ResponseTemplate::new(estado).set_body_json(error_api("overloaded_error", "x")),
+                )
+                .mount(&servidor)
+                .await;
+            let error = cliente(&servidor)
+                .crear_mensaje(&peticion())
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(
+                    error,
+                    ErrorApiAnthropic::ReintentosAgotados { intentos: 4, .. }
+                ),
+                "{estado}: {error:?}"
+            );
+            assert_eq!(peticiones_recibidas(&servidor).await, 4, "{estado}");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_400_401_403_sin_reintento_y_accionables() {
+        let casos = [
+            (400u16, "invalid_request_error"),
+            (401, "authentication_error"),
+            (403, "permission_error"),
+        ];
+        for (estado, tipo) in casos {
+            let servidor = MockServer::start().await;
+            Mock::given(method("POST"))
+                .respond_with(
+                    ResponseTemplate::new(estado)
+                        .set_body_json(error_api(tipo, "detalle de la api")),
+                )
+                .mount(&servidor)
+                .await;
+            let error = cliente(&servidor)
+                .crear_mensaje(&peticion())
+                .await
+                .unwrap_err();
+            assert_eq!(peticiones_recibidas(&servidor).await, 1, "{estado}");
+            let esperado = match estado {
+                400 => {
+                    matches!(&error, ErrorApiAnthropic::PeticionInvalida { detalle } if detalle == "detalle de la api")
+                }
+                401 => error == ErrorApiAnthropic::Autenticacion,
+                _ => matches!(error, ErrorApiAnthropic::Permiso { .. }),
+            };
+            assert!(esperado, "{estado}: {error:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_max_tokens_nunca_es_valido_y_refusal_es_controlado() {
+        for (stop_reason, esperado) in [
+            ("max_tokens", ErrorApiAnthropic::RespuestaTruncada),
+            ("refusal", ErrorApiAnthropic::Rechazo),
+        ] {
+            let servidor = MockServer::start().await;
+            Mock::given(method("POST"))
+                .respond_with(
+                    ResponseTemplate::new(200).set_body_json(cuerpo_tool_use(stop_reason)),
+                )
+                .mount(&servidor)
+                .await;
+            let error = cliente(&servidor)
+                .crear_mensaje(&peticion())
+                .await
+                .unwrap_err();
+            assert_eq!(error, esperado);
+            assert_eq!(peticiones_recibidas(&servidor).await, 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_servidor_caido_agota_reintentos_sin_colgarse() {
+        // Un puerto liberado lo puede reutilizar otro test en paralelo: el 1 no escucha
+        let cliente = AnthropicHttpClient::new(
+            SecretApiKey::new(KEY_FALSA).unwrap(),
+            config_rapida("http://127.0.0.1:1"),
+        )
+        .unwrap();
+        let error = cliente.crear_mensaje(&peticion()).await.unwrap_err();
+        assert!(
+            matches!(
+                error,
+                ErrorApiAnthropic::ReintentosAgotados { intentos: 4, .. }
+            ),
+            "{error:?}"
+        );
+    }
+
+    #[test]
+    fn test_retry_after_se_respeta_con_tope() {
+        let politica = PoliticaReintentos {
+            tope_retry_after: Duration::from_secs(60),
+            ..PoliticaReintentos::default()
+        };
+        assert_eq!(
+            politica.espera(0, Some(Duration::from_secs(7))),
+            Duration::from_secs(7)
+        );
+        assert_eq!(
+            politica.espera(0, Some(Duration::from_secs(600))),
+            Duration::from_secs(60)
+        );
+        for reintento in 0..6 {
+            assert!(politica.espera(reintento, None) <= politica.espera_maxima);
+        }
+        let mut cabeceras = HeaderMap::new();
+        cabeceras.insert(RETRY_AFTER, "3".parse().unwrap());
+        assert_eq!(leer_retry_after(&cabeceras), Some(Duration::from_secs(3)));
+        cabeceras.insert(
+            RETRY_AFTER,
+            "Wed, 21 Oct 2026 07:28:00 GMT".parse().unwrap(),
+        );
+        assert_eq!(leer_retry_after(&cabeceras), None);
+    }
+}

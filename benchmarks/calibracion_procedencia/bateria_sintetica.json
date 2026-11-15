@@ -1,0 +1,201 @@
+{
+  "descripcion": "Micro-batería sintética propia para calibrar el Nivel 2 de procedencia (Pieza 5, Fase 5.1). Textos inventados, sin documentos reales. Cada cifra lleva si es legítima, una traza oráculo (solo las legítimas) y trazas adversarias que Rust debe rechazar.",
+  "casos": [
+    {
+      "id": "c01", "idioma": "es", "dominio": "finanzas", "formato": "miles con punto",
+      "pregunta": "¿Qué margen tuvo la empresa en 2025?",
+      "salidas": [{ "id": "t0", "herramienta": "lookup_double_entry_table", "texto": "Ingresos 2025: 1.250.400 €\nGastos 2025: 980.150 €" }],
+      "borrador": "El margen de 2025 fue de 270.250 €.",
+      "cifras": [
+        { "literal": "270.250", "legitima": true,
+          "oraculo": { "tipo": "aritmetica", "operacion": "resta", "operandos": [{ "origen": "t0", "texto": "1.250.400" }, { "origen": "t0", "texto": "980.150" }] } }
+      ]
+    },
+    {
+      "id": "c02", "idioma": "en", "dominio": "finanzas", "formato": "miles con coma, decimales con punto",
+      "pregunta": "What was the revenue for the first three quarters?",
+      "salidas": [{ "id": "t0", "herramienta": "lookup_double_entry_table", "texto": "Q1 revenue: 1,204.50\nQ2 revenue: 1,310.25\nQ3 revenue: 998.75" }],
+      "borrador": "Total revenue for the first three quarters is 3,513.50, and Q4 is expected at 1,400.00.",
+      "cifras": [
+        { "literal": "3,513.50", "legitima": true,
+          "oraculo": { "tipo": "aritmetica", "operacion": "suma", "operandos": [{ "origen": "t0", "texto": "1,204.50" }, { "origen": "t0", "texto": "1,310.25" }, { "origen": "t0", "texto": "998.75" }] } },
+        { "literal": "1,400.00", "legitima": false,
+          "adversarias": [{ "tipo": "aritmetica", "operacion": "suma", "operandos": [{ "origen": "t0", "texto": "1,204.50" }, { "origen": "t0", "texto": "998.75" }] }] }
+      ]
+    },
+    {
+      "id": "c03", "idioma": "de", "dominio": "recursos humanos", "formato": "miles con punto",
+      "pregunta": "Wie hoch ist der Anteil der Teilzeitkräfte?",
+      "salidas": [{ "id": "t0", "herramienta": "search_semantic_chunks", "texto": "Mitarbeiter gesamt: 1.200\nDavon in Teilzeit: 300" }],
+      "borrador": "25 % der Mitarbeiter arbeiten in Teilzeit.",
+      "cifras": [
+        { "literal": "25", "legitima": true,
+          "oraculo": { "tipo": "aritmetica", "operacion": "porcentaje", "operandos": [{ "origen": "t0", "texto": "300" }, { "origen": "t0", "texto": "1.200" }] } }
+      ]
+    },
+    {
+      "id": "c04", "idioma": "fr", "dominio": "jurídico", "formato": "referencia de artículo",
+      "pregunta": "Quel est le délai de préavis ?",
+      "salidas": [{ "id": "t0", "herramienta": "search_semantic_chunks", "texto": "Article quatorze (art. 14) — Le délai de préavis est fixé à trois mois." }],
+      "borrador": "Selon l'article 14, le préavis est de trois mois (version de 2019).",
+      "cifras": [
+        { "literal": "2019", "legitima": false,
+          "adversarias": [{ "tipo": "referencia_estructural", "subcadena": { "origen": "t0", "texto": "Article quatorze" } }] }
+      ]
+    },
+    {
+      "id": "c05", "idioma": "es", "dominio": "compras", "formato": "decimal con coma",
+      "pregunta": "¿Cuánto cuesta el pedido completo?",
+      "salidas": [{ "id": "t0", "herramienta": "lookup_double_entry_table", "texto": "Precio unitario: 12,50 €\nUnidades pedidas: 48" }],
+      "borrador": "El pedido cuesta 600 €, con un descuento de 30 €.",
+      "cifras": [
+        { "literal": "600", "legitima": true,
+          "oraculo": { "tipo": "aritmetica", "operacion": "producto", "operandos": [{ "origen": "t0", "texto": "12,50" }, { "origen": "t0", "texto": "48" }] } },
+        { "literal": "30", "legitima": false,
+          "adversarias": [{ "tipo": "aritmetica", "operacion": "resta", "operandos": [{ "origen": "t0", "texto": "48" }, { "origen": "t0", "texto": "12,50" }] }] }
+      ]
+    },
+    {
+      "id": "c06", "idioma": "en", "dominio": "presupuesto", "formato": "miles con coma",
+      "pregunta": "How much does each team receive?",
+      "salidas": [{ "id": "t0", "herramienta": "lookup_double_entry_table", "texto": "Total budget: 90,000 USD\nNumber of teams: 4" }],
+      "borrador": "Each team receives 22,500 USD.",
+      "cifras": [
+        { "literal": "22,500", "legitima": true,
+          "oraculo": { "tipo": "aritmetica", "operacion": "division", "operandos": [{ "origen": "t0", "texto": "90,000" }, { "origen": "t0", "texto": "4" }] } }
+      ]
+    },
+    {
+      "id": "c07", "idioma": "it", "dominio": "administración", "formato": "conteo",
+      "pregunta": "Quanti documenti servono per la domanda?",
+      "salidas": [{ "id": "t0", "herramienta": "search_semantic_chunks", "texto": "Requisiti: passaporto valido; certificato medico; fotografie recenti; ricevuta di pagamento." }],
+      "borrador": "Servono 4 documenti.",
+      "cifras": [
+        { "literal": "4", "legitima": true,
+          "oraculo": { "tipo": "conteo_elementos", "elementos": [{ "origen": "t0", "texto": "passaporto valido" }, { "origen": "t0", "texto": "certificato medico" }, { "origen": "t0", "texto": "fotografie recenti" }, { "origen": "t0", "texto": "ricevuta di pagamento" }] } }
+      ]
+    },
+    {
+      "id": "c08", "idioma": "es", "dominio": "ingeniería", "formato": "cambio de unidad",
+      "pregunta": "¿Cuál es la longitud máxima en metros?",
+      "salidas": [{ "id": "t0", "herramienta": "search_semantic_chunks", "texto": "Longitud máxima admisible: 1500 mm" }],
+      "borrador": "La longitud máxima es de 1,5 m.",
+      "cifras": [
+        { "literal": "1,5", "legitima": true,
+          "oraculo": { "tipo": "formato_o_escala", "fuente": { "origen": "t0", "texto": "1500" }, "factor_potencia_diez": -3 } }
+      ]
+    },
+    {
+      "id": "c09", "idioma": "pt", "dominio": "contratos", "formato": "fechas",
+      "pregunta": "Qual é a duração do contrato?",
+      "salidas": [{ "id": "t0", "herramienta": "search_semantic_chunks", "texto": "O contrato entra em vigor em 1 de julho de 2024 e termina em 30 de junho de 2027." }],
+      "borrador": "O contrato dura 3 anos, com renovação prevista em 2030.",
+      "cifras": [
+        { "literal": "3", "legitima": true,
+          "oraculo": { "tipo": "aritmetica", "operacion": "resta", "operandos": [{ "origen": "t0", "texto": "2027" }, { "origen": "t0", "texto": "2024" }] } },
+        { "literal": "2030", "legitima": false,
+          "adversarias": [{ "tipo": "aritmetica", "operacion": "suma", "operandos": [{ "origen": "t0", "texto": "2027" }, { "origen": "t0", "texto": "1" }] }] }
+      ]
+    },
+    {
+      "id": "c10", "idioma": "en", "dominio": "medio ambiente", "formato": "decimal con punto",
+      "pregunta": "How much did emissions fall in 2024?",
+      "salidas": [{ "id": "t0", "herramienta": "lookup_double_entry_table", "texto": "2023 emissions: 4.2 Mt\n2024 emissions: 3.5 Mt" }],
+      "borrador": "Emissions fell by 0.7 Mt in 2024, down from 5.1 Mt in 2022.",
+      "cifras": [
+        { "literal": "0.7", "legitima": true,
+          "oraculo": { "tipo": "aritmetica", "operacion": "resta", "operandos": [{ "origen": "t0", "texto": "4.2" }, { "origen": "t0", "texto": "3.5" }] } },
+        { "literal": "5.1", "legitima": false,
+          "adversarias": [{ "tipo": "formato_o_escala", "fuente": { "origen": "t0", "texto": "4.2" }, "factor_potencia_diez": 0 }] }
+      ]
+    },
+    {
+      "id": "c11", "idioma": "es", "dominio": "ventas", "formato": "tabla Markdown, miles con punto",
+      "pregunta": "¿Cuáles fueron las ventas totales?",
+      "salidas": [{ "id": "t0", "herramienta": "lookup_double_entry_table", "texto": "| Región | Ventas |\n| Norte | 1.200 |\n| Sur | 2.350 |\n| Este | 875 |\n| Oeste | 1.075 |" }],
+      "borrador": "Las ventas totales fueron 5.500.",
+      "cifras": [
+        { "literal": "5.500", "legitima": true,
+          "oraculo": { "tipo": "aritmetica", "operacion": "suma", "operandos": [{ "origen": "t0", "texto": "1.200" }, { "origen": "t0", "texto": "2.350" }, { "origen": "t0", "texto": "875" }, { "origen": "t0", "texto": "1.075" }] } }
+      ]
+    },
+    {
+      "id": "c12", "idioma": "es", "dominio": "normativa", "formato": "referencia compuesta 7.3",
+      "pregunta": "¿Dónde se regula el plazo de entrega?",
+      "salidas": [{ "id": "t0", "herramienta": "search_semantic_chunks", "texto": "Artículo 7.3. El plazo de entrega se fija en el contrato." }],
+      "borrador": "Se regula en el apartado 3 del artículo 7.",
+      "cifras": [
+        { "literal": "3", "legitima": true,
+          "oraculo": { "tipo": "referencia_estructural", "subcadena": { "origen": "t0", "texto": "Artículo 7.3" } } },
+        { "literal": "7", "legitima": true,
+          "oraculo": { "tipo": "referencia_estructural", "subcadena": { "origen": "t0", "texto": "Artículo 7.3" } } }
+      ]
+    },
+    {
+      "id": "c13", "idioma": "en", "dominio": "producción", "formato": "enteros",
+      "pregunta": "What was the combined output of both plants?",
+      "salidas": [{ "id": "t0", "herramienta": "lookup_double_entry_table", "texto": "Plant A output: 412 units\nPlant B output: 388 units" }],
+      "borrador": "Combined output was 820 units.",
+      "cifras": [
+        { "literal": "820", "legitima": false,
+          "adversarias": [{ "tipo": "aritmetica", "operacion": "suma", "operandos": [{ "origen": "t0", "texto": "412" }, { "origen": "t0", "texto": "388" }] }] }
+      ]
+    },
+    {
+      "id": "c14", "idioma": "es", "dominio": "medio ambiente", "formato": "cifra de memoria",
+      "pregunta": "¿Qué límite de ruido nocturno fija la norma?",
+      "salidas": [{ "id": "t0", "herramienta": "search_semantic_chunks", "texto": "La norma no fija un valor límite para el ruido nocturno." }],
+      "borrador": "La norma no lo fija, pero el límite habitual es de 55 dB.",
+      "cifras": [
+        { "literal": "55", "legitima": false,
+          "adversarias": [{ "tipo": "referencia_estructural", "subcadena": { "origen": "t0", "texto": "valor límite" } }] }
+      ]
+    },
+    {
+      "id": "c15", "idioma": "en", "dominio": "proveedores", "formato": "conteo falso",
+      "pregunta": "How many approved vendors are there?",
+      "salidas": [{ "id": "t0", "herramienta": "search_semantic_chunks", "texto": "Approved vendors: Acme; Borealis; Cobalt." }],
+      "borrador": "There are 4 approved vendors.",
+      "cifras": [
+        { "literal": "4", "legitima": false,
+          "adversarias": [{ "tipo": "conteo_elementos", "elementos": [{ "origen": "t0", "texto": "Acme" }, { "origen": "t0", "texto": "Borealis" }, { "origen": "t0", "texto": "Cobalt" }, { "origen": "t0", "texto": "Acme" }] }] }
+      ]
+    },
+    {
+      "id": "c16", "idioma": "nl", "dominio": "presupuesto", "formato": "miles con punto",
+      "pregunta": "Hoeveel van de begroting is uitgegeven?",
+      "salidas": [{ "id": "t0", "herramienta": "lookup_double_entry_table", "texto": "Begroting: 2.400.000 euro\nUitgegeven: 1.800.000 euro" }],
+      "borrador": "Er is 75 % van de begroting uitgegeven; er resteert 600.000 euro.",
+      "cifras": [
+        { "literal": "75", "legitima": true,
+          "oraculo": { "tipo": "aritmetica", "operacion": "porcentaje", "operandos": [{ "origen": "t0", "texto": "1.800.000" }, { "origen": "t0", "texto": "2.400.000" }] } },
+        { "literal": "600.000", "legitima": true,
+          "oraculo": { "tipo": "aritmetica", "operacion": "resta", "operandos": [{ "origen": "t0", "texto": "2.400.000" }, { "origen": "t0", "texto": "1.800.000" }] } }
+      ]
+    },
+    {
+      "id": "c17", "idioma": "en", "dominio": "energía", "formato": "cambio de unidad, miles con coma",
+      "pregunta": "What is the plant capacity in MW?",
+      "salidas": [{ "id": "t0", "herramienta": "search_semantic_chunks", "texto": "Installed capacity: 2.5 GW" }],
+      "borrador": "The capacity is 2,500 MW, reaching about 2,800 MW at peak.",
+      "cifras": [
+        { "literal": "2,500", "legitima": true,
+          "oraculo": { "tipo": "formato_o_escala", "fuente": { "origen": "t0", "texto": "2.5" }, "factor_potencia_diez": 3 } },
+        { "literal": "2,800", "legitima": false,
+          "adversarias": [{ "tipo": "formato_o_escala", "fuente": { "origen": "t0", "texto": "2.5" }, "factor_potencia_diez": 3 }] }
+      ]
+    },
+    {
+      "id": "c18", "idioma": "es", "dominio": "licencias", "formato": "operando en la pregunta",
+      "pregunta": "Si compro 3 licencias, ¿cuánto pago?",
+      "salidas": [{ "id": "t0", "herramienta": "search_semantic_chunks", "texto": "Licencia anual: 240 € por usuario." }],
+      "borrador": "Pagarías 720 €, más un IVA de 151,20 €.",
+      "cifras": [
+        { "literal": "720", "legitima": true,
+          "oraculo": { "tipo": "aritmetica", "operacion": "producto", "operandos": [{ "origen": "pregunta", "texto": "3" }, { "origen": "t0", "texto": "240" }] } },
+        { "literal": "151,20", "legitima": false,
+          "adversarias": [{ "tipo": "aritmetica", "operacion": "producto", "operandos": [{ "origen": "t0", "texto": "240" }, { "origen": "pregunta", "texto": "3" }] }] }
+      ]
+    }
+  ]
+}
