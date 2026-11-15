@@ -36,6 +36,10 @@ const MAXIMO_ORIGENES: usize = 8;
 /// Un entero de 4 cifras en este intervalo se trata como año: nunca es operando
 const ANIOS: std::ops::RangeInclusive<u64> = 1800..=2199;
 const MARCADORES_ESTRUCTURALES: &[char] = &['§', '#', '-'];
+/// Un apartado numerado (`3.`, `(12)`) tiene como mucho estos dígitos
+const DIGITOS_MAXIMOS_DE_APARTADO: usize = 3;
+/// Letras mínimas de una abreviatura (`art.`) que se compara con la palabra de un encabezado
+const LETRAS_MINIMAS_DE_ABREVIATURA: usize = 3;
 /// Estados del protocolo de las tools que significan que no hubo resultado
 const ESTADOS_SIN_RESULTADO: &[&str] = &["sin_coincidencia", "no_consta"];
 const CLAVE_ESTADO: &str = "estado";
@@ -59,7 +63,76 @@ pub(super) struct ContextoProcedencia {
     operandos: Vec<Operando>,
     /// Textos de las salidas, plegados y con espacios simples, para las referencias estructurales
     textos: Vec<String>,
+    /// Encabezados y apartados de línea de cada texto, para las referencias compuestas (`21.3`)
+    estructuras: Vec<EstructuraDeLineas>,
     bytes_de_texto: usize,
+}
+
+/// Lo que la tipografía de líneas de un texto declara como estructura: encabezados que abren
+/// línea con una palabra (o `§`) y un número (`Artículo 21. Plazos`, `## Section 4`), y apartados
+/// numerados que abren línea (`3.`, `2)`, `(4)`)
+#[derive(Debug, Default)]
+struct EstructuraDeLineas {
+    /// (palabra plegada o `§`, número)
+    encabezados: HashSet<(String, String)>,
+    apartados: HashSet<String>,
+}
+
+impl EstructuraDeLineas {
+    fn de(texto: &str) -> Self {
+        let mut estructura = Self::default();
+        for linea in texto.lines() {
+            let linea = linea.trim_start_matches(|l: char| {
+                l.is_whitespace() || matches!(l, '#' | '*' | '>' | '-' | '_')
+            });
+            if let Some(apartado) = apartado_que_abre(linea) {
+                estructura.apartados.insert(apartado);
+            } else if let Some(encabezado) = encabezado_que_abre(linea) {
+                estructura.encabezados.insert(encabezado);
+            }
+        }
+        estructura
+    }
+}
+
+/// `3.`, `2)` o `(4)` seguidos de un blanco o del final de la línea
+fn apartado_que_abre(linea: &str) -> Option<String> {
+    let sin_parentesis = linea.strip_prefix('(');
+    let resto = sin_parentesis.unwrap_or(linea);
+    let digitos: String = resto.chars().take_while(char::is_ascii_digit).collect();
+    if digitos.is_empty() || digitos.len() > DIGITOS_MAXIMOS_DE_APARTADO {
+        return None;
+    }
+    let mut tras = resto[digitos.len()..].chars();
+    let cierre = tras.next()?;
+    let cierra = if sin_parentesis.is_some() {
+        cierre == ')'
+    } else {
+        matches!(cierre, '.' | ')')
+    };
+    let separado = tras.next().is_none_or(char::is_whitespace);
+    (cierra && separado).then(|| digitos.trim_start_matches('0').to_string())
+}
+
+/// Una palabra (con su punto de abreviatura) o `§`, y un número entero que no sigue con dígitos
+fn encabezado_que_abre(linea: &str) -> Option<(String, String)> {
+    let palabra: String = if linea.starts_with('§') {
+        "§".to_string()
+    } else {
+        linea.chars().take_while(|l| l.is_alphabetic()).collect()
+    };
+    if palabra.is_empty() {
+        return None;
+    }
+    let resto = linea[palabra.len()..].trim_start_matches('.').trim_start();
+    let numero: String = resto.chars().take_while(char::is_ascii_digit).collect();
+    let tras = resto[numero.len()..].chars().next();
+    let entero = tras.is_none_or(|l| {
+        !l.is_alphanumeric()
+            && !(matches!(l, '.' | ',')
+                && resto[numero.len() + 1..].starts_with(|d: char| d.is_ascii_digit()))
+    });
+    (!numero.is_empty() && entero).then(|| (plegar_texto(&palabra), numero))
 }
 
 impl ContextoProcedencia {
@@ -72,7 +145,9 @@ impl ContextoProcedencia {
             recorrer_textos_planos(&salida.output, |texto| {
                 let restante = MAXIMO_BYTES_DE_REFERENCIA.saturating_sub(contexto.bytes_de_texto);
                 if restante > 0 {
-                    let texto = prefijo_de_bytes(&espacios_simples(&plegar_texto(texto)), restante);
+                    let prefijo = prefijo_de_bytes(texto, restante);
+                    contexto.estructuras.push(EstructuraDeLineas::de(&prefijo));
+                    let texto = espacios_simples(&plegar_texto(&prefijo));
                     contexto.bytes_de_texto += texto.len();
                     contexto.textos.push(texto);
                 }
@@ -258,6 +333,8 @@ pub(super) struct RespuestaAnalizada {
     pub(super) cifras: Vec<CifraHallada>,
     /// Inicio y fin (en caracteres) de cada oración
     oraciones: Vec<(usize, usize)>,
+    /// Inicio y fin de cada cláusula: las oraciones, cortadas además por tipografía
+    clausulas: Vec<(usize, usize)>,
     /// Posiciones de las cifras que no son años ni fechas, en orden: la secuencia en que se mide
     /// si unos operandos van citados seguidos
     secuencia: Vec<usize>,
@@ -272,9 +349,11 @@ impl RespuestaAnalizada {
             .filter(|cifra| !es_anio_o_fecha(cifra))
             .map(|cifra| cifra.posicion)
             .collect();
+        let oraciones = oraciones(&letras);
         Self {
             cifras,
-            oraciones: oraciones(&letras),
+            clausulas: clausulas(&letras, &oraciones),
+            oraciones,
             letras,
             secuencia,
         }
@@ -286,11 +365,18 @@ impl RespuestaAnalizada {
             .map(|(inicio, fin)| self.letras[*inicio..*fin].iter().collect())
     }
 
+    pub(super) fn clausulas(&self) -> impl Iterator<Item = String> + '_ {
+        self.clausulas
+            .iter()
+            .map(|(inicio, fin)| self.letras[*inicio..*fin].iter().collect())
+    }
+
+    pub(super) fn clausula_de(&self, posicion: usize) -> usize {
+        indice_de_tramo(&self.clausulas, posicion)
+    }
+
     pub(super) fn oracion_de(&self, posicion: usize) -> usize {
-        // Oraciones ordenadas y contiguas: búsqueda binaria, no un recorrido por cifra
-        self.oraciones
-            .partition_point(|(_, fin)| *fin <= posicion)
-            .min(self.oraciones.len().saturating_sub(1))
+        indice_de_tramo(&self.oraciones, posicion)
     }
 
     /// Tipografía: `12,5 %` o `12,5%` es un porcentaje
@@ -324,6 +410,48 @@ impl RespuestaAnalizada {
     fn cerca(&self, una: usize, otra: usize) -> bool {
         una.abs_diff(otra) <= VENTANA_DE_CITA || self.oracion_de(una) == self.oracion_de(otra)
     }
+}
+
+/// Tramos ordenados y contiguos: búsqueda binaria, no un recorrido por cifra
+fn indice_de_tramo(tramos: &[(usize, usize)], posicion: usize) -> usize {
+    tramos
+        .partition_point(|(_, fin)| *fin <= posicion)
+        .min(tramos.len().saturating_sub(1))
+}
+
+/// Las oraciones, cortadas también tras `;`, antes de un paréntesis o corchete que abre, tras el
+/// que cierra y en una raya entre espacios (` — `, ` – `). La coma no corta: une la locución con
+/// lo que la completa («no consta el margen, solo los costes de 903,4»).
+fn clausulas(letras: &[char], oraciones: &[(usize, usize)]) -> Vec<(usize, usize)> {
+    let mut clausulas = Vec::new();
+    for &(inicio_oracion, fin_oracion) in oraciones {
+        let mut inicio = inicio_oracion;
+        for posicion in inicio_oracion..fin_oracion {
+            let letra = letras[posicion];
+            let entre_espacios = |p: usize| {
+                p > 0
+                    && letras[p - 1].is_whitespace()
+                    && letras.get(p + 1).is_some_and(|l| l.is_whitespace())
+            };
+            let corte = match letra {
+                '(' | '[' | '（' => Some(posicion),
+                ';' | '；' | ')' | ']' | '）' => Some(posicion + 1),
+                '—' | '–' if entre_espacios(posicion) => Some(posicion),
+                _ => None,
+            };
+            if let Some(corte) = corte.filter(|c| *c > inicio) {
+                clausulas.push((inicio, corte));
+                inicio = corte;
+            }
+        }
+        if fin_oracion > inicio {
+            clausulas.push((inicio, fin_oracion));
+        }
+    }
+    if clausulas.is_empty() {
+        clausulas.push((0, letras.len()));
+    }
+    clausulas
 }
 
 /// Una oración termina en `.` `!` `?` (o sus formas CJK) seguidos de un blanco, o en un salto de
@@ -628,6 +756,53 @@ pub(super) fn es_referencia_estructural(
             .textos
             .iter()
             .any(|texto| contiene_con_limites(texto, aguja))
+    }) || es_referencia_compuesta(respuesta, cifra, contexto)
+}
+
+/// `artículo 21.3`, `Section 4.2`, `§ 33.4`: el texto que abre una línea con el encabezado
+/// (`Artículo 21`, o su abreviatura `art.`) abre otra con el apartado (`3.`, `(3)`)
+fn es_referencia_compuesta(
+    respuesta: &RespuestaAnalizada,
+    cifra: &CifraHallada,
+    contexto: &ContextoProcedencia,
+) -> bool {
+    let Some((numero, apartado)) = cifra.literal.split_once('.') else {
+        return false;
+    };
+    let solo_digitos = |parte: &str| !parte.is_empty() && parte.chars().all(|l| l.is_ascii_digit());
+    if !solo_digitos(numero)
+        || !solo_digitos(apartado)
+        || apartado.len() > DIGITOS_MAXIMOS_DE_APARTADO
+    {
+        return false;
+    }
+    let apartado = apartado.trim_start_matches('0');
+    let tras_parrafo = respuesta.letras[..cifra.posicion]
+        .iter()
+        .rev()
+        .find(|l| !l.is_whitespace())
+        == Some(&'§');
+    let palabra = if tras_parrafo {
+        Some("§".to_string())
+    } else {
+        palabra_anterior(&respuesta.letras, cifra.posicion)
+    };
+    let Some(palabra) = palabra else {
+        return false;
+    };
+    let nombra = |encabezado: &str| match palabra.strip_suffix('.') {
+        Some(abreviatura) => {
+            abreviatura.chars().count() >= LETRAS_MINIMAS_DE_ABREVIATURA
+                && encabezado.starts_with(abreviatura)
+        }
+        None => encabezado == palabra,
+    };
+    contexto.estructuras.iter().any(|estructura| {
+        estructura.apartados.contains(apartado)
+            && estructura
+                .encabezados
+                .iter()
+                .any(|(encabezado, n)| n == numero && nombra(encabezado))
     })
 }
 
@@ -1035,6 +1210,52 @@ mod tests {
         let ley = busqueda(&[("LEY-1", "Artículo 210. Plazos. El plazo es de 21 días.")]);
         assert!(estructurales("Lo regula el artículo 21.", std::slice::from_ref(&ley)).is_empty());
         assert!(estructurales("Lo regula la sección 210.", &[ley]).is_empty());
+    }
+
+    #[test]
+    fn test_referencia_compuesta_a_encabezado_y_apartado_en_varias_escrituras() {
+        let ley = busqueda(&[
+            ("LEY-1", "Artículo 21. Plazos\n1. General.\n3. Urgente."),
+            ("LEY-1", "## Section 4 Records\n(2) Keep records."),
+            ("LEY-1", "Статья 7. Сфера\n2) Для всех."),
+            ("LEY-1", "§ 33 Geltung\n(4) Frist."),
+        ]);
+        for (respuesta, cifra) in [
+            ("Lo regula el artículo 21.3.", "21.3"),
+            ("Lo regula el art. 21.3.", "21.3"),
+            ("See Section 4.2.", "4.2"),
+            ("Это статья 7.2.", "7.2"),
+            ("Siehe § 33.4.", "33.4"),
+        ] {
+            assert_eq!(
+                estructurales(respuesta, std::slice::from_ref(&ley)),
+                vec![cifra],
+                "{respuesta}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_referencia_compuesta_exige_encabezado_apartado_y_mismo_texto() {
+        let ley = busqueda(&[
+            ("LEY-1", "Artículo 21. Plazos\n1. General.\n3. Urgente."),
+            ("LEY-1", "El plazo es de 2 días.\n5. Otras normas."),
+            ("LEY-1", "Artículo 30. Recursos"),
+            ("LEY-1", "7. Apartado suelto"),
+        ]);
+        for respuesta in [
+            "Lo regula el artículo 21.5.",
+            "Lo regula la sección 21.3.",
+            "Suele ser de 2.5 bar.",
+            // El apartado 7 está en otro texto que el artículo 30
+            "Lo regula el artículo 30.7.",
+            "Lo regula el ar. 21.3.",
+        ] {
+            assert!(
+                estructurales(respuesta, std::slice::from_ref(&ley)).is_empty(),
+                "{respuesta}"
+            );
+        }
     }
 
     #[test]

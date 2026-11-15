@@ -205,6 +205,160 @@ fn test_articulos_y_secciones_en_varias_lenguas_en_abstencion() {
     );
 }
 
+// --- Paso 1: falsos «no consta + valor nuevo» (diagnóstico con casos sintéticos propios) ---
+
+#[test]
+fn test_referencia_compuesta_a_un_apartado_numerado_del_encabezado() {
+    for (fuente, respuesta) in [
+        (
+            "Artículo 21. Plazos\n1. El plazo general.\n3. Las solicitudes urgentes.",
+            "El plazo urgente lo fija el artículo 21.3; no consta un plazo para recursos.",
+        ),
+        (
+            "Section 4 Records\n2. The operator shall keep records.",
+            "Lo exige la Section 4.2; no consta la duración.",
+        ),
+        (
+            "Статья 7. Сфера\n2. Действует для всех.",
+            "Lo dice la статья 7.2; no consta excepción.",
+        ),
+        (
+            "Artículo 21. Plazos\n(3) Las solicitudes urgentes.",
+            "Lo fija el art. 21.3; no consta otro plazo.",
+        ),
+    ] {
+        let r = registro(vec![busqueda("LEY-2", &[fuente])]);
+        assert_eq!(dato(respuesta, &r), Ok(()), "{respuesta}");
+    }
+}
+
+#[test]
+fn test_referencia_compuesta_sin_apartado_o_sin_encabezado_se_rechaza() {
+    for (fuente, respuesta, cifra) in [
+        // El artículo existe, pero no tiene apartado 5
+        (
+            "Artículo 21. Plazos\n1. El plazo general.\n3. Las solicitudes urgentes.",
+            "Lo fija el artículo 21.5; no consta otro plazo.",
+            "21.5",
+        ),
+        // «de 2» y una línea «5.» no son un encabezado: un valor de memoria no pasa
+        (
+            "El plazo es de 2 días.\n5. Otras normas.",
+            "No consta la presión. Suele ser de 2.5 bar.",
+            "2.5",
+        ),
+        (
+            "El plazo es de 2 días.\n5. Otras normas.",
+            "La presión suele ser de 2.5 bar; no consta en el documento.",
+            "2.5",
+        ),
+    ] {
+        let r = registro(vec![busqueda("LEY-2", &[fuente])]);
+        assert_eq!(dato(respuesta, &r), en_abstencion(cifra), "{respuesta}");
+    }
+}
+
+#[test]
+fn test_fecha_de_la_fuente_en_cifras_ancla_la_misma_fecha_en_otro_formato() {
+    for (fuente, respuesta) in [
+        (
+            "Revisión aprobada el 15/03/2023.",
+            "La revisión es del 15 de marzo de 2023; no consta la siguiente.",
+        ),
+        (
+            "Freigabe: 15.03.2023",
+            "Se aprobó el 2023-03-15; no consta la siguiente revisión.",
+        ),
+        (
+            "Effective 03/15/2023.",
+            "Entra en vigor el 15 de marzo de 2023; no consta la siguiente.",
+        ),
+        (
+            "Утверждено 2023/03/15.",
+            "Se aprobó el 2023-03-15; no consta la siguiente.",
+        ),
+        (
+            "Aprobado el 15 de marzo de 2023.",
+            "Se aprobó en 03/2023; no consta la siguiente revisión.",
+        ),
+    ] {
+        let r = registro(vec![busqueda("DOC-F", &[fuente])]);
+        assert_eq!(dato(respuesta, &r), Ok(()), "{respuesta}");
+    }
+}
+
+#[test]
+fn test_fecha_distinta_de_la_de_la_fuente_se_sigue_rechazando() {
+    let r = registro(vec![busqueda(
+        "DOC-F",
+        &["Revisión aprobada el 15/03/2023."],
+    )]);
+    assert_eq!(
+        dato(
+            "Se aprobó el 16 de marzo de 2023; no consta la siguiente.",
+            &r
+        ),
+        en_abstencion("16 de marzo de 2023")
+    );
+    assert_eq!(
+        dato("No consta. La siguiente será el 2024-03-15.", &r),
+        en_abstencion("2024-03-15")
+    );
+}
+
+#[test]
+fn test_calculo_en_otra_clausula_de_la_oracion_de_la_abstencion_lateral() {
+    let tabla = registro(vec![busqueda(
+        "FIN-1",
+        &["| Concepto | 2025 | 2024 |\n| Ingresos | 1.482,6 | 1.317,9 |"],
+    )]);
+    for respuesta in [
+        "Los ingresos son 1.482,6 y 1.317,9. Suben 164,7 (de 1.317,9 a 1.482,6); no consta el desglose.",
+        "Resumen de ingresos. Suben 164,7 (de 1.317,9 a 1.482,6), aunque no consta el desglose.",
+        "Resumen. Revenue grew by 164,7 (from 1.317,9 to 1.482,6) — no consta el desglose por región.",
+    ] {
+        assert_eq!(dato(respuesta, &tabla), Ok(()), "{respuesta}");
+    }
+    let dosis = registro(vec![busqueda(
+        "MED-4",
+        &["Доза утром 250 мг, вечером 125 мг."],
+    )]);
+    assert_eq!(
+        dato(
+            "Pauta. Son 375 mg al día (250 mg y 125 mg); no consta la dosis pediátrica.",
+            &dosis
+        ),
+        Ok(())
+    );
+}
+
+#[test]
+fn test_cifra_en_la_clausula_de_la_locucion_o_de_memoria_se_sigue_rechazando() {
+    let tabla = registro(vec![busqueda(
+        "FIN-1",
+        &["| Concepto | 2025 | 2024 |\n| Ingresos | 1.482,6 | 1.317,9 |"],
+    )]);
+    for (respuesta, cifra) in [
+        // La cifra comparte cláusula con la locución
+        (
+            "Resumen. Los ingresos son 1.482,6 y 1.317,9; la subida de 164,7 no consta.",
+            "164,7",
+        ),
+        // Operandos solo en la cláusula de la locución
+        (
+            "Resumen. No consta el desglose de 1.317,9 y 1.482,6; suben 164,7.",
+            "164,7",
+        ),
+        // Otra cláusula, pero de memoria: no deriva de lo citado
+        (
+            "Resumen. Los ingresos son 1.482,6; no consta la previsión (rondará 1.600).",
+            "1.600",
+        ),
+    ] {
+        assert_eq!(dato(respuesta, &tabla), en_abstencion(cifra), "{respuesta}");
+    }
+}
+
 // --- Trampas: la cifra de memoria se sigue rechazando ---
 
 #[test]
@@ -330,7 +484,21 @@ const ENSAYOS: usize = 5000;
 /// 60 cifras en 3 chunks del mismo documento (tablas de 4 filas de 5 valores). La respuesta cita
 /// `citadas` cifras de un mismo chunk y añade una cifra aleatoria que no está en el contexto, en
 /// una abstención lateral.
-fn tasa_de_falsos_aceptados(semilla: u64, cerca_de_los_citados: bool, citadas: usize) -> f64 {
+/// Dónde va la cifra inventada respecto a la locución de la abstención lateral
+#[derive(Clone, Copy)]
+enum Redaccion {
+    /// En otra oración: «…; el resultado es X. No consta el desglose.»
+    OtraOracion,
+    /// En otra cláusula de la oración de la locución: «… (resultado: X); no consta el desglose.»
+    OtraClausula,
+}
+
+fn tasa_de_falsos_aceptados(
+    semilla: u64,
+    cerca_de_los_citados: bool,
+    citadas: usize,
+    redaccion: Redaccion,
+) -> f64 {
     let numero_de_citadas = citadas;
     let mut azar = Azar(semilla);
     let (mut aceptados, mut evaluados) = (0, 0);
@@ -386,10 +554,15 @@ fn tasa_de_falsos_aceptados(semilla: u64, cerca_de_los_citados: bool, citadas: u
         let signo = if azar.hasta(3) == 0 { " %" } else { "" };
         let (ultima, primeras) = citadas.split_last().expect("al menos una citada");
         let primeras: Vec<&str> = primeras.iter().map(|c| c.as_str()).collect();
-        let respuesta = format!(
-            "Los valores son {} y {ultima}; el resultado es {inyectada}{signo}. No consta el desglose.",
-            primeras.join(", ")
-        );
+        let primeras = primeras.join(", ");
+        let respuesta = match redaccion {
+            Redaccion::OtraOracion => format!(
+                "Los valores son {primeras} y {ultima}; el resultado es {inyectada}{signo}. No consta el desglose."
+            ),
+            Redaccion::OtraClausula => format!(
+                "Resumen. Los valores son {primeras} y {ultima} (resultado: {inyectada}{signo}); no consta el desglose."
+            ),
+        };
         let aceptada = match dato(&respuesta, &r) {
             Ok(()) => true,
             Err(ViolacionArnes::CifraEnAbstencion { cifra }) => {
@@ -412,13 +585,19 @@ fn exigir_tasas(variante: &str, semillas: &[u64], cerca_de_los_citados: bool) {
     let mut excedidas = Vec::new();
     for &semilla in semillas {
         for citadas in [3, 4] {
-            let tasa = tasa_de_falsos_aceptados(semilla, cerca_de_los_citados, citadas);
-            println!(
-                "Monte Carlo ({variante}, {citadas} citadas), semilla {semilla:#x}: {:.3} %",
-                tasa * 100.0
-            );
-            if tasa > 0.003 {
-                excedidas.push((semilla, citadas, tasa));
+            for (redaccion, lugar) in [
+                (Redaccion::OtraOracion, "otra oración"),
+                (Redaccion::OtraClausula, "otra cláusula"),
+            ] {
+                let tasa =
+                    tasa_de_falsos_aceptados(semilla, cerca_de_los_citados, citadas, redaccion);
+                println!(
+                    "Monte Carlo ({variante}, {citadas} citadas, {lugar}), semilla {semilla:#x}: {:.3} %",
+                    tasa * 100.0
+                );
+                if tasa > 0.003 {
+                    excedidas.push((semilla, citadas, lugar, tasa));
+                }
             }
         }
     }
