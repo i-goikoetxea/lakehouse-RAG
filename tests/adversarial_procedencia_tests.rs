@@ -250,6 +250,49 @@ fn test_diferencia_con_un_solo_operando_citado_se_rechaza() {
     );
 }
 
+// --- Clausura de 3 y 4 operandos, todos citados ---
+
+#[test]
+fn test_suma_de_tres_y_resta_de_cuatro_citadas_en_abstencion_lateral() {
+    let pesos = registro(vec![busqueda(
+        "ALM-2",
+        &["Pieza A 120 kg, pieza B 85 kg, pieza C 40 kg."],
+    )]);
+    assert_eq!(
+        dato(
+            "Las tres piezas suman 245 kg (120, 85 y 40). No consta el embalaje.",
+            &pesos
+        ),
+        Ok(())
+    );
+    let cuenta = registro(vec![busqueda(
+        "FIN-9",
+        &["| Revenue | 1,482.6 |\n| COGS | 903.4 |\n| Opex | 211.0 |\n| Tax | 58.2 |"],
+    )]);
+    assert_eq!(
+        dato(
+            "El neto es 310,0 (1.482,6 menos 903,4, 211,0 y 58,2). No consta el desglose.",
+            &cuenta
+        ),
+        Ok(())
+    );
+}
+
+#[test]
+fn test_suma_de_tres_con_un_operando_sin_citar_se_rechaza() {
+    let pesos = registro(vec![busqueda(
+        "ALM-2",
+        &["Pieza A 120 kg, pieza B 85 kg, pieza C 40 kg."],
+    )]);
+    assert_eq!(
+        dato(
+            "Las piezas A y B (120 y 85) y la C suman 245 kg. No consta el embalaje.",
+            &pesos
+        ),
+        en_abstencion("245")
+    );
+}
+
 // --- Salvaguarda (c): Monte Carlo ---
 
 /// xorshift64*: determinista y sin dependencias
@@ -285,9 +328,10 @@ const FILAS_POR_CHUNK: usize = 4;
 const ENSAYOS: usize = 5000;
 
 /// 60 cifras en 3 chunks del mismo documento (tablas de 4 filas de 5 valores). La respuesta cita
-/// 3 cifras de un mismo chunk y añade una cifra aleatoria que no está en el contexto, en una
-/// abstención lateral.
-fn tasa_de_falsos_aceptados(semilla: u64, cerca_de_los_citados: bool) -> f64 {
+/// `citadas` cifras de un mismo chunk y añade una cifra aleatoria que no está en el contexto, en
+/// una abstención lateral.
+fn tasa_de_falsos_aceptados(semilla: u64, cerca_de_los_citados: bool, citadas: usize) -> f64 {
+    let numero_de_citadas = citadas;
     let mut azar = Azar(semilla);
     let (mut aceptados, mut evaluados) = (0, 0);
     for _ in 0..ENSAYOS {
@@ -315,7 +359,7 @@ fn tasa_de_falsos_aceptados(semilla: u64, cerca_de_los_citados: bool) -> f64 {
         let r = registro(vec![busqueda("DOC-MC", &textos)]);
         let chunk = azar.hasta(textos.len());
         let base = chunk * POR_FILA * FILAS_POR_CHUNK;
-        let citadas: Vec<&String> = (0..3)
+        let citadas: Vec<&String> = (0..numero_de_citadas)
             .map(|_| &cifras[base + azar.hasta(POR_FILA * FILAS_POR_CHUNK)])
             .collect();
         let inyectada = if cerca_de_los_citados {
@@ -340,9 +384,11 @@ fn tasa_de_falsos_aceptados(semilla: u64, cerca_de_los_citados: bool) -> f64 {
         }
         // Un tercio de las inyectadas se escribe como porcentaje, que admite otra operación
         let signo = if azar.hasta(3) == 0 { " %" } else { "" };
+        let (ultima, primeras) = citadas.split_last().expect("al menos una citada");
+        let primeras: Vec<&str> = primeras.iter().map(|c| c.as_str()).collect();
         let respuesta = format!(
-            "Los valores son {}, {} y {}; el resultado es {inyectada}{signo}. No consta el desglose.",
-            citadas[0], citadas[1], citadas[2]
+            "Los valores son {} y {ultima}; el resultado es {inyectada}{signo}. No consta el desglose.",
+            primeras.join(", ")
         );
         let aceptada = match dato(&respuesta, &r) {
             Ok(()) => true,
@@ -361,34 +407,49 @@ fn tasa_de_falsos_aceptados(semilla: u64, cerca_de_los_citados: bool) -> f64 {
     aceptados as f64 / evaluados.max(1) as f64
 }
 
+/// Mide todas las semillas y luego exige el umbral: un fallo no oculta las tasas restantes
+fn exigir_tasas(variante: &str, semillas: &[u64], cerca_de_los_citados: bool) {
+    let mut excedidas = Vec::new();
+    for &semilla in semillas {
+        for citadas in [3, 4] {
+            let tasa = tasa_de_falsos_aceptados(semilla, cerca_de_los_citados, citadas);
+            println!(
+                "Monte Carlo ({variante}, {citadas} citadas), semilla {semilla:#x}: {:.3} %",
+                tasa * 100.0
+            );
+            if tasa > 0.003 {
+                excedidas.push((semilla, citadas, tasa));
+            }
+        }
+    }
+    assert!(
+        excedidas.is_empty(),
+        "tasas de falsos aceptados > 0,3 %: {excedidas:?}"
+    );
+}
+
 #[test]
 fn test_monte_carlo_falsos_aceptados_por_debajo_del_tres_por_mil() {
-    for semilla in [
-        0x5EED_0001,
-        0x5EED_0002,
-        0x5EED_0003,
-        0x5EED_0021,
-        0x5EED_0022,
-    ] {
-        let tasa = tasa_de_falsos_aceptados(semilla, false);
-        println!(
-            "Monte Carlo (cifra aleatoria), semilla {semilla:#x}: {:.3} %",
-            tasa * 100.0
-        );
-        assert!(tasa <= 0.003, "tasa de falsos aceptados {tasa} > 0,3 %");
-    }
+    exigir_tasas(
+        "cifra aleatoria",
+        &[
+            0x5EED_0001,
+            0x5EED_0002,
+            0x5EED_0003,
+            0x5EED_0021,
+            0x5EED_0022,
+        ],
+        false,
+    );
 }
 
 #[test]
 fn test_monte_carlo_cifra_cercana_a_las_citadas_por_debajo_del_tres_por_mil() {
-    for semilla in [0x5EED_0011, 0x5EED_0012, 0x5EED_0013, 0x5EED_0031] {
-        let tasa = tasa_de_falsos_aceptados(semilla, true);
-        println!(
-            "Monte Carlo (cifra cercana), semilla {semilla:#x}: {:.3} %",
-            tasa * 100.0
-        );
-        assert!(tasa <= 0.003, "tasa de falsos aceptados {tasa} > 0,3 %");
-    }
+    exigir_tasas(
+        "cifra cercana",
+        &[0x5EED_0011, 0x5EED_0012, 0x5EED_0013, 0x5EED_0031],
+        true,
+    );
 }
 
 // --- Cotas: una entrada hostil no cuelga el Nivel 1 ni la detección de JSON embebido ---

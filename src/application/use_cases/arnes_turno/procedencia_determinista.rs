@@ -1,8 +1,9 @@
 //! Nivel 1 del verificador de procedencia (Pieza 4): reglas deterministas, sin Claude, para las
 //! cifras de la respuesta que no aparecen literalmente en las salidas del turno.
 //!
-//! - **Clausura aritmética de pares:** la cifra es la suma, la resta o la variación porcentual de
-//!   dos cifras de la misma salida, citadas cerca de ella en la respuesta.
+//! - **Clausura aritmética:** la cifra es la suma, la resta o la variación porcentual de dos
+//!   cifras, o la suma o resta de 3 o 4, de la misma salida. Los operandos van citados en la
+//!   respuesta, seguidos, y la cifra derivada junto a ellos.
 //! - **Referencia estructural:** el par (palabra anterior, cifra), o la cifra tras `§`, `#` o `-`,
 //!   está literalmente en las salidas.
 //!
@@ -25,6 +26,13 @@ const MAXIMO_OPERANDOS: usize = 2000;
 const MAXIMO_CITAS: usize = 64;
 /// Tope de bytes de texto de las salidas en que se buscan las referencias estructurales
 const MAXIMO_BYTES_DE_REFERENCIA: usize = 256 * 1024;
+/// Número de operandos de la clausura más allá de los pares
+const OPERANDOS_DE_LA_CLAUSURA: std::ops::RangeInclusive<usize> = 3..=4;
+/// Operandos citados (los más cercanos a la cifra) que se combinan de 3 en 3 y de 4 en 4 por
+/// origen: C(12, 4) · 15 signos ≈ 7400 sumas
+const MAXIMO_OPERANDOS_POR_ORIGEN: usize = 12;
+/// Orígenes (chunk, fila o documento) que se examinan por cifra
+const MAXIMO_ORIGENES: usize = 8;
 /// Un entero de 4 cifras en este intervalo se trata como año: nunca es operando
 const ANIOS: std::ops::RangeInclusive<u64> = 1800..=2199;
 const MARCADORES_ESTRUCTURALES: &[char] = &['§', '#', '-'];
@@ -250,15 +258,25 @@ pub(super) struct RespuestaAnalizada {
     pub(super) cifras: Vec<CifraHallada>,
     /// Inicio y fin (en caracteres) de cada oración
     oraciones: Vec<(usize, usize)>,
+    /// Posiciones de las cifras que no son años ni fechas, en orden: la secuencia en que se mide
+    /// si unos operandos van citados seguidos
+    secuencia: Vec<usize>,
 }
 
 impl RespuestaAnalizada {
     pub(super) fn nueva(respuesta: &str) -> Self {
         let letras: Vec<char> = respuesta.chars().collect();
+        let cifras = extraer_cifras(respuesta);
+        let secuencia = cifras
+            .iter()
+            .filter(|cifra| !es_anio_o_fecha(cifra))
+            .map(|cifra| cifra.posicion)
+            .collect();
         Self {
-            cifras: extraer_cifras(respuesta),
+            cifras,
             oraciones: oraciones(&letras),
             letras,
+            secuencia,
         }
     }
 
@@ -282,6 +300,25 @@ impl RespuestaAnalizada {
             .iter()
             .find(|l| !matches!(l, ' ' | '\u{00A0}' | '\u{202F}'))
             .is_some_and(|l| matches!(l, '%' | '٪'))
+    }
+
+    /// Los operandos van seguidos en la respuesta (sin otras cifras entre ellos, salvo años o
+    /// fechas) y la cifra derivada va justo antes o justo después del grupo
+    fn citados_junto_a(&self, derivada: usize, operandos: &[usize]) -> bool {
+        let rango = |posicion: usize| self.secuencia.binary_search(&posicion).ok();
+        let (Some(objetivo), Some(rangos)) = (
+            rango(derivada),
+            operandos
+                .iter()
+                .map(|p| rango(*p))
+                .collect::<Option<Vec<usize>>>(),
+        ) else {
+            return false;
+        };
+        let (Some(primero), Some(ultimo)) = (rangos.iter().min(), rangos.iter().max()) else {
+            return false;
+        };
+        ultimo - primero + 1 == rangos.len() && (objetivo + 1 == *primero || objetivo == ultimo + 1)
     }
 
     fn cerca(&self, una: usize, otra: usize) -> bool {
@@ -320,7 +357,8 @@ fn decimales_escritos(cifra: &CifraHallada, lectura: &str) -> i32 {
     })
 }
 
-/// ¿La cifra `indice` de la respuesta es suma, resta o variación porcentual de dos operandos?
+/// ¿La cifra `indice` de la respuesta es suma, resta o variación porcentual de dos operandos, o
+/// suma o resta de 3 o 4?
 /// `vetada(posicion)` excluye las citas que no pueden respaldar (las de una oración de
 /// abstención).
 pub(super) fn es_derivada(
@@ -359,6 +397,23 @@ pub(super) fn es_derivada(
     if operandos.is_empty() {
         return false;
     }
+    es_derivada_de_un_par(respuesta, cifra, &operandos, &citadas)
+        || es_suma_o_resta_de_varios(respuesta, cifra, &citadas, &operandos)
+}
+
+fn es_derivada_de_un_par(
+    respuesta: &RespuestaAnalizada,
+    cifra: &CifraHallada,
+    operandos: &[&Operando],
+    citadas: &[&CifraHallada],
+) -> bool {
+    // Como en la clausura de 3 y 4: los dos operandos, citados seguidos y junto a la cifra
+    let citados_junto = |a: &Operando, b: &Operando| {
+        posiciones_de_cita(a, citadas).any(|pa| {
+            posiciones_de_cita(b, citadas)
+                .any(|pb| pa != pb && respuesta.citados_junto_a(cifra.posicion, &[pa, pb]))
+        })
+    };
     cifra.lecturas.iter().any(|lectura| {
         let Ok(objetivo) = lectura.parse::<f64>() else {
             return false;
@@ -368,7 +423,8 @@ pub(super) fn es_derivada(
         let encaja = |valor: f64| (valor - objetivo).abs() <= tolerancia;
         let es_porcentaje = respuesta.va_seguida_de_porcentaje(cifra);
         // Los dos operandos van citados cerca de la cifra (salvaguarda (a)). Con uno solo en la
-        // misma fila, el Monte Carlo daba un 2,6 % de falsos aceptados con 60 cifras en contexto.
+        // misma fila, el Monte Carlo daba un 2,6 % de falsos aceptados con 60 cifras en contexto;
+        // sin exigirlos seguidos y junto a la cifra, un 0,35 % con 4 cifras citadas.
         (0..operandos.len()).any(|i| {
             (0..operandos.len()).any(|j| {
                 let (a, b) = (operandos[i], operandos[j]);
@@ -380,6 +436,7 @@ pub(super) fn es_derivada(
                 }
                 let mismo_origen = a.unidad == b.unidad || (a.doc.is_some() && a.doc == b.doc);
                 mismo_origen
+                    && citados_junto(a, b)
                     && [(a, b), (b, a)].iter().any(|(x, y)| {
                         if es_porcentaje {
                             y.valor != 0.0 && encaja((x.valor - y.valor) / y.valor * 100.0)
@@ -394,6 +451,152 @@ pub(super) fn es_derivada(
                         }
                     })
             })
+        })
+    })
+}
+
+/// Posiciones, en la respuesta, de las cifras citadas que leen igual que el operando
+fn posiciones_de_cita<'a>(
+    operando: &'a Operando,
+    citadas: &'a [&CifraHallada],
+) -> impl Iterator<Item = usize> + 'a {
+    citadas
+        .iter()
+        .filter(|c| c.lecturas.iter().any(|l| operando.lecturas.contains(l)))
+        .map(|c| c.posicion)
+}
+
+/// Un operando de la clausura de 3 y 4, con la cifra citada de la respuesta que lo respalda
+type OperandoCitado<'a> = (usize, &'a Operando);
+
+/// Suma o resta de 3 o 4 operandos. Cada operando es una cifra **distinta** citada en la respuesta
+/// y todos salen del mismo chunk, tabla o fila (o del mismo documento): nunca se combinan cifras
+/// del contexto que la respuesta no cita. Además, los operandos van citados seguidos y la cifra
+/// derivada junto al grupo, como se escribe un total (`245 (120, 85 y 40)`): sin esto, cada
+/// cifra citada de más multiplica las combinaciones y las coincidencias por azar (Monte Carlo).
+/// Sin porcentajes: la variación es de dos valores.
+fn es_suma_o_resta_de_varios(
+    respuesta: &RespuestaAnalizada,
+    cifra: &CifraHallada,
+    citadas: &[&CifraHallada],
+    operandos: &[&Operando],
+) -> bool {
+    if respuesta.va_seguida_de_porcentaje(cifra) {
+        return false;
+    }
+    let respaldados: Vec<OperandoCitado> = operandos
+        .iter()
+        .filter(|operando| !operando.lecturas.iter().any(|l| cifra.lecturas.contains(l)))
+        .filter_map(|operando| {
+            let cita = citadas
+                .iter()
+                .position(|c| c.lecturas.iter().any(|l| operando.lecturas.contains(l)))?;
+            Some((cita, *operando))
+        })
+        .collect();
+    let distancia = |(cita, _): &OperandoCitado| citadas[*cita].posicion.abs_diff(cifra.posicion);
+    origenes_comunes(&respaldados)
+        .into_iter()
+        .take(MAXIMO_ORIGENES)
+        .any(|mut origen| {
+            origen.sort_by_key(distancia);
+            origen.truncate(MAXIMO_OPERANDOS_POR_ORIGEN);
+            OPERANDOS_DE_LA_CLAUSURA.into_iter().any(|cuantos| {
+                hay_combinacion(&origen, cuantos, 0, &mut Vec::new(), &|elegidos| {
+                    let posiciones: Vec<usize> = elegidos
+                        .iter()
+                        .map(|(cita, _)| citadas[*cita].posicion)
+                        .collect();
+                    respuesta.citados_junto_a(cifra.posicion, &posiciones)
+                        && suma_con_signos_encaja(cifra, elegidos)
+                })
+            })
+        })
+}
+
+/// Grupos de operandos de un mismo objeto (chunk, tabla o fila) o de un mismo documento, con al
+/// menos tantas citas distintas como el mínimo de la clausura
+fn origenes_comunes<'a>(respaldados: &[OperandoCitado<'a>]) -> Vec<Vec<OperandoCitado<'a>>> {
+    let mut por_unidad: Vec<(usize, Vec<OperandoCitado>)> = Vec::new();
+    let mut por_documento: Vec<(&str, Vec<OperandoCitado>)> = Vec::new();
+    for respaldado in respaldados {
+        let (_, operando) = respaldado;
+        match por_unidad.iter_mut().find(|(u, _)| *u == operando.unidad) {
+            Some((_, grupo)) => grupo.push(*respaldado),
+            None => por_unidad.push((operando.unidad, vec![*respaldado])),
+        }
+        if let Some(doc) = operando.doc.as_deref() {
+            match por_documento.iter_mut().find(|(d, _)| *d == doc) {
+                Some((_, grupo)) => grupo.push(*respaldado),
+                None => por_documento.push((doc, vec![*respaldado])),
+            }
+        }
+    }
+    let minimo = *OPERANDOS_DE_LA_CLAUSURA.start();
+    por_unidad
+        .into_iter()
+        .map(|(_, grupo)| grupo)
+        .chain(por_documento.into_iter().map(|(_, grupo)| grupo))
+        .filter(|grupo| {
+            let citas: HashSet<usize> = grupo.iter().map(|(cita, _)| *cita).collect();
+            citas.len() >= minimo
+        })
+        .collect()
+}
+
+/// ¿Alguna combinación de `cuantos` operandos con citas y valores distintos cumple `encaja`?
+fn hay_combinacion<'a>(
+    candidatos: &[OperandoCitado<'a>],
+    cuantos: usize,
+    desde: usize,
+    elegidos: &mut Vec<OperandoCitado<'a>>,
+    encaja: &impl Fn(&[OperandoCitado<'a>]) -> bool,
+) -> bool {
+    if elegidos.len() == cuantos {
+        return encaja(elegidos);
+    }
+    for siguiente in desde..candidatos.len() {
+        let (cita, operando) = candidatos[siguiente];
+        let repetido = elegidos
+            .iter()
+            .any(|(otra, otro)| *otra == cita || otro.lecturas == operando.lecturas);
+        if repetido {
+            continue;
+        }
+        elegidos.push(candidatos[siguiente]);
+        let hallada = hay_combinacion(candidatos, cuantos, siguiente + 1, elegidos, encaja);
+        elegidos.pop();
+        if hallada {
+            return true;
+        }
+    }
+    false
+}
+
+/// `±a ± b ± c (± d)` con al menos un sumando positivo, exacto a la precisión de los operandos
+fn suma_con_signos_encaja(cifra: &CifraHallada, elegidos: &[OperandoCitado]) -> bool {
+    cifra.lecturas.iter().any(|lectura| {
+        let Ok(objetivo) = lectura.parse::<f64>() else {
+            return false;
+        };
+        let precision = elegidos
+            .iter()
+            .map(|(_, o)| o.decimales)
+            .fold(decimales_escritos(cifra, lectura), i32::max);
+        let tolerancia = 0.5 * 10f64.powi(-precision) + 1e-9;
+        (1u32..(1 << elegidos.len())).any(|positivos| {
+            let total: f64 = elegidos
+                .iter()
+                .enumerate()
+                .map(|(i, (_, o))| {
+                    if positivos & (1 << i) != 0 {
+                        o.valor
+                    } else {
+                        -o.valor
+                    }
+                })
+                .sum();
+            (total - objetivo).abs() <= tolerancia
         })
     })
 }
@@ -586,6 +789,115 @@ mod tests {
             ),
             vec!["375"]
         );
+    }
+
+    #[test]
+    fn test_suma_de_tres_operandos_citados_del_mismo_chunk() {
+        let pesos = busqueda(&[("ALM-2", "Pieza A 120 kg, pieza B 85 kg, pieza C 40 kg.")]);
+        assert_eq!(
+            derivadas("Las tres piezas suman 245 kg (120, 85 y 40).", &[pesos]),
+            vec!["245"]
+        );
+    }
+
+    #[test]
+    fn test_resta_de_cuatro_operandos_con_decimales_en_ingles() {
+        let cuenta = busqueda(&[(
+            "FIN-9",
+            "| Revenue | 1,482.6 |\n| COGS | 903.4 |\n| Opex | 211.0 |\n| Tax | 58.2 |",
+        )]);
+        // 1482,6 − 903,4 − 211,0 − 58,2 = 310,0
+        assert_eq!(
+            derivadas(
+                "Net income is 310.0 (1,482.6 less 903.4, 211.0 and 58.2).",
+                &[cuenta]
+            ),
+            vec!["310.0"]
+        );
+    }
+
+    #[test]
+    fn test_signos_mezclados_de_tres_operandos_en_aleman() {
+        let lager = busqueda(&[("LAG-1", "Anfangsbestand 500 Stück, Zugang 120, Abgang 80.")]);
+        // 500 + 120 − 80 = 540
+        assert_eq!(
+            derivadas("Endbestand: 540 (500 + 120 − 80).", &[lager]),
+            vec!["540"]
+        );
+    }
+
+    #[test]
+    fn test_un_operando_sin_citar_impide_la_suma_de_tres() {
+        let pesos = busqueda(&[("ALM-2", "Pieza A 120 kg, pieza B 85 kg, pieza C 40 kg.")]);
+        // 120 + 85 + 40 = 245, pero 40 no está en la respuesta: nada de sumas sobre el chunk
+        assert!(derivadas("Las piezas A y B (120 y 85) y la C suman 245 kg.", &[pesos]).is_empty());
+    }
+
+    #[test]
+    fn test_la_suma_de_tres_exige_los_operandos_seguidos_y_junto_al_total() {
+        let pesos = busqueda(&[(
+            "ALM-2",
+            "Pieza A 120 kg, pieza B 85 kg, pieza C 40 kg, palé 9 kg.",
+        )]);
+        // Seguidos y junto al total, aunque medie un año
+        assert_eq!(
+            derivadas(
+                "En 2025, 120, 85 y 40 kg suman 245 kg.",
+                std::slice::from_ref(&pesos)
+            ),
+            vec!["245"]
+        );
+        // El palé (9) se interpone entre los operandos y el total
+        assert!(
+            derivadas(
+                "A 120 kg, B 85 kg, C 40 kg y palé 9 kg; las piezas suman 245 kg.",
+                std::slice::from_ref(&pesos)
+            )
+            .is_empty()
+        );
+        // Operandos separados por otra cifra
+        assert!(derivadas("Con 120, 9, 85 y 40 kg: 245 kg.", &[pesos]).is_empty());
+    }
+
+    #[test]
+    fn test_el_par_exige_los_operandos_seguidos_y_junto_a_la_cifra() {
+        let tabla = busqueda(&[("IND-7", "Índice A: 85. Índice B: 120. Índice C: 40.")]);
+        // 120 − 85 = 35, con el 40 citado entre los operandos y la cifra: no se rescata aquí
+        // (queda pendiente para el Nivel 2)
+        assert!(
+            derivadas(
+                "A vale 85 y B 120; C, 40. De A a B hay 35.",
+                std::slice::from_ref(&tabla)
+            )
+            .is_empty()
+        );
+        assert_eq!(
+            derivadas("C vale 40. De 85 a 120 hay 35.", &[tabla]),
+            vec!["35"]
+        );
+    }
+
+    #[test]
+    fn test_operandos_de_documentos_distintos_no_suman_tres() {
+        let a = busqueda(&[("DOC-A", "Caudal 80")]);
+        let b = busqueda(&[("DOC-B", "Caudal 50 y 20")]);
+        assert!(derivadas("Entre 80, 50 y 20 hay 150.", &[a, b]).is_empty());
+    }
+
+    #[test]
+    fn test_cinco_operandos_quedan_fuera_de_la_clausura() {
+        let lista = busqueda(&[("INV-1", "Lotes: 11, 22, 33, 44 y 55 unidades.")]);
+        // 11 + 22 + 33 + 44 + 55 = 165: más de 4 operandos no se combinan
+        // (las citadas sí son pares entre sí: 22 = 33 − 11; solo cuenta el 165)
+        let derivadas = derivadas("Los lotes 11, 22, 33, 44 y 55 suman 165.", &[lista]);
+        assert!(!derivadas.contains(&"165".to_string()), "{derivadas:?}");
+    }
+
+    #[test]
+    fn test_un_operando_citado_dos_veces_no_cuenta_como_dos() {
+        let lista = busqueda(&[("INV-1", "Lotes: 30 y 12 unidades; reserva 30.")]);
+        // 30 + 30 + 12 = 72 exige citar dos veces el 30 como operandos distintos
+        assert!(derivadas("Con 30 y 12 unidades el total es 72.", &[lista]).is_empty());
     }
 
     #[test]
