@@ -7,7 +7,7 @@
 //! ligaduras), se busca en los textos marcados con `⟦p. N⟧` de las tools del turno y su página
 //! se lee de las marcas, que salen de los saltos guardados en `02_chunks_normativa`.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 
 use serde_json::Value;
 
@@ -25,6 +25,9 @@ const VENTANA_REFERENCIA: usize = 80;
 /// Un rango más largo cuenta solo por sus extremos
 const MAX_PAGINAS_EN_RANGO: u32 = 50;
 const LONGITUD_MAXIMA_EXTRACTO_MOSTRADO: usize = 80;
+/// Un extracto más corto (en caracteres) puede repetirse en otra página del mismo documento: si
+/// el turno recuperó la página citada, la discrepancia no es evidencia suficiente
+const LONGITUD_EXTRACTO_CORTO: usize = 40;
 const PARES_DE_COMILLAS: &[(char, char)] = &[('«', '»'), ('“', '”'), ('"', '"')];
 const APERTURAS: &[char] = &['«', '“', '"'];
 /// De la más larga a la más corta: `paginas` antes que `pagina`
@@ -46,7 +49,9 @@ pub enum ResultadoCita {
     Discrepante {
         verificadas: Paginas,
     },
-    /// Aparece en varias páginas distintas y ninguna es la citada: puede ser un texto repetido
+    /// Aparece en varias páginas distintas y ninguna es la citada: puede ser un texto repetido. O
+    /// un extracto corto que aparece en una sola página, cuando la citada también se recuperó en
+    /// el turno para ese documento
     Ambigua {
         apariciones: Vec<Paginas>,
     },
@@ -85,8 +90,9 @@ impl VerificadorPaginas {
         let fuentes: Vec<FuentePaginada> = registro
             .textos_paginables()
             .into_iter()
-            .map(FuentePaginada::nueva)
+            .map(|(doc, texto)| FuentePaginada::nueva(texto, doc))
             .collect();
+        let recuperadas = paginas_recuperadas_por_documento(&fuentes);
         let metadatos: Vec<String> = registro.metadatos().into_iter().map(esqueleto).collect();
         let mut revisadas: Vec<CitaRevisada> = Vec::new();
         for (extracto, citadas) in extractos_con_pagina(respuesta) {
@@ -101,6 +107,14 @@ impl VerificadorPaginas {
                 continue;
             }
             let resultado = comprobar(&esqueleto, &citadas, &fuentes);
+            let resultado = callar_si_es_corto_y_se_leyo_la_citada(
+                resultado,
+                &extracto,
+                &esqueleto,
+                &citadas,
+                &fuentes,
+                &recuperadas,
+            );
             if resultado != ResultadoCita::Confirmada
                 && no_es_extracto_del_cuerpo(&esqueleto, &metadatos, &fuentes)
             {
@@ -174,6 +188,53 @@ fn comprobar(esqueleto: &str, citadas: &Paginas, fuentes: &[FuentePaginada]) -> 
     }
 }
 
+/// Páginas con texto recuperado en el turno, por documento
+fn paginas_recuperadas_por_documento(fuentes: &[FuentePaginada]) -> HashMap<&str, Paginas> {
+    let mut recuperadas: HashMap<&str, Paginas> = HashMap::new();
+    for fuente in fuentes {
+        if let Some(doc) = fuente.doc.as_deref() {
+            recuperadas
+                .entry(doc)
+                .or_default()
+                .extend(fuente.paginas.iter().flatten().copied());
+        }
+    }
+    recuperadas
+}
+
+/// Un `Discrepante` de un extracto corto pasa a `Ambigua` (silencio) si alguna página citada se
+/// recuperó en el turno para el documento en que aparece el extracto. Sin `doc_id` conocido, se
+/// mantiene: el silencio solo con esa evidencia.
+fn callar_si_es_corto_y_se_leyo_la_citada(
+    resultado: ResultadoCita,
+    extracto: &str,
+    esqueleto: &str,
+    citadas: &Paginas,
+    fuentes: &[FuentePaginada],
+    recuperadas: &HashMap<&str, Paginas>,
+) -> ResultadoCita {
+    let ResultadoCita::Discrepante { verificadas } = resultado else {
+        return resultado;
+    };
+    let corto = extracto.trim().chars().count() < LONGITUD_EXTRACTO_CORTO;
+    let leida = fuentes
+        .iter()
+        .filter(|fuente| fuente.esqueleto.contains(esqueleto))
+        .filter_map(|fuente| fuente.doc.as_deref())
+        .any(|doc| {
+            recuperadas
+                .get(doc)
+                .is_some_and(|p| !p.is_disjoint(citadas))
+        });
+    if corto && leida {
+        ResultadoCita::Ambigua {
+            apariciones: vec![verificadas],
+        }
+    } else {
+        ResultadoCita::Discrepante { verificadas }
+    }
+}
+
 /// Un título o un breadcrumb del turno, o la línea que abre una página (cabecera o título), no
 /// son extractos del cuerpo: una página distinta en ellos no es un error que señalar
 fn no_es_extracto_del_cuerpo(
@@ -202,6 +263,8 @@ fn es_linea_que_abre_pagina(esqueleto: &str, fuentes: &[FuentePaginada]) -> bool
 /// Esqueleto de un texto marcado, la página de cada byte del esqueleto y dónde empiezan las
 /// páginas y terminan las líneas, en bytes del esqueleto
 struct FuentePaginada {
+    /// Documento del fragmento, si la salida lo declara
+    doc: Option<String>,
     esqueleto: String,
     paginas: Vec<Option<u32>>,
     /// Solo los saltos interiores: la marca inicial abre el fragmento, no necesariamente la página
@@ -217,8 +280,9 @@ struct FinalDeLinea {
 }
 
 impl FuentePaginada {
-    fn nueva(texto: &str) -> Self {
+    fn nueva(texto: &str, doc: Option<&str>) -> Self {
         let mut fuente = Self {
+            doc: doc.map(str::to_string),
             esqueleto: String::new(),
             paginas: Vec::new(),
             inicios_de_pagina: Vec::new(),
@@ -499,12 +563,46 @@ pub fn formatear_paginas(paginas: &Paginas) -> String {
 
 /// Campo con el texto marcado de un fragmento o de una sección
 const CLAVE_TEXTO_MARCADO: &str = "texto";
+const CLAVE_DOC_ID: &str = "doc_id";
 /// Campos que llevan texto del documento: lo demás (títulos, breadcrumbs, códigos) son metadatos
 const CLAVES_DE_TEXTO_DOCUMENTAL: &[&str] = &[CLAVE_TEXTO_MARCADO, "texto_contenido"];
 
-/// Textos `texto` de la salida de una tool que marca páginas
-pub(super) fn textos_marcables(salida: &Value) -> Vec<&str> {
-    cadenas_con_clave(salida, |clave| clave == CLAVE_TEXTO_MARCADO)
+/// Textos `texto` de la salida de una tool que marca páginas, con su `doc_id`: el del propio
+/// objeto, el de un objeto hijo directo (`cita`) o el heredado de un objeto padre
+pub(super) fn textos_marcables(salida: &Value) -> Vec<(Option<&str>, &str)> {
+    let mut textos = Vec::new();
+    let mut pendientes: Vec<(&Value, Option<&str>)> = vec![(salida, None)];
+    while let Some((valor, heredado)) = pendientes.pop() {
+        match valor {
+            Value::Array(elementos) => pendientes.extend(elementos.iter().map(|e| (e, heredado))),
+            Value::Object(campos) => {
+                let doc = doc_de_objeto(valor).or(heredado);
+                for (clave, contenido) in campos {
+                    match contenido {
+                        Value::String(texto) if clave == CLAVE_TEXTO_MARCADO => {
+                            textos.push((doc, texto.as_str()))
+                        }
+                        Value::String(_) => {}
+                        otro => pendientes.push((otro, doc)),
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    textos
+}
+
+fn doc_de_objeto(objeto: &Value) -> Option<&str> {
+    objeto
+        .get(CLAVE_DOC_ID)
+        .and_then(Value::as_str)
+        .or_else(|| {
+            objeto
+                .as_object()?
+                .values()
+                .find_map(|hijo| hijo.as_object()?.get(CLAVE_DOC_ID).and_then(Value::as_str))
+        })
 }
 
 /// Cadenas de una salida que no son texto del documento
@@ -931,6 +1029,92 @@ mod tests {
             unico(&format!("«{FRASE}» (p. 52)"), &registro).resultado,
             ResultadoCita::Discrepante {
                 verificadas: paginas(&[53])
+            }
+        );
+    }
+
+    /// Búsqueda con un chunk por (doc_id, texto marcado), con el `doc_id` en `cita`
+    fn busqueda_por_documento(chunks: &[(&str, &str)]) -> RegistroTurno {
+        let resultados: Vec<_> = chunks
+            .iter()
+            .map(|(doc, texto)| json!({ "texto": texto, "cita": { "doc_id": doc } }))
+            .collect();
+        let mut registro = RegistroTurno::default();
+        registro.registrar(ToolResult {
+            call_id: "1".into(),
+            tool_name: LakehouseToolName::SearchNormativeContext.as_str().into(),
+            output: json!({ "grupos": [{ "resultados": resultados }] }),
+            is_error: false,
+        });
+        registro
+    }
+
+    const CORTO_ES: &str = "Válvula de corte V-12 cerrada";
+    const CORTO_RU: &str = "Клапан V-12 закрыт";
+
+    fn documentos_paginados() -> RegistroTurno {
+        busqueda_por_documento(&[
+            (
+                "MAN-1",
+                &format!("⟦p. 4⟧ Intro del manual.\n⟦p. 5⟧ {CORTO_ES}. {FRASE}."),
+            ),
+            ("MAN-1", &format!("⟦p. 9⟧ {CORTO_RU}. Fin del anexo.")),
+            ("OTRO-2", "⟦p. 30⟧ Texto de otro documento."),
+        ])
+    }
+
+    #[test]
+    fn test_extracto_corto_con_pagina_recuperada_del_mismo_documento_es_ambiguo() {
+        let registro = documentos_paginados();
+        for (extracto, citada, verificada) in [(CORTO_ES, 4, 5), (CORTO_ES, 9, 5), (CORTO_RU, 5, 9)]
+        {
+            let cita = unico(&format!("«{extracto}» (p. {citada})"), &registro);
+            assert_eq!(
+                cita.resultado,
+                ResultadoCita::Ambigua {
+                    apariciones: vec![paginas(&[verificada])]
+                },
+                "{extracto} p. {citada}"
+            );
+            assert!(cita.motivo().is_none());
+        }
+    }
+
+    #[test]
+    fn test_extracto_corto_con_pagina_no_recuperada_o_de_otro_documento_se_anota() {
+        let registro = documentos_paginados();
+        // p. 7 no se recuperó; p. 30 es de otro documento
+        for citada in [7, 30] {
+            let cita = unico(&format!("«{CORTO_ES}» (p. {citada})"), &registro);
+            assert_eq!(
+                cita.resultado,
+                ResultadoCita::Discrepante {
+                    verificadas: paginas(&[5])
+                },
+                "p. {citada}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_extracto_largo_con_pagina_recuperada_se_sigue_anotando() {
+        let cita = unico(&format!("«{FRASE}» (p. 4)"), &documentos_paginados());
+        assert_eq!(
+            cita.resultado,
+            ResultadoCita::Discrepante {
+                verificadas: paginas(&[5])
+            }
+        );
+    }
+
+    #[test]
+    fn test_extracto_corto_sin_documento_conocido_se_sigue_anotando() {
+        let registro = busqueda(&[&format!("⟦p. 4⟧ Intro del manual.\n⟦p. 5⟧ {CORTO_ES}.")]);
+        let cita = unico(&format!("«{CORTO_ES}» (p. 4)"), &registro);
+        assert_eq!(
+            cita.resultado,
+            ResultadoCita::Discrepante {
+                verificadas: paginas(&[5])
             }
         );
     }

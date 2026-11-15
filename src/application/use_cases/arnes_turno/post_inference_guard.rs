@@ -113,8 +113,9 @@ impl RegistroTurno {
         self.salidas_validas().any(es_matriz_sin_responsable)
     }
 
-    /// Textos de las tools que marcan páginas (`⟦p. N⟧`), para comprobar las citas
-    pub(super) fn textos_paginables(&self) -> Vec<&str> {
+    /// Textos de las tools que marcan páginas (`⟦p. N⟧`), con su `doc_id` si se conoce, para
+    /// comprobar las citas
+    pub(super) fn textos_paginables(&self) -> Vec<(Option<&str>, &str)> {
         self.salidas_validas()
             .filter(|r| {
                 HERRAMIENTAS_CON_MARCAS
