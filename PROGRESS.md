@@ -1549,3 +1549,33 @@
   - El puntuador da falsos negativos cuando la respuesta cita valores de otros documentos como no aplicables.
   - Hace falta un set nuevo que discrimine, escrito por la sesión evaluadora.
   - La integración la coordina la sesión principal; hay otra rama que toca `validar_con_procedencia`.
+
+### Sesión Paso 1 (2026-11-15): pulido determinista del Nivel 1
+
+**Estado: `[COMPLETADO]`, pendiente de aprobación. Rama `claude/paso1-nivel1-a810a2` desde `dfab51a`, sin push ni merge.** Informe: `benchmarks/informes/paso1_nivel1_20261115.md`. No se ha leído el set oculto.
+
+**Errores y retrocesos (primero):**
+- **Con 4 cifras citadas, el Monte Carlo ya fallaba en `main`:** 0,347 % solo por la regla de pares, y 0,391 % con la clausura de 3-4. Se corrigió con una regla general: los operandos van citados seguidos y la cifra derivada va junto a ellos (sin contar años ni fechas). Después, el máximo es 0,086 % en 36 mediciones.
+- **Endurecimiento declarado de los pares:** un par con otra cifra en medio ya no lo rescata el Nivel 1; pasa al Nivel 2 o al reintento. Sin efecto medible en las 148 guardadas (0 → 0 rechazos); no está medido con respuestas reales.
+- **Verificador de páginas:** se pierden por diseño las notas de extractos cortos (< 40 caracteres) con la página citada recuperada en el turno: 48/48 → 0/48 en los fixtures sintéticos. El resto, 240/240, sin cambios.
+- **Queda sin resolver:** la fecha con el mes en palabras de otro idioma («March 15, 2023»), que exigiría listas por idioma.
+- **TDD no estricto** en la contigüidad de los pares (experimento primero) y en el rojo del verificador.
+- **Entorno:** faltaba `vendor/pdfium/pdfium.dll` en el worktree (65 fallos en el primer intento de la base). Se copió del checkout principal.
+
+**Cambios:**
+- [x] Clausura de 3 y 4 operandos: todos citados, distintos, del mismo chunk, fila o documento, y seguidos; sin subset-sum. Cotas nuevas de 12 operandos por origen y 8 orígenes; las `MAXIMO_*` no cambian.
+- [x] «No consta + valor nuevo», con tres causas diagnosticadas en 20 casos propios:
+  - referencias compuestas (`artículo 21.3`: encabezado de línea más apartado de línea en el mismo texto);
+  - fechas en cifras de la fuente, que anclan su ISO (día-mes y mes-día), y la fecha textual, que ancla el mes;
+  - cifras en otra cláusula (`;`, paréntesis, raya) de la oración de la locución, que las rescata solo el Nivel 1. El Nivel 2 sigue estricto en toda la oración.
+- [x] Verificador de páginas: `Discrepante` → `Ambigua` con extracto < 40 caracteres y página citada recuperada para ese `doc_id`. Sin `doc_id`, se mantiene la nota.
+- [x] Timeout del Nivel 2 por CLI de 10 s a 20 s. Un timeout sigue sin aprobar. No se tocó `anthropic_api/` ni `Cargo.toml`.
+
+**Tests:** base de 1122/0/35; final de **1151/0/35**. Nuevo `tests/sensibilidad_verificador_paginas.rs`; el Monte Carlo ahora mide con 3 y con 4 citadas, en otra oración y en otra cláusula. `clippy` y `fmt` limpios. Diagnóstico: 13 → 1 rechazos indebidos. Segunda batería distinta (FR, IT, PL, PT, con trampas): 16/16.
+
+**Notas para la siguiente sesión:**
+- Lo escribió todo la misma sesión: medir con el replay ciego de la evaluadora.
+  - ¿Cuántos «no consta + valor» desaparecen, y alguno era trampa?
+  - ¿Cuántas notas de extracto corto se silencian, y eran errores reales?
+- Solo hay 148 respuestas guardadas en disco (no las 477), y ninguna ejercita el Nivel 1 ni tiene citas confirmadas.
+- El SSD §4.6 dice todavía «timeout de 10 s».

@@ -1,6 +1,6 @@
 //! Extracción y normalización de cifras en Rust estándar, sin `regex`.
 
-use super::fechas::{FechaHallada, fecha_iso_en, fecha_textual_en};
+use super::fechas::{FechaHallada, fecha_iso_en, fecha_textual_en, fechas_en_cifras_en};
 
 /// Cifra hallada en un texto, con sus lecturas canónicas posibles.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -79,11 +79,15 @@ pub(super) fn lecturas_de_fuente(texto: &str) -> Vec<String> {
             posicion += 1;
             continue;
         }
-        // La fecha entera ancla la respuesta que la cite, y sus partes, la que cite el año o el día.
+        // La fecha entera ancla la respuesta que la cite, y sus partes, la que cite el año, el mes
+        // o el día. Una fecha en cifras (`15/03/2023`) ancla también su forma ISO.
         if let Some(fecha) =
             fecha_iso_en(&letras, posicion).or_else(|| fecha_textual_en(&letras, posicion))
         {
+            lecturas.push(canonica(&fecha.iso[5..7], ""));
             lecturas.push(fecha.iso);
+        } else if !va_tras_identificador(&letras, posicion) {
+            lecturas.extend(fechas_en_cifras_en(&letras, posicion));
         }
         let fin_token = fin_de_token(&letras, posicion);
         if es_token_opaco(&letras[posicion..fin_token]) {
@@ -540,6 +544,46 @@ mod tests {
         let fecha = anclas("¿qué temperatura el 11 de septiembre de 2025?");
         for lectura in ["2025-09-11", "11", "2025"] {
             assert!(fecha.contains(&lectura.to_string()), "{fecha:?}");
+        }
+    }
+
+    #[test]
+    fn test_una_fuente_ancla_el_mes_de_la_fecha_textual() {
+        assert!(anclas("el 11 de septiembre de 2025").contains(&"9".to_string()));
+    }
+
+    #[test]
+    fn test_una_fuente_ancla_la_fecha_en_cifras_como_iso_en_cualquier_orden_valido() {
+        for (texto, iso) in [
+            ("aprobada el 15/03/2023.", vec!["2023-03-15"]),
+            ("Freigabe: 15.03.2023", vec!["2023-03-15"]),
+            ("vigor 1-6-2026", vec!["2026-06-01", "2026-01-06"]),
+            ("Effective 03/15/2023", vec!["2023-03-15"]),
+            ("Утверждено 2023/03/15.", vec!["2023-03-15"]),
+            ("2023.3.5", vec!["2023-03-05"]),
+        ] {
+            let fecha = anclas(texto);
+            for lectura in iso {
+                assert!(fecha.contains(&lectura.to_string()), "{texto}: {fecha:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn test_lo_que_no_es_fecha_en_cifras_no_da_lectura_iso() {
+        for texto in [
+            "15/13/2023",
+            "32.01.2023",
+            "15/03-2023",
+            "15/03/20234",
+            "v15/03/2023",
+            "3/4",
+        ] {
+            let fecha = anclas(texto);
+            assert!(
+                !fecha.iter().any(|l| l.len() == 10 && l.contains('-')),
+                "{texto}: {fecha:?}"
+            );
         }
     }
 

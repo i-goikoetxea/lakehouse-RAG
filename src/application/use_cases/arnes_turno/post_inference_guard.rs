@@ -113,8 +113,9 @@ impl RegistroTurno {
         self.salidas_validas().any(es_matriz_sin_responsable)
     }
 
-    /// Textos de las tools que marcan páginas (`⟦p. N⟧`), para comprobar las citas
-    pub(super) fn textos_paginables(&self) -> Vec<&str> {
+    /// Textos de las tools que marcan páginas (`⟦p. N⟧`), con su `doc_id` si se conoce, para
+    /// comprobar las citas
+    pub(super) fn textos_paginables(&self) -> Vec<(Option<&str>, &str)> {
         self.salidas_validas()
             .filter(|r| {
                 HERRAMIENTAS_CON_MARCAS
@@ -312,7 +313,9 @@ fn primera(pendientes: Vec<CifraPendiente>) -> Option<String> {
 ///
 /// En una abstención, la salvaguarda (b) es estricta (solo referencias estructurales) si todas
 /// las tools volvieron vacías, si la primera oración declara la ausencia o si la cifra está en la
-/// oración de la locución. Una cita en esa oración no respalda una derivación.
+/// oración de la locución. Excepción del Nivel 1: una cifra en otra cláusula de esa oración (tras
+/// `;`, entre paréntesis o tras una raya) se rescata si deriva de cifras citadas. Una cita en la
+/// cláusula de la locución no respalda una derivación.
 ///
 /// Invariante: la salvaguarda (b) manda sobre el Nivel 2. Una cifra en modo estricto no la exime
 /// ninguna traza de `verificadas` (aunque la misma cifra se verificara en otra oración): solo la
@@ -344,8 +347,19 @@ fn cifras_sin_resolver(
     } else {
         Vec::new()
     };
+    let con_locucion_por_clausula: Vec<bool> = if en_abstencion {
+        analizada
+            .clausulas()
+            .map(|clausula| contiene_locucion(&clausula, LOCUCIONES_DE_ABSTENCION))
+            .collect()
+    } else {
+        Vec::new()
+    };
     let en_oracion_de_locucion =
         |posicion: usize| con_locucion.get(analizada.oracion_de(posicion)) == Some(&true);
+    let en_clausula_de_locucion = |posicion: usize| {
+        con_locucion_por_clausula.get(analizada.clausula_de(posicion)) == Some(&true)
+    };
     let estricta_global =
         en_abstencion && (contexto.sin_operandos() || con_locucion.first() == Some(&true));
     let estricta_de = |indice: usize| {
@@ -370,7 +384,11 @@ fn cifras_sin_resolver(
             if es_referencia_estructural(&analizada, indice, &contexto) {
                 return None;
             }
-            if !estricta && es_derivada(&analizada, indice, &contexto, en_oracion_de_locucion) {
+            // La clausura del Nivel 1 rescata también una cifra de otra cláusula de la oración de
+            // la locución, con operandos citados fuera de la cláusula de la locución. El Nivel 2
+            // sigue estricto en toda la oración (`solo_estructural`)
+            let rescatable = !estricta_global && !en_clausula_de_locucion(cifra.posicion);
+            if rescatable && es_derivada(&analizada, indice, &contexto, en_clausula_de_locucion) {
                 return None;
             }
             Some(CifraPendiente {

@@ -79,6 +79,67 @@ pub(super) fn fecha_textual_en(letras: &[char], inicio: usize) -> Option<FechaHa
     iso_valida(ano, mes, dia).map(|iso| FechaHallada { fin, iso })
 }
 
+/// Separadores de una fecha en cifras: el mismo entre los tres grupos
+const SEPARADORES_DE_FECHA_EN_CIFRAS: &[char] = &['/', '.', '-'];
+
+/// `15/03/2023`, `15.03.2023`, `1-6-2026` o `2023/03/15` que empieza en `inicio`: las fechas ISO
+/// que admite. Con el año al final, día-mes y mes-día (sin idioma no se sabe cuál es); con el año
+/// delante, año-mes-día. Quien llama comprueba que no va tras un identificador.
+pub(super) fn fechas_en_cifras_en(letras: &[char], inicio: usize) -> Vec<String> {
+    let mut grupos: Vec<(u32, usize)> = Vec::new();
+    let mut separador = None;
+    let mut posicion = inicio;
+    loop {
+        let fin = fin_de_digitos(letras, posicion);
+        let Some(valor) = (fin > posicion)
+            .then(|| numero(&letras[posicion..fin]))
+            .flatten()
+        else {
+            return Vec::new();
+        };
+        grupos.push((valor, fin - posicion));
+        posicion = fin;
+        if grupos.len() == 3 {
+            break;
+        }
+        let siguiente = letras.get(posicion).copied();
+        let admitido = siguiente.filter(|s| SEPARADORES_DE_FECHA_EN_CIFRAS.contains(s));
+        if admitido.is_none() || separador.is_some_and(|s| Some(s) != admitido) {
+            return Vec::new();
+        }
+        separador = admitido;
+        posicion += 1;
+    }
+    let sigue_algo = letras
+        .get(posicion)
+        .is_some_and(|l| l.is_alphanumeric() || *l == '_')
+        || (letras
+            .get(posicion)
+            .is_some_and(|l| SEPARADORES_DE_FECHA_EN_CIFRAS.contains(l))
+            && letras.get(posicion + 1).is_some_and(char::is_ascii_digit));
+    if sigue_algo {
+        return Vec::new();
+    }
+    let [(a, largo_a), (b, largo_b), (c, largo_c)] = grupos[..] else {
+        return Vec::new();
+    };
+    let corto = |largo: usize| largo <= DIGITOS_MAXIMOS_DEL_DIA;
+    let candidatas = if largo_c == DIGITOS_DEL_ANO && corto(largo_a) && corto(largo_b) {
+        vec![iso_valida(c, b, a), iso_valida(c, a, b)]
+    } else if largo_a == DIGITOS_DEL_ANO && corto(largo_b) && corto(largo_c) {
+        vec![iso_valida(a, b, c)]
+    } else {
+        Vec::new()
+    };
+    let mut fechas: Vec<String> = Vec::new();
+    for fecha in candidatas.into_iter().flatten() {
+        if !fechas.contains(&fecha) {
+            fechas.push(fecha);
+        }
+    }
+    fechas
+}
+
 fn es_guion_de_fecha(letra: char) -> bool {
     matches!(letra, '-' | '‐' | '‑' | '–' | '−')
 }

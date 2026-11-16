@@ -14,7 +14,7 @@ use crate::domain::errors::DomainError;
 use crate::infrastructure::llm::claude_agent_runner::{ClaudeAgentConfig, ClaudeAgentRunner};
 
 /// Más que esto y la respuesta se trata como hoy (la cifra no pasa)
-pub const TIEMPO_MAXIMO_PROCEDENCIA: Duration = Duration::from_secs(10);
+pub const TIEMPO_MAXIMO_PROCEDENCIA: Duration = Duration::from_secs(20);
 const MODELO_PROCEDENCIA: &str = "haiku";
 const PROMPT_PROCEDENCIA: &str = "Eres un comprobador de procedencia. Recibes una pregunta, las salidas de herramientas de un turno (con id t0, t1…) y un borrador de respuesta. Para cada cifra de la lista `cifras`, indica de dónde sale con uno de los 4 tipos del esquema. Cada `texto` debe copiarse EXACTAMENTE, carácter a carácter, de su `origen` (un id de salida o \"pregunta\"). Si una cifra no sale de esos textos, no propongas traza para ella. No inventes operandos.";
 
@@ -185,6 +185,13 @@ mod tests {
         assert_eq!(args[posicion("--tools") + 1], "");
         assert_eq!(args[posicion("--model") + 1], MODELO_PROCEDENCIA);
         assert!(args.contains(&"--json-schema".to_string()));
+    }
+
+    #[test]
+    fn test_el_tiempo_maximo_del_nivel_2_es_de_20_segundos() {
+        // Haiku con `--json-schema` tardó 6-9 s, con atípicos de 16-22 s (spike de la Fase 0).
+        // Un timeout sigue contando como «sin evidencia verificada»: nunca aprueba
+        assert_eq!(TIEMPO_MAXIMO_PROCEDENCIA, Duration::from_secs(20));
     }
 
     #[tokio::test]
