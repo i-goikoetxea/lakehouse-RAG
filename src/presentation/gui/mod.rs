@@ -4,6 +4,7 @@
 //! centros, ingesta por ruta con progreso, catálogo, integridad, modelos y chat. La lógica de
 //! cada comando vive en `comandos` (probada sin ventana); aquí solo se extrae el estado.
 
+pub mod api_key;
 pub mod chat_service;
 pub mod comandos;
 pub mod intervenciones_arnes;
@@ -21,6 +22,9 @@ use crate::application::dtos::agent::ModelDescriptor;
 use crate::application::dtos::centros::EXTENSIONES_INGERIBLES;
 use crate::application::dtos::ingestion::ObservadorIngesta;
 use crate::application::use_cases::lakehouse_app::LakehouseApp;
+use crate::infrastructure::llm::anthropic_api::AlmacenKeyring;
+use crate::infrastructure::llm::anthropic_api::secreto::VARIABLE_API_KEY;
+use crate::infrastructure::llm::modo_llm::ModoLlm;
 use chat_service::{ChatStreamEvento, GuiChatService, texto_a_html_seguro};
 use comandos::{
     ActivacionDto, CentroDto, DocumentoCatalogoDto, EVENTO_ARRASTRE, EVENTO_DOCUMENTOS_SOLTADOS,
@@ -51,7 +55,9 @@ pub fn iniciar_app_tauri(app: Arc<LakehouseApp>) -> Result<(), tauri::Error> {
             ingestar_documento,
             reintentar_destilacion,
             catalogo_centro,
-            integridad_centro
+            integridad_centro,
+            guardar_api_key,
+            estado_api_key
         ])
         .run(tauri::generate_context!())
 }
@@ -240,6 +246,28 @@ async fn enviar_mensaje_chat(
 #[tauri::command]
 fn detener_respuesta(servicio: tauri::State<'_, GuiChatService>, turno_id: String) -> bool {
     servicio.detener(&turno_id)
+}
+
+/// Comando IPC: guarda la API key de Anthropic en el almacén del sistema. Solo escritura: devuelve
+/// el estado con máscara. El modo API se activa con `LAKEHOUSE_RAG_MODO_LLM=api` al arrancar
+#[tauri::command]
+fn guardar_api_key(key: String) -> Result<api_key::EstadoApiKeyDto, String> {
+    api_key::guardar_api_key_en(
+        key,
+        std::env::var(VARIABLE_API_KEY).ok(),
+        &AlmacenKeyring::default(),
+        ModoLlm::desde_entorno(),
+    )
+}
+
+/// Comando IPC: si hay API key y su máscara `sk-ant-…`, nunca la key
+#[tauri::command]
+fn estado_api_key() -> api_key::EstadoApiKeyDto {
+    api_key::estado_api_key_en(
+        std::env::var(VARIABLE_API_KEY).ok(),
+        &AlmacenKeyring::default(),
+        ModoLlm::desde_entorno(),
+    )
 }
 
 /// Comando IPC: Markdown parcial → HTML seguro (render progresivo durante el streaming)

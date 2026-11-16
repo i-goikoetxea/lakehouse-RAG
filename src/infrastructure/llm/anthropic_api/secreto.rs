@@ -55,6 +55,57 @@ impl SecretApiKey {
     }
 }
 
+impl SecretApiKey {
+    /// Máscara para la GUI: el prefijo público `sk-ant-` (si lo tiene) y los 4 últimos caracteres
+    pub fn mascara_con_prefijo(&self) -> String {
+        let prefijo = if self.0.starts_with(PREFIJO_PUBLICO) {
+            PREFIJO_PUBLICO
+        } else {
+            ""
+        };
+        format!("{prefijo}{}", self.mascara())
+    }
+}
+
+/// Prefijo común a todas las keys de la consola: no identifica ninguna
+const PREFIJO_PUBLICO: &str = "sk-ant-";
+
+/// Dónde se guarda la key de la GUI. El de producción es el almacén del sistema; los tests usan
+/// uno en memoria y nunca tocan el del usuario
+pub trait AlmacenSecreto: Send + Sync {
+    fn guardar(&self, key: &SecretApiKey) -> Result<(), ErrorApiAnthropic>;
+    fn leer(&self) -> Result<Option<SecretApiKey>, ErrorApiAnthropic>;
+}
+
+impl AlmacenSecreto for AlmacenKeyring {
+    fn guardar(&self, key: &SecretApiKey) -> Result<(), ErrorApiAnthropic> {
+        AlmacenKeyring::guardar(self, key)
+    }
+
+    fn leer(&self) -> Result<Option<SecretApiKey>, ErrorApiAnthropic> {
+        AlmacenKeyring::leer(self)
+    }
+}
+
+/// Almacén en memoria (tests y herramientas)
+#[derive(Default)]
+pub struct AlmacenEnMemoria(std::sync::Mutex<Option<SecretApiKey>>);
+
+impl AlmacenSecreto for AlmacenEnMemoria {
+    fn guardar(&self, key: &SecretApiKey) -> Result<(), ErrorApiAnthropic> {
+        *self
+            .0
+            .lock()
+            .map_err(|_| ErrorApiAnthropic::AlmacenCredenciales("bloqueo envenenado".into()))? =
+            Some(key.clone());
+        Ok(())
+    }
+
+    fn leer(&self) -> Result<Option<SecretApiKey>, ErrorApiAnthropic> {
+        Ok(self.0.lock().ok().and_then(|k| k.clone()))
+    }
+}
+
 impl fmt::Debug for SecretApiKey {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(OCULTA)
@@ -157,6 +208,14 @@ mod tests {
         let key = SecretApiKey::new(KEY_FALSA).unwrap();
         assert_eq!(key.mascara(), "…cdef");
         assert!(!key.mascara().contains("sk-ant"));
+    }
+
+    #[test]
+    fn test_la_mascara_de_la_gui_lleva_solo_el_prefijo_publico_y_la_cola() {
+        let key = SecretApiKey::new(KEY_FALSA).unwrap();
+        assert_eq!(key.mascara_con_prefijo(), "sk-ant-…cdef");
+        let otra = SecretApiKey::new("clave-sin-prefijo-1234").unwrap();
+        assert_eq!(otra.mascara_con_prefijo(), "…1234");
     }
 
     #[test]

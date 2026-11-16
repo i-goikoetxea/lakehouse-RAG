@@ -1,15 +1,16 @@
 //! Selección del transporte del LLM (`claude -p` o la API de Messages) por configuración.
-//! **Por defecto `Cli`** hasta que el A/B de la Fase 5.2 valide la API.
+//! **Por defecto `Cli`** hasta que el A/B de la Fase 5.2 valide la API. El modo se lee al arrancar.
 
 use std::sync::Arc;
 
+use crate::application::ports::agent_runner::AgentRunnerPort;
 use crate::application::ports::verificador_procedencia::VerificadorProcedenciaPort;
-use crate::infrastructure::llm::ClaudeHeadlessProcedencia;
 use crate::infrastructure::llm::anthropic_api::secreto::VARIABLE_API_KEY;
 use crate::infrastructure::llm::anthropic_api::{
-    AlmacenKeyring, AnthropicHttpClient, AnthropicProcedenciaVerifier, ConfigClienteAnthropic,
-    resolver_api_key,
+    AlmacenKeyring, AnthropicHttpClient, AnthropicMessagesRunner, AnthropicProcedenciaVerifier,
+    ConfigClienteAnthropic, ErrorApiAnthropic, SecretApiKey, resolver_api_key,
 };
+use crate::infrastructure::llm::{ClaudeAgentConfig, ClaudeAgentRunner, ClaudeHeadlessProcedencia};
 
 pub const VARIABLE_MODO_LLM: &str = "LAKEHOUSE_RAG_MODO_LLM";
 
@@ -60,6 +61,48 @@ pub fn verificador_procedencia_para(
     Arc::new(ClaudeHeadlessProcedencia::new(binario_cli))
 }
 
+/// El agente según el modo, y el runner de la API aparte para leer sus métricas (A/B)
+pub struct AgenteSegunModo {
+    pub runner: Arc<dyn AgentRunnerPort>,
+    pub api: Option<Arc<AnthropicMessagesRunner>>,
+}
+
+/// Con `Api` y la key resuelta, `AnthropicMessagesRunner`; si no, `claude -p` con un aviso
+pub fn agente_para(modo: ModoLlm, config_cli: ClaudeAgentConfig) -> AgenteSegunModo {
+    let key = resolver_api_key(
+        std::env::var(VARIABLE_API_KEY).ok(),
+        &AlmacenKeyring::default(),
+    );
+    agente_con_key(modo, key, ConfigClienteAnthropic::agente(), config_cli)
+}
+
+/// `agente_para` con la key y la configuración del cliente inyectadas (tests y herramientas)
+pub fn agente_con_key(
+    modo: ModoLlm,
+    key: Result<SecretApiKey, ErrorApiAnthropic>,
+    config_api: ConfigClienteAnthropic,
+    config_cli: ClaudeAgentConfig,
+) -> AgenteSegunModo {
+    if modo == ModoLlm::Api {
+        match key.and_then(|key| AnthropicHttpClient::new(key, config_api)) {
+            Ok(cliente) => {
+                let api = Arc::new(AnthropicMessagesRunner::new(cliente));
+                return AgenteSegunModo {
+                    runner: api.clone(),
+                    api: Some(api),
+                };
+            }
+            Err(error) => {
+                tracing::warn!(%error, "modo_llm api sin cliente: el agente usa claude -p")
+            }
+        }
+    }
+    AgenteSegunModo {
+        runner: Arc::new(ClaudeAgentRunner::new(config_cli)),
+        api: None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -70,6 +113,25 @@ mod tests {
         assert_eq!(ModoLlm::desde_valor(None), ModoLlm::Cli);
         assert_eq!(ModoLlm::desde_valor(Some("")), ModoLlm::Cli);
         assert_eq!(ModoLlm::desde_valor(Some("cli")), ModoLlm::Cli);
+    }
+
+    #[test]
+    fn test_el_agente_sigue_al_modo_y_sin_key_vuelve_a_cli() {
+        let key = || SecretApiKey::new("sk-ant-test-NO-ES-REAL-modo");
+        let config = ConfigClienteAnthropic::agente;
+        let api = agente_con_key(ModoLlm::Api, key(), config(), ClaudeAgentConfig::default());
+        assert!(api.api.is_some());
+        assert!(api.runner.necesita_correccion_de_omision());
+        let cli = agente_con_key(ModoLlm::Cli, key(), config(), ClaudeAgentConfig::default());
+        assert!(cli.api.is_none());
+        assert!(!cli.runner.necesita_correccion_de_omision());
+        let sin_key = agente_con_key(
+            ModoLlm::Api,
+            Err(ErrorApiAnthropic::KeyAusente),
+            config(),
+            ClaudeAgentConfig::default(),
+        );
+        assert!(sin_key.api.is_none());
     }
 
     #[test]

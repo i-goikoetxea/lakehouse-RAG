@@ -16,4 +16,6 @@ pub use cliente::{
 };
 pub use error::ErrorApiAnthropic;
 pub use procedencia::{AnthropicProcedenciaVerifier, MODELO_PROCEDENCIA_API};
-pub use secreto::{AlmacenKeyring, SecretApiKey, resolver_api_key};
+pub use secreto::{
+    AlmacenEnMemoria, AlmacenKeyring, AlmacenSecreto, SecretApiKey, resolver_api_key,
+};
