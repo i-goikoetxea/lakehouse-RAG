@@ -1136,9 +1136,15 @@ async fn test_adv_abstencion_insistente_nunca_supera_un_reintento_ni_se_emite() 
         MENSAJE_RESPUESTA_NO_VALIDADA
     );
     assert_eq!(runner.pasos_libres(), 2);
+    // Sin ninguna consulta, la cifra ajena la frena antes la corrección de omisión (CLI y API):
+    // una sola corrección y, si insiste, salida segura, igual que con el reintento
     assert_eq!(
         turno.etapas(),
-        vec![EtapaArnes::Reintento, EtapaArnes::SalidaSegura]
+        vec![
+            EtapaArnes::OmisionDeHerramienta,
+            EtapaArnes::OmisionDeHerramienta,
+            EtapaArnes::SalidaSegura
+        ]
     );
     assert!(!format!("{:?}", turno.historial).contains("7,5"));
 }

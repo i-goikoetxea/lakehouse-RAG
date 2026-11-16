@@ -17,7 +17,7 @@ pub struct EstadoApiKeyDto {
     pub mascara: Option<String>,
     /// De dónde sale la key que usará la app: `entorno`, `almacen` o ninguno
     pub origen: Option<String>,
-    /// Modo del LLM con que arrancó la app (`api` o `cli`); se lee al arrancar
+    /// Motor del LLM en uso en esta sesión (`api` o `cli`), tras el respaldo a `cli` sin key
     pub modo_llm: String,
 }
 

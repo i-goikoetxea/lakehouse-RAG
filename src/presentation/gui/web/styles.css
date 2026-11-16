@@ -510,3 +510,18 @@ button { cursor: pointer; }
 .chip-aviso { background: rgba(217, 119, 6, 0.15); color: #b45309; }
 .btn-reintentar { margin-top: 6px; font-size: 12px; padding: 3px 8px; cursor: pointer; }
 .btn-reintentar:disabled { opacity: 0.6; cursor: default; }
+
+/* ---------- Configuración del motor del LLM ---------- */
+.dialogo-config { width: min(560px, 92vw); }
+.config-cuerpo { display: flex; flex-direction: column; gap: 14px; }
+.config-seccion { display: flex; flex-direction: column; gap: 8px; padding: 12px; border: 1px solid var(--color-border); border-radius: var(--radius-md); background: var(--color-surface-2); }
+.config-seccion h4 { font-size: 12.5px; font-weight: 600; color: var(--color-ink); }
+.config-linea { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.config-modos { display: flex; flex-direction: column; gap: 6px; }
+.dialogo .config-opcion { flex-direction: row; align-items: center; gap: 8px; font-size: 12.5px; color: var(--color-ink-muted); cursor: pointer; }
+.dialogo .config-opcion input { accent-color: var(--color-primary); padding: 0; }
+.config-opcion code { font-family: var(--font-mono); font-size: 11.5px; }
+.config-avisos { list-style: none; display: flex; flex-direction: column; gap: 4px; padding: 0; margin: 0; }
+.config-avisos li { font-size: 12px; line-height: 1.45; padding: 6px 8px; border-radius: var(--radius-sm); background: var(--color-warning-bg); color: var(--color-warning); }
+.config-avisos li.config-aviso-info { background: var(--color-cyan-bg); color: var(--color-cyan); }
+.config-key-form input { flex: 1; }

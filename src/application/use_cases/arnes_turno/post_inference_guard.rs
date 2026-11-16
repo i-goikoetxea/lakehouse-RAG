@@ -220,6 +220,27 @@ impl PostInferenceGuard {
         comprobar_ejes_aclarados(respuesta, registro)
     }
 
+    /// Una pregunta de dato concreto respondida con una cifra (que no sale de la pregunta ni es
+    /// una referencia estructural) sin ninguna consulta en el turno, en los dos transportes.
+    /// Solo `DatoConcreto`: con `Ninguna` (charla, aritmética, seguimientos como «reintenta»)
+    /// cualquier dígito, incluso el del nombre del centro, pedía consultar sin motivo (humo de
+    /// la API, 3 de 6 preguntas de charla). Las intenciones de Capa 2 tienen su propia regla
+    /// (`CapaDosNoIntentada`). Solo cifras: detectar hechos o citas exigiría reglas por idioma.
+    pub fn afirma_sin_consulta(
+        respuesta: &str,
+        pregunta: &str,
+        intencion: &IntencionTurno,
+        registro: &RegistroTurno,
+    ) -> bool {
+        if *intencion != IntencionTurno::DatoConcreto
+            || !registro.resultados().is_empty()
+            || llamada_en_crudo::detectar(respuesta).is_some()
+        {
+            return false;
+        }
+        !cifras_sin_resolver(respuesta, pregunta, registro, false, &HashSet::new()).is_empty()
+    }
+
     /// Cifras que el Nivel 2 podría rescatar: las que hoy causan `CifraEnAbstencion` o
     /// `CifraSinAnclar`, con el modo de cada una. Vacío si la respuesta no tiene ese defecto.
     pub fn cifras_pendientes(
@@ -1756,6 +1777,158 @@ El campo `vigencia_no_declarada` vino vacío.";
                 &HashSet::new(),
             ),
             Ok(())
+        );
+    }
+
+    fn afirma_sin_consulta(pregunta: &str, respuesta: &str) -> bool {
+        use super::super::intent_detector::IntentDetector;
+        let intencion = IntentDetector::clasificar(pregunta);
+        PostInferenceGuard::afirma_sin_consulta(
+            respuesta,
+            pregunta,
+            &intencion,
+            &RegistroTurno::default(),
+        )
+    }
+
+    #[test]
+    fn test_dato_concreto_con_cifras_sin_consulta_exige_consultar_en_cualquier_idioma() {
+        assert!(afirma_sin_consulta(
+            "¿Qué presión tiene la línea L-999?",
+            "Son 16 bar."
+        ));
+        // La intención se fija aquí: lo que se prueba es la regla, no el clasificador
+        for (pregunta, respuesta) in [
+            (
+                "¿Qué recubrimiento mínimo exige el procedimiento?",
+                "El recubrimiento mínimo es de 25 mm (p. 4).",
+            ),
+            (
+                "What is the design pressure of line L-999?",
+                "The design pressure is 16 bar.",
+            ),
+            ("Qual é o prazo de entrega?", "O prazo é de 30 dias."),
+        ] {
+            assert!(
+                PostInferenceGuard::afirma_sin_consulta(
+                    respuesta,
+                    pregunta,
+                    &IntencionTurno::DatoConcreto,
+                    &RegistroTurno::default(),
+                ),
+                "{pregunta} → {respuesta}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_charla_con_numeros_o_con_el_nombre_del_centro_no_exige_consultar() {
+        for (pregunta, respuesta) in [
+            (
+                "Hola, ¿qué puedes hacer?",
+                "Hola. Consulto los documentos del centro activo obra-prueba-v7.",
+            ),
+            ("What year comes after 2025?", "2026."),
+            ("hola", "Tengo 3 documentos cargados en el centro planta_2."),
+            // Límite declarado: un seguimiento sin intención no se cubre
+            ("reintenta", "Como te dije, son 125 bar (p. 3)."),
+            ("Resume el resultado", "Son 125 bar."),
+        ] {
+            assert!(
+                !afirma_sin_consulta(pregunta, respuesta),
+                "{pregunta} → {respuesta}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_una_cita_sin_cifras_no_exige_consultar() {
+        // Fuera del alcance de la regla: solo cifras (las citas exigirían reglas por idioma)
+        assert!(!afirma_sin_consulta(
+            "repite lo que dice el documento",
+            "El documento dice «el operario debe estar cualificado antes de empezar»."
+        ));
+    }
+
+    #[test]
+    fn test_fuera_de_dominio_o_saludo_sin_cifras_no_exige_consultar() {
+        for (pregunta, respuesta) in [
+            (
+                "buenos días",
+                "Buenos días. Pregúntame por los documentos del centro activo.",
+            ),
+            (
+                "hello",
+                "Hello! Ask me about the documents in the active center.",
+            ),
+            (
+                "¿Cuál es la capital de Francia?",
+                "Eso no está en los documentos del centro: París, según el conocimiento general.",
+            ),
+            ("¿quién eres?", "Soy el asistente técnico del Lakehouse."),
+            (
+                "cuéntame un chiste",
+                "Prefiero ceñirme a los documentos del centro.",
+            ),
+        ] {
+            assert!(
+                !afirma_sin_consulta(pregunta, respuesta),
+                "{pregunta} → {respuesta}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_conversacion_sin_datos_no_exige_consultar() {
+        for (pregunta, respuesta) in [
+            ("hola", "Hola, ¿en qué te puedo ayudar?"),
+            ("gracias", "De nada."),
+            (
+                "¿cómo te uso?",
+                "1. Activa un centro.
+2. Escribe tu pregunta.
+3. Revisa las citas.",
+            ),
+            (
+                "¿Qué es el acero 316L?",
+                "El 316L es la designación que mencionas.",
+            ),
+            ("dime algo breve", "«Sí»"),
+        ] {
+            assert!(
+                !afirma_sin_consulta(pregunta, respuesta),
+                "{pregunta} → {respuesta}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_con_una_consulta_en_el_turno_no_aplica() {
+        let registro = registro_con(vec![resultado(
+            "search_normative_context",
+            json!({ "fragmentos": [] }),
+            false,
+        )]);
+        assert!(!PostInferenceGuard::afirma_sin_consulta(
+            "Son 16 bar.",
+            "¿Qué presión tiene la línea L-999?",
+            &IntencionTurno::DatoConcreto,
+            &registro,
+        ));
+    }
+
+    #[test]
+    fn test_las_intenciones_de_capa_dos_siguen_con_su_propia_regla() {
+        // Sin consulta, el guard ya las rechaza con `CapaDosNoIntentada`
+        assert!(!PostInferenceGuard::afirma_sin_consulta(
+            "Son 150 °C",
+            PREGUNTA,
+            &cruzable(),
+            &RegistroTurno::default(),
+        ));
+        assert_eq!(
+            validar_cruzable("Son 150 °C", &RegistroTurno::default()),
+            Err(ViolacionArnes::CapaDosNoIntentada)
         );
     }
 }

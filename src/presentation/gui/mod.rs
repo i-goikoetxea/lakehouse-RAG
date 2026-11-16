@@ -7,6 +7,7 @@
 pub mod api_key;
 pub mod chat_service;
 pub mod comandos;
+pub mod config_llm;
 pub mod intervenciones_arnes;
 pub mod markdown_seguro;
 pub mod resultados_tools;
@@ -24,21 +25,27 @@ use crate::application::dtos::ingestion::ObservadorIngesta;
 use crate::application::use_cases::lakehouse_app::LakehouseApp;
 use crate::infrastructure::llm::anthropic_api::AlmacenKeyring;
 use crate::infrastructure::llm::anthropic_api::secreto::VARIABLE_API_KEY;
-use crate::infrastructure::llm::modo_llm::ModoLlm;
+use crate::infrastructure::llm::modo_llm::VARIABLE_MODO_LLM;
 use chat_service::{ChatStreamEvento, GuiChatService, texto_a_html_seguro};
 use comandos::{
     ActivacionDto, CentroDto, DocumentoCatalogoDto, EVENTO_ARRASTRE, EVENTO_DOCUMENTOS_SOLTADOS,
     EVENTO_PROGRESO_INGESTA, IngestaDto, IntegridadDto, ProgresoIngestaDto,
 };
+use config_llm::{EstadoModoLlmDto, MotorLlmSesion};
 pub use resultados_tools::{CitationDto, FuenteCitadaDto};
 
-/// Inicia la aplicación nativa Tauri 2.0 sobre la composición única (`LakehouseApp`)
-pub fn iniciar_app_tauri(app: Arc<LakehouseApp>) -> Result<(), tauri::Error> {
+/// Inicia la aplicación nativa Tauri 2.0 sobre la composición única (`LakehouseApp`) y el motor
+/// del LLM con que se compuso
+pub fn iniciar_app_tauri(
+    app: Arc<LakehouseApp>,
+    motor: MotorLlmSesion,
+) -> Result<(), tauri::Error> {
     let servicio_chat = GuiChatService::desde_asistente(app.clone());
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .manage(servicio_chat)
         .manage(app)
+        .manage(motor)
         .on_window_event(reemitir_arrastre_de_archivos)
         .invoke_handler(tauri::generate_handler![
             listar_modelos_claude,
@@ -57,7 +64,9 @@ pub fn iniciar_app_tauri(app: Arc<LakehouseApp>) -> Result<(), tauri::Error> {
             catalogo_centro,
             integridad_centro,
             guardar_api_key,
-            estado_api_key
+            estado_api_key,
+            estado_modo_llm,
+            guardar_modo_llm
         ])
         .run(tauri::generate_context!())
 }
@@ -249,24 +258,55 @@ fn detener_respuesta(servicio: tauri::State<'_, GuiChatService>, turno_id: Strin
 }
 
 /// Comando IPC: guarda la API key de Anthropic en el almacén del sistema. Solo escritura: devuelve
-/// el estado con máscara. El modo API se activa con `LAKEHOUSE_RAG_MODO_LLM=api` al arrancar
+/// el estado con máscara. El runner se compone al arrancar: la key nueva se usa al reiniciar
 #[tauri::command]
-fn guardar_api_key(key: String) -> Result<api_key::EstadoApiKeyDto, String> {
+fn guardar_api_key(
+    motor: tauri::State<'_, MotorLlmSesion>,
+    key: String,
+) -> Result<api_key::EstadoApiKeyDto, String> {
     api_key::guardar_api_key_en(
         key,
         std::env::var(VARIABLE_API_KEY).ok(),
         &AlmacenKeyring::default(),
-        ModoLlm::desde_entorno(),
+        motor.en_uso,
     )
 }
 
 /// Comando IPC: si hay API key y su máscara `sk-ant-…`, nunca la key
 #[tauri::command]
-fn estado_api_key() -> api_key::EstadoApiKeyDto {
+fn estado_api_key(motor: tauri::State<'_, MotorLlmSesion>) -> api_key::EstadoApiKeyDto {
+    estado_api_key_de_sesion(&motor)
+}
+
+fn estado_api_key_de_sesion(motor: &MotorLlmSesion) -> api_key::EstadoApiKeyDto {
     api_key::estado_api_key_en(
         std::env::var(VARIABLE_API_KEY).ok(),
         &AlmacenKeyring::default(),
-        ModoLlm::desde_entorno(),
+        motor.en_uso,
+    )
+}
+
+/// Comando IPC: motor del LLM en uso, el elegido y el del próximo arranque, con sus avisos
+#[tauri::command]
+fn estado_modo_llm(motor: tauri::State<'_, MotorLlmSesion>) -> EstadoModoLlmDto {
+    config_llm::estado_modo_llm_desde_disco(
+        &motor,
+        std::env::var(VARIABLE_MODO_LLM).ok().as_deref(),
+        estado_api_key_de_sesion(&motor).configurada,
+    )
+}
+
+/// Comando IPC: guarda `cli` o `api` en `llm_config.json`; se aplica al reiniciar
+#[tauri::command]
+fn guardar_modo_llm(
+    motor: tauri::State<'_, MotorLlmSesion>,
+    modo: String,
+) -> Result<EstadoModoLlmDto, String> {
+    config_llm::guardar_modo_llm_en(
+        &motor,
+        &modo,
+        std::env::var(VARIABLE_MODO_LLM).ok().as_deref(),
+        estado_api_key_de_sesion(&motor).configurada,
     )
 }
 

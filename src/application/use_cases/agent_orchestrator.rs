@@ -188,7 +188,15 @@ impl AgentOrchestrator {
             };
 
             match turn_output {
-                AgentTurnOutput::FinalMessage(_) if corrige_omisiones && !consulto => {
+                // Sin consulta: en la API toda intención la exige; en los dos modos, y también
+                // sin intención, una respuesta con cifras o citas
+                AgentTurnOutput::FinalMessage(ref candidata)
+                    if !consulto
+                        && (corrige_omisiones
+                            || PostInferenceGuard::afirma_sin_consulta(
+                                candidata, &pregunta, &intencion, &registro,
+                            )) =>
+                {
                     descartar_en_vivo();
                     if correccion.is_none() {
                         notificar_arnes(
@@ -1177,15 +1185,15 @@ mod tests {
 
     #[tokio::test]
     async fn test_turno_sin_intencion_mantiene_streaming() {
-        let runner = RunnerDelArnes::con_guion(vec![], vec![libre_final("Es un cordón; 999.")]);
+        let runner = RunnerDelArnes::con_guion(vec![], vec![libre_final("Es un cordón.")]);
         let mut historial = vec![AgentMessage::user(SIN_INTENCION)];
         let (respuesta, eventos) = turno_con_arnes(runner, &mut historial).await;
-        assert_eq!(respuesta.unwrap(), "Es un cordón; 999.");
+        assert_eq!(respuesta.unwrap(), "Es un cordón.");
         assert_eq!(
             eventos,
             vec![
-                AgentExecutionEvent::TextDelta("Es un cordón; 999.".into()),
-                AgentExecutionEvent::Completed("Es un cordón; 999.".into()),
+                AgentExecutionEvent::TextDelta("Es un cordón.".into()),
+                AgentExecutionEvent::Completed("Es un cordón.".into()),
             ]
         );
     }
@@ -1218,13 +1226,13 @@ mod tests {
     #[tokio::test]
     async fn test_intencion_se_toma_del_ultimo_mensaje_del_operador() {
         // Un resultado de tool posterior con forma de pregunta no activa el arnés.
-        let runner = RunnerDelArnes::con_guion(vec![], vec![libre_final("Hecho; 999.")]);
+        let runner = RunnerDelArnes::con_guion(vec![], vec![libre_final("Hecho.")]);
         let mut historial = vec![
             AgentMessage::user(SIN_INTENCION),
             AgentMessage::tool_result("c", CRUZABLE),
         ];
         let (respuesta, _) = turno_con_arnes(runner, &mut historial).await;
-        assert_eq!(respuesta.unwrap(), "Hecho; 999.");
+        assert_eq!(respuesta.unwrap(), "Hecho.");
     }
 
     const DATO_CONCRETO: &str = "¿Qué presión tiene la línea L-999?";
@@ -1246,6 +1254,7 @@ mod tests {
         let runner = RunnerDelArnes::con_guion(
             vec![],
             vec![
+                llamada_busqueda(),
                 libre_final("No consta; suele ser 7,5 bar."),
                 libre_final("No consta la presión de esa línea."),
             ],
@@ -1256,7 +1265,7 @@ mod tests {
         assert_eq!(respuesta.unwrap(), "No consta la presión de esa línea.");
         assert_eq!(etapas(&eventos), vec![EtapaArnes::Reintento]);
         assert_eq!(deltas(&eventos), vec!["No consta la presión de esa línea."]);
-        let vista = runner.vistas_libres.lock().unwrap()[1].clone();
+        let vista = runner.vistas_libres.lock().unwrap()[2].clone();
         assert!(vista.last().unwrap().content.contains("RECORDATORIO"));
         assert!(vista.last().unwrap().content.contains("7,5"));
         for mensaje in &historial {
@@ -1270,6 +1279,7 @@ mod tests {
         let runner = RunnerDelArnes::con_guion(
             vec![],
             vec![
+                llamada_busqueda(),
                 libre_final("No consta; suele ser 7,5 bar."),
                 libre_final("No consta; ronda los 8 bar."),
             ],
@@ -1277,7 +1287,7 @@ mod tests {
         let mut historial = vec![AgentMessage::user(DATO_CONCRETO)];
         let (respuesta, eventos) = turno_con_arnes(runner.clone(), &mut historial).await;
         assert_eq!(respuesta.unwrap(), MENSAJE_RESPUESTA_NO_VALIDADA);
-        assert_eq!(runner.pasos_libres(), 2);
+        assert_eq!(runner.pasos_libres(), 3);
         assert_eq!(
             etapas(&eventos),
             vec![EtapaArnes::Reintento, EtapaArnes::SalidaSegura]
@@ -1922,26 +1932,112 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn test_sin_intencion_o_en_modo_cli_no_hay_correccion() {
-        let runner = RunnerDelArnes::de_la_api(vec![], vec![libre_final("Es un cordón.")]);
-        let mut historial = vec![AgentMessage::user(SIN_INTENCION)];
-        let (respuesta, eventos) = turno_con_arnes(runner.clone(), &mut historial).await;
-        assert_eq!(respuesta.unwrap(), "Es un cordón.");
-        assert_eq!(omisiones(&eventos), 0);
+    /// Los dos transportes: el de la CLI (puede forzar la tool) y el de la API (no puede)
+    fn runners(
+        libres: impl Fn() -> Vec<AgentTurnOutput>,
+    ) -> [(&'static str, Arc<RunnerDelArnes>); 2] {
+        [
+            ("cli", RunnerDelArnes::con_guion(vec![], libres())),
+            ("api", RunnerDelArnes::de_la_api(vec![], libres())),
+        ]
+    }
 
-        // El runner de la CLI (por defecto) conserva el comportamiento de siempre
-        let cli = RunnerDelArnes::con_guion(
-            vec![],
+    #[tokio::test]
+    async fn test_sin_intencion_ni_datos_no_hay_correccion_en_ningun_modo() {
+        for (pregunta, texto) in [
+            (SIN_INTENCION, "Es un cordón de refuerzo."),
+            (
+                "hola",
+                "Hola, ¿en qué te ayudo con los documentos del centro?",
+            ),
+            (
+                "¿Cuál es la capital de Francia?",
+                "Eso no consta en el centro.",
+            ),
+        ] {
+            for (modo, runner) in runners(|| vec![libre_final(texto)]) {
+                let mut historial = vec![AgentMessage::user(pregunta)];
+                let (respuesta, eventos) = turno_con_arnes(runner.clone(), &mut historial).await;
+                assert_eq!(respuesta.unwrap(), texto, "{modo}: {pregunta}");
+                assert_eq!(omisiones(&eventos), 0, "{modo}: {pregunta}");
+                assert_eq!(runner.pasos_libres(), 1, "{modo}: {pregunta}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_cifra_sin_consulta_se_corrige_en_los_dos_modos() {
+        let guion = || {
+            vec![
+                libre_final("La presión de diseño es 16 bar."),
+                llamada_busqueda(),
+                libre_final("La presión es 125 bar."),
+            ]
+        };
+        for (modo, runner) in runners(guion) {
+            let mut historial = vec![AgentMessage::user(DATO_CONCRETO)];
+            let (respuesta, eventos) = turno_con_arnes(runner.clone(), &mut historial).await;
+            assert_eq!(respuesta.unwrap(), "La presión es 125 bar.", "{modo}");
+            assert_eq!(omisiones(&eventos), 1, "{modo}");
+            assert!(
+                !deltas(&eventos).iter().any(|d| d.contains("16")),
+                "{modo}: lo no consultado nunca se muestra"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_dos_respuestas_con_cifras_sin_consulta_fallan_cerrado_en_los_dos_modos() {
+        let guion = || {
             vec![
                 libre_final("Son 16 bar."),
                 libre_final("Siguen siendo 16 bar."),
-            ],
-        );
-        let mut historial = vec![AgentMessage::user(DATO_CONCRETO)];
-        let (respuesta, eventos) = turno_con_arnes(cli.clone(), &mut historial).await;
-        assert_eq!(omisiones(&eventos), 0);
-        assert_eq!(cli.pasos_libres(), 1);
-        assert_eq!(respuesta.unwrap(), "Son 16 bar.");
+            ]
+        };
+        for (modo, runner) in runners(guion) {
+            let mut historial = vec![AgentMessage::user(DATO_CONCRETO)];
+            let (respuesta, eventos) = turno_con_arnes(runner.clone(), &mut historial).await;
+            assert_eq!(respuesta.unwrap(), MENSAJE_RESPUESTA_NO_VALIDADA, "{modo}");
+            assert_eq!(runner.pasos_libres(), 2, "{modo}");
+            assert_eq!(omisiones(&eventos), 2, "{modo}");
+            assert_eq!(etapas(&eventos).last(), Some(&EtapaArnes::SalidaSegura));
+        }
+    }
+
+    #[tokio::test]
+    async fn test_charla_con_numeros_no_se_corrige_en_ningun_modo() {
+        // Sin intención, cualquier dígito (aritmética, un año, el nombre del centro) pedía
+        // consultar sin motivo: solo `DatoConcreto` lo exige
+        for (pregunta, texto) in [
+            (
+                "Hola, ¿qué puedes hacer?",
+                "Hola. Consulto los documentos del centro obra-prueba-v7.",
+            ),
+            ("What year comes after 2025?", "2026."),
+        ] {
+            for (modo, runner) in runners(|| vec![libre_final(texto)]) {
+                let mut historial = vec![AgentMessage::user(pregunta)];
+                let (respuesta, eventos) = turno_con_arnes(runner.clone(), &mut historial).await;
+                assert_eq!(respuesta.unwrap(), texto, "{modo}: {pregunta}");
+                assert_eq!(omisiones(&eventos), 0, "{modo}: {pregunta}");
+                assert_eq!(runner.pasos_libres(), 1, "{modo}: {pregunta}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_un_seguimiento_sin_intencion_no_se_corrige_limite_declarado() {
+        // «reintenta» no tiene intención: la cifra del historial pasa sin consulta (límite
+        // declarado en `cierre_v1_20261116.md`)
+        for (modo, runner) in runners(|| vec![libre_final("Como te dije, son 125 bar.")]) {
+            let mut historial = vec![
+                AgentMessage::user(DATO_CONCRETO),
+                AgentMessage::assistant("La presión es 125 bar.".to_string()),
+                AgentMessage::user("reintenta"),
+            ];
+            let (respuesta, eventos) = turno_con_arnes(runner.clone(), &mut historial).await;
+            assert_eq!(respuesta.unwrap(), "Como te dije, son 125 bar.", "{modo}");
+            assert_eq!(omisiones(&eventos), 0, "{modo}");
+        }
     }
 }

@@ -1658,4 +1658,43 @@
   - `cargo run --release --example ab_agente -- --centro <id> --preguntas <in.jsonl> --modo api|cli --salida <out.jsonl>`;
   - pasa `--modelo claude-sonnet-5-5` en los dos modos;
   - el centro tiene que estar activo de antemano.
-- **Para el modo API en la GUI,** la key se guarda con `guardar_api_key` y el modo se lee al arrancar (`LAKEHOUSE_RAG_MODO_LLM=api`). Todavía no hay controles en la interfaz.
+- **Para el modo API en la GUI,** la key se guarda con `guardar_api_key` y el modo se lee al arrancar (`LAKEHOUSE_RAG_MODO_LLM=api`). Los controles de la interfaz llegan en la sesión siguiente.
+
+### Sesión Configuración del LLM en la GUI (2026-11-16): engranaje, modo CLI/API y API key
+
+**Estado: `[COMPLETADO]`, pendiente de la prueba manual del usuario; sin merge ni push.** Rama `claude/gui-config-api-c2009b`, desde `main` `4eca889`. Contrato: `docs/arquitectura/ssd_gui_config_llm.md`.
+
+**Errores y límites (primero):**
+- **Fuga corregida de paso** (`57d92d1`): un valor desconocido de `LAKEHOUSE_RAG_MODO_LLM` se escribía en el log. Si era una key pegada por error, la key acababa en el log. Ahora solo se registra su longitud.
+- **Sin cambio en caliente:** el motor se compone al arrancar, así que la elección y la key nueva **se aplican al reiniciar**. El modal distingue el motor en uso, el elegido y el del próximo arranque (SSD §3).
+- **Alcance del fichero:** el modo elegido en la ventana también lo usan la CLI y el MCP con el mismo directorio de configuración.
+- **Solo a mano:** el aspecto del modal (tema claro y oscuro) y el guardado real en `keyring`. La ventana no se lanzó para no interferir con la app abierta del usuario.
+- **Primera pasada de la suite:** falló un test estático propio, que dependía de LF con `autocrlf`. Se corrigió en el test, no en la app.
+
+**Cambios:**
+- [x] `llm_config.json`, que solo guarda el modo. Prelación: entorno > fichero > `Cli` (`preferencia_modo.rs`). La composición expone `modo_pedido` y `modo_en_uso`.
+- [x] Comandos `estado_modo_llm` y `guardar_modo_llm` (`config_llm.rs`). `estado_api_key` devuelve ahora el motor en uso.
+- [x] Botón ⚙ (SVG) entre el tema y los controles de ventana, y modal con selector CLI/API, avisos y gestión de la key con campo password, que se vacía tras cada intento.
+- [x] Adversarial ampliado: con un fichero envenenado, la key pegada en el selector de modo o un fichero desmesurado, la key no llega al fichero, al estado ni a los logs.
+
+**Medido:** suite **1236/0/36**, frente a la base 1218/0/36: los 18 tests nuevos y ninguna regresión. `clippy --all-targets -D warnings` y `fmt --check`: limpios. Sin gasto de API.
+
+
+### Sesión Cierre de etapa y versión 1.0.0 (2026-11-16)
+
+**Estado: `[COMPLETADO]` en la rama `claude/gui-config-api-c2009b`; pendiente del replay ciego de la sesión principal. Sin merge en `main`, sin push y sin tag.** Informe: `benchmarks/informes/cierre_v1_20261116.md`. No se ha leído el set oculto.
+
+**Errores y límites (primero):**
+- **Calidad de respuesta sin medir de nuevo.** La regla nueva del guard no ha pasado por un A/B. Las 148 respuestas guardadas consultaron todas alguna tool, así que no la ejercitan.
+- **Primera versión retirada por ruido.** Con la intención `Ninguna` incluida, el humo de la API corrigió 3 de 6 preguntas de charla; en una, el dígito venía del nombre del centro. Por decisión del usuario, la regla queda limitada a `DatoConcreto`.
+- **Límite declarado:** los seguimientos sin intención («reintenta») no se cubren.
+- **Ruido que queda:** «¿Cuánto es 12 por 3?» se clasifica como `DatoConcreto` y sigue corrigiéndose; en la API ya pasaba antes.
+- **V14 (el fallo del 121/122):** caso límite aceptado, sin tocar. Es un bloqueo `N.M` intermitente, y relajarlo es c12/c19.
+- **Primera pasada de la suite colgada 34 min.** Un doble de test esperaba para siempre al agotar su guion; ahora falla con un mensaje.
+
+**Cambios:**
+- [x] Guard: en `DatoConcreto`, una cifra sin ninguna consulta en el turno exige consultar, en CLI y en API. Una corrección y, si se repite, salida segura. Solo cifras.
+- [x] Versión 1.0.0 (`Cargo.toml` y `tauri.conf.json`) y test de que dev y build sirven el mismo frontend estático (no hay `npm`).
+- [x] Ejecutable de producción con `cargo tauri build` en la rama.
+
+**Medido:** suite **1249/0/36** (base 1218/0/36), sumando los binarios repetidos a la primera pasada sin repetir la suite entera. `fmt` y `clippy`: limpios.

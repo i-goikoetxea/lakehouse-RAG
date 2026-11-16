@@ -82,7 +82,11 @@ impl AgentRunnerPort for RunnerRetenido {
         _herramientas: &[ToolDefinition],
     ) -> Result<AgentTurnOutput, DomainError> {
         self.vistas.lock().unwrap().push(historial.to_vec());
-        let siguiente = self.respuestas.lock().unwrap().pop_front().flatten();
+        // Un guion agotado es un fallo del test, no un paso colgado: así no se cuelga la suite
+        let siguiente =
+            self.respuestas.lock().unwrap().pop_front().expect(
+                "guion del runner agotado: el orquestador pidió más pasos de los previstos",
+            );
         match siguiente {
             Some(texto) => Ok(AgentTurnOutput::FinalMessage(texto.to_string())),
             None => pending().await,
@@ -226,6 +230,8 @@ async fn test_salida_segura_entrega_el_mensaje_fijo_marcado_y_conserva_las_tools
 
 #[tokio::test]
 async fn test_el_historial_no_conserva_recordatorio_ni_respuesta_rechazada() {
+    // El seguimiento no tiene intención: su respuesta pasa sin corrección (límite declarado) y
+    // el historial sigue sin el recordatorio ni la respuesta rechazada del primer turno
     let runner = Arc::new(RunnerRetenido::con_respuestas(&[
         Some(RESPUESTA_RECHAZADA),
         Some("Son 125"),
@@ -237,9 +243,12 @@ async fn test_el_historial_no_conserva_recordatorio_ni_respuesta_rechazada() {
         .unwrap();
     historial_sin_rastro_del_arnes(&chat.historial("obra").await);
 
-    chat.enviar_mensaje("Resume el resultado", "obra", "sonnet")
+    let seguimiento = chat
+        .enviar_mensaje("Resume el resultado", "obra", "sonnet")
         .await
-        .ok();
+        .unwrap();
+    assert!(!seguimiento.salida_segura);
+    assert!(seguimiento.reply_html.contains("Son 125"));
     historial_sin_rastro_del_arnes(&chat.historial("obra").await);
     assert!(
         runner.vistas.lock().unwrap()[1]

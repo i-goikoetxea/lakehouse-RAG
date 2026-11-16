@@ -169,6 +169,8 @@ fn repetir_respuestas_guardadas() {
     let (mut rechazos, mut avisos, mut con_bloque) = (0, 0, 0);
     let (mut mutadas_total, mut mutadas_con_nota) = (0, 0);
     let (mut microllamadas, mut llamadas_en_crudo) = (0, 0);
+    // Respuestas que afirman cifras o citas sin ninguna consulta en el turno (se pediría consultar)
+    let mut exigen_consulta = 0;
     for ruta in rutas.split(';').filter(|r| !r.is_empty()) {
         for guardada in leer(ruta) {
             let (modelo, avisos_guardados) = sin_bloque_de_verificacion(&guardada.respuesta);
@@ -196,6 +198,13 @@ fn repetir_respuestas_guardadas() {
             };
             microllamadas += usize::from(!pendientes.is_empty());
             llamadas_en_crudo += usize::from(veredicto == Err(ViolacionArnes::LlamadaEnCrudo));
+            let exige_consulta = PostInferenceGuard::afirma_sin_consulta(
+                &modelo,
+                &guardada.pregunta,
+                &intencion,
+                &guardada.registro,
+            );
+            exigen_consulta += usize::from(exige_consulta);
             rechazos += usize::from(veredicto.is_err());
             avisos += motivos.len();
             con_bloque += usize::from(!motivos.is_empty());
@@ -223,6 +232,7 @@ fn repetir_respuestas_guardadas() {
                 "puntuacion_guardada": guardada.puntuacion,
                 "intencion": format!("{intencion:?}"),
                 "rechazo": veredicto.err().map(|v| v.motivo()),
+                "exige_consulta": exige_consulta,
                 "pendientes_nivel_2": pendientes
                     .iter()
                     .map(|p| json!({ "cifra": p.literal, "solo_estructural": p.solo_estructural }))
@@ -239,6 +249,7 @@ fn repetir_respuestas_guardadas() {
         "rechazos_del_guard": rechazos,
         "microllamadas_nivel_2": microllamadas,
         "llamadas_en_crudo": llamadas_en_crudo,
+        "exigen_consulta": exigen_consulta,
         "avisos_de_pagina": avisos,
         "respuestas_con_bloque": con_bloque,
         "citas_mutadas": mutadas_total,
@@ -247,7 +258,7 @@ fn repetir_respuestas_guardadas() {
     });
     std::fs::write(&salida, serde_json::to_string_pretty(&resumen).unwrap()).unwrap();
     println!(
-        "{} respuestas; {rechazos} rechazos del guard; {microllamadas} microllamadas; {llamadas_en_crudo} llamadas en crudo; {avisos} avisos de página en {con_bloque} respuestas; {mutadas_con_nota}/{mutadas_total} citas mutadas con nota",
+        "{} respuestas; {rechazos} rechazos del guard; {microllamadas} microllamadas; {llamadas_en_crudo} llamadas en crudo; {exigen_consulta} exigen consulta; {avisos} avisos de página en {con_bloque} respuestas; {mutadas_con_nota}/{mutadas_total} citas mutadas con nota",
         resumen["respuestas"]
     );
 }

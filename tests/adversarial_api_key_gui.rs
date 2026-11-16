@@ -1,6 +1,9 @@
 //! Fase 5.2: la API key no llega al WebView (carga útil de los comandos), ni a los logs, ni a la
 //! telemetría del runner del agente, aunque el servidor la repita en sus errores. Binario propio:
 //! el suscriptor de `tracing` no compite con otros tests.
+//!
+//! Modal de configuración: la key tampoco llega al fichero de preferencias del modo
+//! (`llm_config.json`), ni aunque se pegue en el selector de modo o el fichero venga envenenado.
 
 use std::io::Write;
 use std::sync::{Arc, Mutex};
@@ -13,7 +16,13 @@ use lakehouse_rag::infrastructure::llm::anthropic_api::{
     PoliticaReintentos, SecretApiKey,
 };
 use lakehouse_rag::infrastructure::llm::modo_llm::ModoLlm;
+use lakehouse_rag::infrastructure::llm::preferencia_modo::{
+    ARCHIVO_PREFERENCIAS_LLM, ModoResuelto, OrigenModo, leer_modo_guardado,
+};
 use lakehouse_rag::presentation::gui::api_key::{estado_api_key_en, guardar_api_key_en};
+use lakehouse_rag::presentation::gui::config_llm::{
+    MotorLlmSesion, estado_modo_llm_desde_disco, guardar_modo_llm_en,
+};
 use serde_json::json;
 use wiremock::matchers::method;
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -110,7 +119,65 @@ async fn test_la_key_no_sale_por_el_webview_los_logs_ni_la_telemetria() {
     let telemetria = serde_json::to_string(&runner.tomar_metricas()).unwrap();
     assert!(!telemetria.contains(NUCLEO));
 
-    // 3. Nada de lo anterior dejó la key en los logs (sí la máscara)
+    // 3. El flujo del modal: guardar la key y el modo deja el fichero de configuración sin key,
+    // aunque la key se pegue en el selector de modo o el fichero traiga una de antes
+    let dir = tempfile::tempdir().unwrap();
+    let sesion = MotorLlmSesion {
+        directorio_config: dir.path().to_path_buf(),
+        pedido_al_arrancar: ModoResuelto {
+            modo: ModoLlm::Cli,
+            origen: OrigenModo::PorDefecto,
+        },
+        en_uso: ModoLlm::Cli,
+    };
+    std::fs::write(
+        dir.path().join(ARCHIVO_PREFERENCIAS_LLM),
+        json!({"modo_llm": "api", "api_key": KEY_FALSA}).to_string(),
+    )
+    .unwrap();
+    assert_eq!(leer_modo_guardado(dir.path()), Some(ModoLlm::Api));
+    let almacen_modal = AlmacenEnMemoria::default();
+    let key_guardada = guardar_api_key_en(KEY_FALSA.into(), None, &almacen_modal, ModoLlm::Cli)
+        .unwrap()
+        .configurada;
+    let pegada_en_el_modo =
+        guardar_modo_llm_en(&sesion, KEY_FALSA, None, key_guardada).unwrap_err();
+    assert!(!pegada_en_el_modo.contains(NUCLEO), "{pegada_en_el_modo}");
+    let elegido = guardar_modo_llm_en(&sesion, "api", None, key_guardada).unwrap();
+    let estado_modo = estado_modo_llm_desde_disco(&sesion, Some(KEY_FALSA), key_guardada);
+    for carga in [
+        serde_json::to_string(&elegido).unwrap(),
+        serde_json::to_string(&estado_modo).unwrap(),
+    ] {
+        assert!(!carga.contains(NUCLEO), "{carga}");
+    }
+    assert_eq!(elegido.al_reiniciar, "api");
+    for entrada in std::fs::read_dir(dir.path()).unwrap() {
+        let ruta = entrada.unwrap().path();
+        let contenido = std::fs::read_to_string(&ruta).unwrap();
+        assert!(
+            !contenido.contains(NUCLEO),
+            "{}: {contenido}",
+            ruta.display()
+        );
+        assert!(
+            !contenido.contains("api_key"),
+            "{}: {contenido}",
+            ruta.display()
+        );
+    }
+    std::fs::write(
+        dir.path().join(ARCHIVO_PREFERENCIAS_LLM),
+        "x".repeat(64 * 1024),
+    )
+    .unwrap();
+    assert_eq!(
+        leer_modo_guardado(dir.path()),
+        None,
+        "un fichero desmesurado se ignora"
+    );
+
+    // 4. Nada de lo anterior dejó la key en los logs (sí la máscara)
     let texto_logs = String::from_utf8(logs.0.lock().unwrap().clone()).unwrap();
     assert!(!texto_logs.contains(NUCLEO), "{texto_logs}");
     assert!(
