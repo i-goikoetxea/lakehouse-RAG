@@ -1658,4 +1658,24 @@
   - `cargo run --release --example ab_agente -- --centro <id> --preguntas <in.jsonl> --modo api|cli --salida <out.jsonl>`;
   - pasa `--modelo claude-sonnet-5-5` en los dos modos;
   - el centro tiene que estar activo de antemano.
-- **Para el modo API en la GUI,** la key se guarda con `guardar_api_key` y el modo se lee al arrancar (`LAKEHOUSE_RAG_MODO_LLM=api`). Todavía no hay controles en la interfaz.
+- **Para el modo API en la GUI,** la key se guarda con `guardar_api_key` y el modo se lee al arrancar (`LAKEHOUSE_RAG_MODO_LLM=api`). Los controles de la interfaz llegan en la sesión siguiente.
+
+### Sesión Configuración del LLM en la GUI (2026-11-16): engranaje, modo CLI/API y API key
+
+**Estado: `[COMPLETADO]`, pendiente de la prueba manual del usuario; sin merge ni push.** Rama `claude/gui-config-api-c2009b`, desde `main` `4eca889`. Contrato: `docs/arquitectura/ssd_gui_config_llm.md`.
+
+**Errores y límites (primero):**
+- **Fuga corregida de paso** (`57d92d1`): un valor desconocido de `LAKEHOUSE_RAG_MODO_LLM` se escribía en el log. Si era una key pegada por error, la key acababa en el log. Ahora solo se registra su longitud.
+- **Sin cambio en caliente:** el motor se compone al arrancar, así que la elección y la key nueva **se aplican al reiniciar**. El modal distingue el motor en uso, el elegido y el del próximo arranque (SSD §3).
+- **Alcance del fichero:** el modo elegido en la ventana también lo usan la CLI y el MCP con el mismo directorio de configuración.
+- **Solo a mano:** el aspecto del modal (tema claro y oscuro) y el guardado real en `keyring`. La ventana no se lanzó para no interferir con la app abierta del usuario.
+- **Primera pasada de la suite:** falló un test estático propio, que dependía de LF con `autocrlf`. Se corrigió en el test, no en la app.
+
+**Cambios:**
+- [x] `llm_config.json`, que solo guarda el modo. Prelación: entorno > fichero > `Cli` (`preferencia_modo.rs`). La composición expone `modo_pedido` y `modo_en_uso`.
+- [x] Comandos `estado_modo_llm` y `guardar_modo_llm` (`config_llm.rs`). `estado_api_key` devuelve ahora el motor en uso.
+- [x] Botón ⚙ (SVG) entre el tema y los controles de ventana, y modal con selector CLI/API, avisos y gestión de la key con campo password, que se vacía tras cada intento.
+- [x] Adversarial ampliado: con un fichero envenenado, la key pegada en el selector de modo o un fichero desmesurado, la key no llega al fichero, al estado ni a los logs.
+
+**Medido:** suite **1236/0/36**, frente a la base 1218/0/36: los 18 tests nuevos y ninguna regresión. `clippy --all-targets -D warnings` y `fmt --check`: limpios. Sin gasto de API.
+
