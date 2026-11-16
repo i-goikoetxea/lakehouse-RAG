@@ -6,6 +6,7 @@ use std::collections::HashSet;
 use serde_json::Value;
 
 use super::cifras::{CifraHallada, extraer_cifras, lecturas_de_fuente};
+use super::procedencia_determinista::{exige_lectura_literal, mismo_precedente};
 use super::texto_normalizado::plegar_texto;
 use crate::application::dtos::procedencia::{
     Literal, Operacion, SalidaTurno, SolicitudProcedencia, TipoTraza, TrazasPropuestas,
@@ -122,7 +123,10 @@ fn traza_valida(solicitud: &SolicitudProcedencia, literal: &str, tipo: &TipoTraz
                 })
         }
         TipoTraza::ReferenciaEstructural { subcadena } => {
-            existe(solicitud, subcadena) && contiene_los_digitos(&subcadena.texto, literal)
+            existe(solicitud, subcadena)
+                && contiene_los_digitos(&subcadena.texto, literal)
+                && (!exige_lectura_literal(literal)
+                    || mismo_precedente(&solicitud.borrador, &subcadena.texto, literal))
         }
         TipoTraza::ConteoElementos { elementos } => {
             let esqueletos: HashSet<String> =
@@ -255,7 +259,8 @@ fn calcular(operacion: Operacion, valores: &[f64]) -> Option<f64> {
 }
 
 /// Algún número de la subcadena tiene exactamente los dígitos de la cifra: «Art. 21» respalda
-/// «21», pero «Art. 210» no
+/// «21», pero «Art. 210» no. Si uno de los dos exige lectura literal (`7.3`, `4.25`), el número
+/// debe ser el mismo token, con sus separadores: «Art. 7.3» no respalda «73» ni «7»
 fn contiene_los_digitos(subcadena: &str, cifra: &str) -> bool {
     let buscados: String = cifra.chars().filter(char::is_ascii_digit).collect();
     if buscados.is_empty() {
@@ -270,6 +275,7 @@ fn contiene_los_digitos(subcadena: &str, cifra: &str) -> bool {
         }
         let mut fin = posicion;
         let mut digitos = String::new();
+        let mut token = String::new();
         while fin < letras.len()
             && (letras[fin].is_ascii_digit()
                 || (matches!(letras[fin], '.' | ',')
@@ -278,9 +284,12 @@ fn contiene_los_digitos(subcadena: &str, cifra: &str) -> bool {
             if letras[fin].is_ascii_digit() {
                 digitos.push(letras[fin]);
             }
+            token.push(letras[fin]);
             fin += 1;
         }
-        if digitos == buscados {
+        let literal = exige_lectura_literal(&token) || exige_lectura_literal(cifra);
+        if (literal && token == cifra.trim_start_matches('-')) || (!literal && digitos == buscados)
+        {
             return true;
         }
         posicion = fin;
@@ -406,6 +415,126 @@ mod tests {
             TipoTraza::ReferenciaEstructural {
                 subcadena: lit("t0", "Plazos")
             }
+        ));
+    }
+
+    fn referencia(salida: &str, borrador: &str, cifra: &str, subcadena: &str) -> bool {
+        let mut s = solicitud(&[salida], "");
+        s.borrador = borrador.into();
+        valida(
+            &s,
+            cifra,
+            TipoTraza::ReferenciaEstructural {
+                subcadena: lit("t0", subcadena),
+            },
+        )
+    }
+
+    /// Un identificador jerárquico `N.M` es un token literal: se valida entero, con sus puntos y
+    /// con la misma palabra o símbolo delante que en la respuesta, en cualquier idioma
+    #[test]
+    fn test_referencia_jerarquica_literal_en_varios_dominios_e_idiomas() {
+        for (salida, borrador, cifra, subcadena) in [
+            (
+                "Artículo 7.3. El plazo de entrega se fija en el contrato.",
+                "Se regula en el artículo 7.3.",
+                "7.3",
+                "Artículo 7.3",
+            ),
+            (
+                "Note 12.4 Leases and other commitments",
+                "See Note 12.4 of the annual report.",
+                "12.4",
+                "Note 12.4",
+            ),
+            (
+                "§ 5.2 Haftung des Auftragnehmers",
+                "Das regelt § 5.2.",
+                "5.2",
+                "§ 5.2",
+            ),
+            (
+                "Статья 3.1. Сфера применения",
+                "Это статья 3.1.",
+                "3.1",
+                "Статья 3.1",
+            ),
+            (
+                "Cláusula 4.2 Prazo de pagamento",
+                "Conforme a cláusula 4.2, o prazo é fixo.",
+                "4.2",
+                "Cláusula 4.2",
+            ),
+        ] {
+            assert!(referencia(salida, borrador, cifra, subcadena), "{borrador}");
+        }
+    }
+
+    #[test]
+    fn test_referencia_jerarquica_no_se_lee_sin_sus_puntos_ni_con_otra_palabra() {
+        for (salida, borrador, cifra, subcadena) in [
+            // `7.3` no es `73`, ni al revés
+            (
+                "Artículo 73. Recursos",
+                "Lo regula el artículo 7.3.",
+                "7.3",
+                "Artículo 73",
+            ),
+            (
+                "Artículo 7.3. Plazos",
+                "Lo regula el artículo 73.",
+                "73",
+                "Artículo 7.3",
+            ),
+            (
+                "Cláusula 4.2 Prazo",
+                "O prazo é de 42 dias.",
+                "42",
+                "Cláusula 4.2",
+            ),
+            // Un componente suelto no es el identificador
+            (
+                "Clause 4.12.1 Scope",
+                "See clause 4.12.",
+                "4.12",
+                "Clause 4.12.1",
+            ),
+            // Misma cifra con otra palabra delante: es un decimal, no la referencia
+            (
+                "Artículo 7.3. Plazos",
+                "La pieza pesa 7.3 kg.",
+                "7.3",
+                "Artículo 7.3",
+            ),
+            (
+                "Note 12.4 Leases",
+                "Revenue grew 12.4 percent.",
+                "12.4",
+                "Note 12.4",
+            ),
+        ] {
+            assert!(
+                !referencia(salida, borrador, cifra, subcadena),
+                "{borrador}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_decimal_redondeado_sigue_rechazado_y_los_miles_siguen_enteros() {
+        // c19: «4 m» con una fuente de «4.25 m»
+        assert!(!referencia(
+            "Main beam length: 4.25 m (section 2).",
+            "The main beam is 4 m long.",
+            "4",
+            "4.25 m"
+        ));
+        // «1.250» se lee como miles: respalda el expediente 1250
+        assert!(referencia(
+            "Expediente 1.250 de la junta",
+            "Consta en el expediente 1250.",
+            "1250",
+            "Expediente 1.250"
         ));
     }
 

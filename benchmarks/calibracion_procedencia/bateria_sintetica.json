@@ -209,6 +209,18 @@
             { "tipo": "formato_o_escala", "fuente": { "origen": "t0", "texto": "4.25" }, "factor_potencia_diez": 0 }
           ] }
       ]
+    },
+    {
+      "id": "c20", "idioma": "pt", "dominio": "contratos", "formato": "referencia jerárquica literal 4.2 y trampa 42",
+      "pregunta": "Qual é o prazo de pagamento do contrato?",
+      "salidas": [{ "id": "t0", "herramienta": "search_semantic_chunks", "texto": "Cláusula 4.2 Prazo de pagamento: trinta dias após a fatura." }],
+      "borrador": "Conforme a cláusula 4.2, o pagamento vence em 42 dias.",
+      "cifras": [
+        { "literal": "4.2", "legitima": true,
+          "oraculo": { "tipo": "referencia_estructural", "subcadena": { "origen": "t0", "texto": "Cláusula 4.2" } } },
+        { "literal": "42", "legitima": false,
+          "adversarias": [{ "tipo": "referencia_estructural", "subcadena": { "origen": "t0", "texto": "Cláusula 4.2" } }] }
+      ]
     }
   ]
 }

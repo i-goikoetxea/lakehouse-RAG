@@ -132,9 +132,10 @@ fn oraculos_rechazados() -> Vec<String> {
     rechazados
 }
 
-/// Límite conocido (diagnóstico de la Fase 5.1, sin corregir): en una referencia compuesta
-/// («Artículo 7.3») `contiene_los_digitos` lee «7.3» como un solo número (73), así que ni el
-/// «7» ni el «3» quedan respaldados. Cualquier otro rechazo es un retroceso
+/// Límite declarado (Fase 5.2): un identificador jerárquico es un token literal indivisible
+/// («Artículo 7.3» respalda «artículo 7.3», nunca «73» ni un componente suelto). La paráfrasis que
+/// lo descompone («apartado 3 del artículo 7», c12) no se rescata sin listas de palabras: abriría
+/// la puerta al redondeo de c19. Cualquier otro rechazo es un retroceso
 #[test]
 fn test_cada_oraculo_legitimo_lo_acepta_rust_salvo_el_limite_conocido() {
     assert_eq!(
