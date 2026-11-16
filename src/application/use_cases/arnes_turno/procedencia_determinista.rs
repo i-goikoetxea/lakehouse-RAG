@@ -127,11 +127,12 @@ fn encabezado_que_abre(linea: &str) -> Option<(String, String)> {
     let resto = linea[palabra.len()..].trim_start_matches('.').trim_start();
     let numero: String = resto.chars().take_while(char::is_ascii_digit).collect();
     let tras = resto[numero.len()..].chars().next();
-    let entero = tras.is_none_or(|l| {
-        !l.is_alphanumeric()
-            && !(matches!(l, '.' | ',')
-                && resto[numero.len() + 1..].starts_with(|d: char| d.is_ascii_digit()))
-    });
+    // `21` sí; `21b`, `21.5` o `21,5` no son el número entero de un encabezado
+    let sigue_decimal = |l: char| {
+        matches!(l, '.' | ',')
+            && resto[numero.len() + 1..].starts_with(|d: char| d.is_ascii_digit())
+    };
+    let entero = tras.is_none_or(|l| !(l.is_alphanumeric() || sigue_decimal(l)));
     (!numero.is_empty() && entero).then(|| (plegar_texto(&palabra), numero))
 }
 
