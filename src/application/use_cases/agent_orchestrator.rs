@@ -1944,12 +1944,24 @@ mod tests {
 
     #[tokio::test]
     async fn test_sin_intencion_ni_datos_no_hay_correccion_en_ningun_modo() {
-        for (modo, runner) in runners(|| vec![libre_final("Es un cordón de refuerzo.")]) {
-            let mut historial = vec![AgentMessage::user(SIN_INTENCION)];
-            let (respuesta, eventos) = turno_con_arnes(runner.clone(), &mut historial).await;
-            assert_eq!(respuesta.unwrap(), "Es un cordón de refuerzo.", "{modo}");
-            assert_eq!(omisiones(&eventos), 0, "{modo}");
-            assert_eq!(runner.pasos_libres(), 1, "{modo}");
+        for (pregunta, texto) in [
+            (SIN_INTENCION, "Es un cordón de refuerzo."),
+            (
+                "hola",
+                "Hola, ¿en qué te ayudo con los documentos del centro?",
+            ),
+            (
+                "¿Cuál es la capital de Francia?",
+                "Eso no consta en el centro.",
+            ),
+        ] {
+            for (modo, runner) in runners(|| vec![libre_final(texto)]) {
+                let mut historial = vec![AgentMessage::user(pregunta)];
+                let (respuesta, eventos) = turno_con_arnes(runner.clone(), &mut historial).await;
+                assert_eq!(respuesta.unwrap(), texto, "{modo}: {pregunta}");
+                assert_eq!(omisiones(&eventos), 0, "{modo}: {pregunta}");
+                assert_eq!(runner.pasos_libres(), 1, "{modo}: {pregunta}");
+            }
         }
     }
 

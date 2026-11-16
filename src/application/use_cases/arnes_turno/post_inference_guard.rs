@@ -220,11 +220,12 @@ impl PostInferenceGuard {
         comprobar_ejes_aclarados(respuesta, registro)
     }
 
-    /// La respuesta afirma algo concreto (una cifra que no sale de la pregunta ni es una
-    /// referencia estructural, o una cita literal) sin ninguna consulta en el turno. Vale para
-    /// cualquier intención que el guard no ata a una tool de Capa 2, también `Ninguna`
-    /// (seguimientos como «reintenta»), y en los dos transportes. Las intenciones de Capa 2 ya
-    /// tienen su regla (`CapaDosNoIntentada`). Una afirmación sin cifras ni citas no se detecta.
+    /// La respuesta da una cifra concreta (que no sale de la pregunta ni es una referencia
+    /// estructural) sin ninguna consulta en el turno. Vale para cualquier intención que el guard
+    /// no ata a una tool de Capa 2, también `Ninguna` (seguimientos como «reintenta»), y en los
+    /// dos transportes. Las intenciones de Capa 2 ya tienen su regla (`CapaDosNoIntentada`).
+    /// Solo cifras, a propósito: detectar hechos o citas sin cifras exigiría reglas que dependen
+    /// del idioma, y bloquearía conversación legítima.
     pub fn afirma_sin_consulta(
         respuesta: &str,
         pregunta: &str,
@@ -237,9 +238,7 @@ impl PostInferenceGuard {
         {
             return false;
         }
-        !citas_literales(respuesta).is_empty()
-            || !cifras_sin_resolver(respuesta, pregunta, registro, false, &HashSet::new())
-                .is_empty()
+        !cifras_sin_resolver(respuesta, pregunta, registro, false, &HashSet::new()).is_empty()
     }
 
     /// Cifras que el Nivel 2 podría rescatar: las que hoy causan `CifraEnAbstencion` o
@@ -1811,11 +1810,40 @@ El campo `vigencia_no_declarada` vino vacío.";
     }
 
     #[test]
-    fn test_una_cita_literal_sin_consulta_exige_consultar() {
-        assert!(afirma_sin_consulta(
+    fn test_una_cita_sin_cifras_no_exige_consultar() {
+        // Fuera del alcance de la regla: solo cifras (las citas exigirían reglas por idioma)
+        assert!(!afirma_sin_consulta(
             "repite lo que dice el documento",
             "El documento dice «el operario debe estar cualificado antes de empezar»."
         ));
+    }
+
+    #[test]
+    fn test_fuera_de_dominio_o_saludo_sin_cifras_no_exige_consultar() {
+        for (pregunta, respuesta) in [
+            (
+                "buenos días",
+                "Buenos días. Pregúntame por los documentos del centro activo.",
+            ),
+            (
+                "hello",
+                "Hello! Ask me about the documents in the active center.",
+            ),
+            (
+                "¿Cuál es la capital de Francia?",
+                "Eso no está en los documentos del centro: París, según el conocimiento general.",
+            ),
+            ("¿quién eres?", "Soy el asistente técnico del Lakehouse."),
+            (
+                "cuéntame un chiste",
+                "Prefiero ceñirme a los documentos del centro.",
+            ),
+        ] {
+            assert!(
+                !afirma_sin_consulta(pregunta, respuesta),
+                "{pregunta} → {respuesta}"
+            );
+        }
     }
 
     #[test]
