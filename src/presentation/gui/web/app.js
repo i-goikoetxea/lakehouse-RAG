@@ -1103,6 +1103,100 @@
     destino.appendChild(tarjeta);
   }
 
+  // 14b. Configuración: motor del LLM (CLI o API) y API key. El backend nunca devuelve la key:
+  // solo su máscara. El campo se vacía tras cada intento y la key no se guarda en ninguna variable.
+  const dialogoConfig = $('dialogo-config');
+  const campoKey = $('config-key-input');
+  const NOMBRE_MOTOR = { cli: 'CLI · claude -p', api: 'API de Messages' };
+  const ORIGEN_MODO = {
+    entorno: 'lo fija la variable LAKEHOUSE_RAG_MODO_LLM',
+    fichero: 'elegido aquí',
+    por_defecto: 'valor por defecto',
+  };
+  const ORIGEN_KEY = { entorno: 'desde la variable ANTHROPIC_API_KEY', almacen: 'desde el almacén del sistema' };
+
+  function pintarModo(estado) {
+    const enUso = $('config-en-uso');
+    enUso.textContent = NOMBRE_MOTOR[estado.enUso] || estado.enUso;
+    enUso.className = `chip chip-mono ${estado.respaldoCli ? 'chip-aviso' : 'chip-ok'}`;
+    const elegido = estado.elegido || 'cli';
+    document.querySelectorAll('input[name="config-modo"]').forEach((radio) => { radio.checked = radio.value === elegido; });
+    const pendiente = estado.pendienteDeReinicio ? ' · pendiente de reinicio' : '';
+    $('config-al-reiniciar').textContent =
+      `Al reiniciar: ${NOMBRE_MOTOR[estado.alReiniciar] || estado.alReiniciar} (${ORIGEN_MODO[estado.origenAlReiniciar] || estado.origenAlReiniciar})${pendiente}.`;
+    const avisos = $('config-avisos-modo');
+    vaciar(avisos);
+    estado.avisos.forEach((aviso) => avisos.appendChild(el('li', null, aviso)));
+  }
+
+  function pintarKey(estado) {
+    const chip = $('config-key-estado');
+    chip.textContent = estado.configurada ? 'Configurada' : 'Sin key';
+    chip.className = `chip ${estado.configurada ? 'chip-ok' : 'chip-aviso'}`;
+    const mascara = $('config-key-mascara');
+    mascara.hidden = !estado.mascara;
+    mascara.textContent = estado.mascara || '';
+    $('config-key-origen').textContent = estado.origen ? (ORIGEN_KEY[estado.origen] || estado.origen) : '';
+  }
+
+  async function cargarConfig() {
+    try {
+      const [modo, key] = await Promise.all([invoke('estado_modo_llm'), invoke('estado_api_key')]);
+      pintarModo(modo);
+      pintarKey(key);
+    } catch (err) {
+      $('config-modo-error').textContent = `No se pudo leer la configuración: ${mensajeError(err)}`;
+    }
+  }
+
+  function vaciarCampoKey() { campoKey.value = ''; }
+
+  $('btn-config').addEventListener('click', () => {
+    $('config-modo-error').textContent = '';
+    $('config-key-error').textContent = '';
+    vaciarCampoKey();
+    dialogoConfig.showModal();
+    cargarConfig();
+  });
+  $('btn-cerrar-config').addEventListener('click', () => dialogoConfig.close());
+  dialogoConfig.addEventListener('close', vaciarCampoKey);
+
+  document.querySelectorAll('input[name="config-modo"]').forEach((radio) => {
+    radio.addEventListener('change', async () => {
+      if (!radio.checked) return;
+      $('config-modo-error').textContent = '';
+      try {
+        const estado = await invoke('guardar_modo_llm', { modo: radio.value });
+        pintarModo(estado);
+        registrar(`Motor elegido: ${NOMBRE_MOTOR[radio.value]}. Se aplica al reiniciar la app.`, 'ok');
+      } catch (err) {
+        $('config-modo-error').textContent = mensajeError(err);
+        await cargarConfig();
+      }
+    });
+  });
+
+  $('form-api-key').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    $('config-key-error').textContent = '';
+    if (!campoKey.value.trim()) {
+      $('config-key-error').textContent = 'Pega la API key antes de guardar.';
+      return;
+    }
+    const boton = $('btn-guardar-key');
+    boton.disabled = true;
+    try {
+      pintarKey(await invoke('guardar_api_key', { key: campoKey.value }));
+      registrar('API key guardada en el almacén del sistema. El motor se compone al arrancar: reinicia la app para usarla.', 'ok');
+    } catch (err) {
+      $('config-key-error').textContent = mensajeError(err);
+    } finally {
+      vaciarCampoKey();
+      boton.disabled = false;
+    }
+    await cargarConfig();
+  });
+
   // 15. Arranque
   async function iniciar() {
     if (!invoke || !listen) {
