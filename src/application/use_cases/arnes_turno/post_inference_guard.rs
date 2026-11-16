@@ -220,6 +220,28 @@ impl PostInferenceGuard {
         comprobar_ejes_aclarados(respuesta, registro)
     }
 
+    /// La respuesta afirma algo concreto (una cifra que no sale de la pregunta ni es una
+    /// referencia estructural, o una cita literal) sin ninguna consulta en el turno. Vale para
+    /// cualquier intención que el guard no ata a una tool de Capa 2, también `Ninguna`
+    /// (seguimientos como «reintenta»), y en los dos transportes. Las intenciones de Capa 2 ya
+    /// tienen su regla (`CapaDosNoIntentada`). Una afirmación sin cifras ni citas no se detecta.
+    pub fn afirma_sin_consulta(
+        respuesta: &str,
+        pregunta: &str,
+        intencion: &IntencionTurno,
+        registro: &RegistroTurno,
+    ) -> bool {
+        if !registro.resultados().is_empty()
+            || herramientas_de_capa_dos(intencion).is_some()
+            || llamada_en_crudo::detectar(respuesta).is_some()
+        {
+            return false;
+        }
+        !citas_literales(respuesta).is_empty()
+            || !cifras_sin_resolver(respuesta, pregunta, registro, false, &HashSet::new())
+                .is_empty()
+    }
+
     /// Cifras que el Nivel 2 podría rescatar: las que hoy causan `CifraEnAbstencion` o
     /// `CifraSinAnclar`, con el modo de cada una. Vacío si la respuesta no tiene ese defecto.
     pub fn cifras_pendientes(
@@ -1756,6 +1778,97 @@ El campo `vigencia_no_declarada` vino vacío.";
                 &HashSet::new(),
             ),
             Ok(())
+        );
+    }
+
+    fn afirma_sin_consulta(pregunta: &str, respuesta: &str) -> bool {
+        use super::super::intent_detector::IntentDetector;
+        let intencion = IntentDetector::clasificar(pregunta);
+        PostInferenceGuard::afirma_sin_consulta(
+            respuesta,
+            pregunta,
+            &intencion,
+            &RegistroTurno::default(),
+        )
+    }
+
+    #[test]
+    fn test_cifras_sin_ninguna_consulta_exigen_consultar_en_cualquier_idioma() {
+        for (pregunta, respuesta) in [
+            ("¿Qué presión tiene la línea L-999?", "Son 16 bar."),
+            (
+                "reintenta",
+                "Según el procedimiento, el recubrimiento mínimo es de 25 mm (p. 4).",
+            ),
+            ("try again", "The design pressure is 16 bar."),
+            ("e agora?", "O prazo é de 30 dias."),
+        ] {
+            assert!(
+                afirma_sin_consulta(pregunta, respuesta),
+                "{pregunta} → {respuesta}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_una_cita_literal_sin_consulta_exige_consultar() {
+        assert!(afirma_sin_consulta(
+            "repite lo que dice el documento",
+            "El documento dice «el operario debe estar cualificado antes de empezar»."
+        ));
+    }
+
+    #[test]
+    fn test_conversacion_sin_datos_no_exige_consultar() {
+        for (pregunta, respuesta) in [
+            ("hola", "Hola, ¿en qué te puedo ayudar?"),
+            ("gracias", "De nada."),
+            (
+                "¿cómo te uso?",
+                "1. Activa un centro.
+2. Escribe tu pregunta.
+3. Revisa las citas.",
+            ),
+            (
+                "¿Qué es el acero 316L?",
+                "El 316L es la designación que mencionas.",
+            ),
+            ("dime algo breve", "«Sí»"),
+        ] {
+            assert!(
+                !afirma_sin_consulta(pregunta, respuesta),
+                "{pregunta} → {respuesta}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_con_una_consulta_en_el_turno_no_aplica() {
+        let registro = registro_con(vec![resultado(
+            "search_normative_context",
+            json!({ "fragmentos": [] }),
+            false,
+        )]);
+        assert!(!PostInferenceGuard::afirma_sin_consulta(
+            "Son 16 bar.",
+            "reintenta",
+            &IntencionTurno::Ninguna,
+            &registro,
+        ));
+    }
+
+    #[test]
+    fn test_las_intenciones_de_capa_dos_siguen_con_su_propia_regla() {
+        // Sin consulta, el guard ya las rechaza con `CapaDosNoIntentada`
+        assert!(!PostInferenceGuard::afirma_sin_consulta(
+            "Son 150 °C",
+            PREGUNTA,
+            &cruzable(),
+            &RegistroTurno::default(),
+        ));
+        assert_eq!(
+            validar_cruzable("Son 150 °C", &RegistroTurno::default()),
+            Err(ViolacionArnes::CapaDosNoIntentada)
         );
     }
 }
