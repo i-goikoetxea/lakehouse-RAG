@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Lakehouse RAG Industrial",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "identifier": "com.lakehouse.rag",
   "build": {
     "frontendDist": "src/presentation/gui/web"

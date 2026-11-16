@@ -41,6 +41,9 @@
         <svg class="theme-icon-dark" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path></svg>
         <svg class="theme-icon-light" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"></circle><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"></path></svg>
       </button>
+      <button id="btn-config" class="btn btn-icono" title="Configuración del motor (CLI o API) y de la API key" aria-label="Configuración" aria-haspopup="dialog">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
+      </button>
       <div class="window-controls">
         <button id="btn-minimize" class="ctrl-btn" title="Minimizar">
           <svg width="10" height="1" viewBox="0 0 10 1"><rect width="10" height="1" fill="currentColor"/></svg>
@@ -219,6 +222,40 @@
         <button value="si" class="btn btn-peligro">Confirmar</button>
       </div>
     </form>
+  </dialog>
+
+  <!-- Configuración del motor del LLM y de la API key -->
+  <dialog id="dialogo-config" class="dialogo dialogo-config" aria-labelledby="config-titulo">
+    <div class="config-cuerpo">
+      <h3 id="config-titulo">Configuración</h3>
+
+      <section class="config-seccion" aria-labelledby="config-motor-titulo">
+        <h4 id="config-motor-titulo">Motor del LLM</h4>
+        <p class="config-linea">En uso en esta sesión: <span id="config-en-uso" class="chip chip-mono">—</span></p>
+        <div class="config-modos" role="radiogroup" aria-label="Motor elegido">
+          <label class="config-opcion"><input type="radio" name="config-modo" value="cli"> <span><strong>CLI</strong> · <code>claude -p</code> (por defecto)</span></label>
+          <label class="config-opcion"><input type="radio" name="config-modo" value="api"> <span><strong>API</strong> · API de Messages, con el modelo elegido en el chat</span></label>
+        </div>
+        <p id="config-al-reiniciar" class="config-linea texto-sutil"></p>
+        <ul id="config-avisos-modo" class="config-avisos" aria-live="polite"></ul>
+        <p id="config-modo-error" class="form-error"></p>
+      </section>
+
+      <section class="config-seccion" aria-labelledby="config-key-titulo">
+        <h4 id="config-key-titulo">API key de Anthropic</h4>
+        <p class="config-linea">Estado: <span id="config-key-estado" class="chip">—</span> <span id="config-key-mascara" class="chip chip-mono" hidden></span> <span id="config-key-origen" class="texto-sutil"></span></p>
+        <form id="form-api-key" class="config-key-form" autocomplete="off">
+          <label>Guardar o actualizar la key (se guarda en el almacén de credenciales del sistema)
+            <span class="fila-ruta"><input id="config-key-input" type="password" autocomplete="off" spellcheck="false" placeholder="sk-ant-…"><button type="submit" id="btn-guardar-key" class="btn btn-primario">Guardar</button></span>
+          </label>
+        </form>
+        <p id="config-key-error" class="form-error"></p>
+      </section>
+
+      <div class="form-acciones">
+        <button type="button" id="btn-cerrar-config" class="btn btn-sutil">Cerrar</button>
+      </div>
+    </div>
   </dialog>
 
   <script src="app.js"></script>

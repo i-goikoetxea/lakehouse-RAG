@@ -1,5 +1,6 @@
 //! Selección del transporte del LLM (`claude -p` o la API de Messages) por configuración.
-//! **Por defecto `Cli`** hasta que el A/B de la Fase 5.2 valide la API. El modo se lee al arrancar.
+//! **Por defecto `Cli`**. El modo se resuelve al arrancar: entorno > `llm_config.json` > `Cli`
+//! (`preferencia_modo`).
 
 use std::sync::Arc;
 
@@ -27,8 +28,12 @@ impl ModoLlm {
         match valor.map(|v| v.trim().to_ascii_lowercase()).as_deref() {
             Some("api") => Self::Api,
             None | Some("") | Some("cli") => Self::Cli,
+            // Sin repetir el valor: podría ser una key pegada en la variable equivocada
             Some(otro) => {
-                tracing::warn!(valor = otro, "{VARIABLE_MODO_LLM} desconocido: se usa cli");
+                tracing::warn!(
+                    longitud = otro.chars().count(),
+                    "{VARIABLE_MODO_LLM} desconocido: se usa cli"
+                );
                 Self::Cli
             }
         }
