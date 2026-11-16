@@ -137,6 +137,15 @@ impl AgentOrchestrator {
             registro.fijar_fecha_de_hoy(reloj.hoy());
         }
         let mut recordatorio: Option<RecordatorioReintento> = None;
+        // Red de seguridad de los transportes sin `tool_choice` forzado (Fase 5.2)
+        let corrige_omisiones =
+            self.runner.necesita_correccion_de_omision() && intencion != IntencionTurno::Ninguna;
+        let dirigida_del_plan = match plan.primer_paso {
+            EleccionHerramienta::Dirigida(dirigida) => Some(dirigida),
+            EleccionHerramienta::Libre => None,
+        };
+        let mut correccion: Option<RecordatorioReintento> = None;
+        let mut consulto = false;
 
         let mut paso = 0;
         while paso < self.max_steps {
@@ -156,7 +165,8 @@ impl AgentOrchestrator {
                     .await?
                 }
                 EleccionHerramienta::Libre => {
-                    let vista = vista_del_modelo(historial, recordatorio.as_ref());
+                    let vista =
+                        vista_del_modelo(historial, &[correccion.as_ref(), recordatorio.as_ref()]);
                     self.paso_libre(
                         modelo,
                         &system_prompt,
@@ -178,6 +188,39 @@ impl AgentOrchestrator {
             };
 
             match turn_output {
+                AgentTurnOutput::FinalMessage(_) if corrige_omisiones && !consulto => {
+                    descartar_en_vivo();
+                    if correccion.is_none() {
+                        notificar_arnes(
+                            &on_event,
+                            EtapaArnes::OmisionDeHerramienta,
+                            "respuesta sin consulta en una pregunta que la exige: se pide consultar"
+                                .to_string(),
+                        );
+                        correccion = Some(RecordatorioReintento::omision(
+                            historial.len(),
+                            dirigida_del_plan,
+                        ));
+                        continue;
+                    }
+                    notificar_arnes(
+                        &on_event,
+                        EtapaArnes::OmisionDeHerramienta,
+                        "segunda respuesta sin consulta: salida segura".to_string(),
+                    );
+                    notificar_arnes(
+                        &on_event,
+                        EtapaArnes::SalidaSegura,
+                        ViolacionArnes::CapaDosNoIntentada.motivo(),
+                    );
+                    let respuesta = MENSAJE_RESPUESTA_NO_VALIDADA.to_string();
+                    if let Some(cb) = &on_event {
+                        cb(AgentExecutionEvent::TextDelta(respuesta.clone()));
+                        cb(AgentExecutionEvent::Completed(respuesta.clone()));
+                    }
+                    historial.push(AgentMessage::assistant(respuesta.clone()));
+                    return Ok(respuesta);
+                }
                 AgentTurnOutput::FinalMessage(candidata) => {
                     let veredicto = self
                         .validar_con_procedencia(
@@ -230,6 +273,7 @@ impl AgentOrchestrator {
                         ));
                     }
 
+                    consulto = true;
                     // Registramos la intención del asistente en el historial
                     historial.push(AgentMessage::assistant_with_tools(calls.clone()));
 
@@ -419,6 +463,19 @@ impl RecordatorioReintento {
             )),
         }
     }
+
+    /// Corrección de omisión: exige consultar (y nombra la tool dirigida, si la había)
+    fn omision(posicion: usize, dirigida: Option<LakehouseToolName>) -> Self {
+        let herramienta = dirigida
+            .map(|d| format!(" (`{}`)", d.as_str()))
+            .unwrap_or_default();
+        Self {
+            posicion,
+            mensaje: AgentMessage::user(format!(
+                "RECORDATORIO DEL SISTEMA: la respuesta anterior no consultó los datos del centro y el operador no la ha visto. Esta pregunta exige consultarlos: llama en este turno a la herramienta que corresponda{herramienta} antes de responder. Si la herramienta no devuelve el dato, dilo."
+            )),
+        }
+    }
 }
 
 /// Bloque que se añade a la respuesta si la página de algún extracto literal no se confirma con
@@ -438,19 +495,22 @@ fn nota_de_paginas(
     Some(nota)
 }
 
-/// Lo que ve el modelo: el historial, con el recordatorio en el punto en que se produjo el rechazo
+/// Lo que ve el modelo: el historial, con cada aviso (corrección de omisión y recordatorio de
+/// reintento) en el punto en que se produjo, en ese orden si coinciden
 fn vista_del_modelo<'a>(
     historial: &'a [AgentMessage],
-    recordatorio: Option<&RecordatorioReintento>,
+    avisos: &[Option<&RecordatorioReintento>],
 ) -> Cow<'a, [AgentMessage]> {
-    match recordatorio {
-        None => Cow::Borrowed(historial),
-        Some(recordatorio) => {
-            let mut vista = historial.to_vec();
-            vista.insert(recordatorio.posicion, recordatorio.mensaje.clone());
-            Cow::Owned(vista)
-        }
+    let mut avisos: Vec<&RecordatorioReintento> = avisos.iter().flatten().copied().collect();
+    if avisos.is_empty() {
+        return Cow::Borrowed(historial);
     }
+    avisos.sort_by_key(|aviso| aviso.posicion);
+    let mut vista = historial.to_vec();
+    for (desplazamiento, aviso) in avisos.iter().enumerate() {
+        vista.insert(aviso.posicion + desplazamiento, aviso.mensaje.clone());
+    }
+    Cow::Owned(vista)
 }
 
 /// El arnés solo analiza lo que escribió el operador, nunca la salida de una tool
@@ -655,6 +715,8 @@ mod tests {
         libres: Mutex<Vec<AgentTurnOutput>>,
         herramientas_dirigidas: Mutex<Vec<LakehouseToolName>>,
         vistas_libres: Mutex<Vec<Vec<AgentMessage>>>,
+        /// Como el runner de la API: no puede forzar la tool
+        corrige_omisiones: bool,
     }
 
     impl RunnerDelArnes {
@@ -671,6 +733,18 @@ mod tests {
 
         fn pasos_libres(&self) -> usize {
             self.vistas_libres.lock().unwrap().len()
+        }
+
+        fn de_la_api(
+            dirigidos: Vec<Result<TurnoDirigido, DomainError>>,
+            libres: Vec<AgentTurnOutput>,
+        ) -> Arc<Self> {
+            Arc::new(Self {
+                dirigidos: Mutex::new(dirigidos),
+                libres: Mutex::new(libres),
+                corrige_omisiones: true,
+                ..Self::default()
+            })
         }
     }
 
@@ -714,6 +788,10 @@ mod tests {
         ) -> Result<TurnoDirigido, DomainError> {
             self.herramientas_dirigidas.lock().unwrap().push(dirigida);
             self.dirigidos.lock().unwrap().remove(0)
+        }
+
+        fn necesita_correccion_de_omision(&self) -> bool {
+            self.corrige_omisiones
         }
     }
 
@@ -1752,5 +1830,118 @@ mod tests {
         ] {
             assert!(prompt.contains(fragmento), "{fragmento}");
         }
+    }
+
+    fn llamada_busqueda() -> AgentTurnOutput {
+        AgentTurnOutput::ToolCalls(vec![ToolCall {
+            id: "toolu_1".to_string(),
+            name: LakehouseToolName::SearchNormativeContext
+                .as_str()
+                .to_string(),
+            arguments: json!({ "centro_id": "planta_1", "consulta": "L-999" }),
+        }])
+    }
+
+    fn omisiones(eventos: &[AgentExecutionEvent]) -> usize {
+        etapas(eventos)
+            .iter()
+            .filter(|e| **e == EtapaArnes::OmisionDeHerramienta)
+            .count()
+    }
+
+    #[tokio::test]
+    async fn test_api_corrige_una_vez_la_respuesta_sin_consulta() {
+        let runner = RunnerDelArnes::de_la_api(
+            vec![],
+            vec![
+                libre_final("La presión de diseño es 16 bar."),
+                llamada_busqueda(),
+                libre_final("La presión es 125 bar."),
+            ],
+        );
+        let mut historial = vec![AgentMessage::user(DATO_CONCRETO)];
+        let (respuesta, eventos) = turno_con_arnes(runner.clone(), &mut historial).await;
+        assert_eq!(respuesta.unwrap(), "La presión es 125 bar.");
+        assert_eq!(omisiones(&eventos), 1);
+        assert!(!etapas(&eventos).contains(&EtapaArnes::Reintento));
+        let vistas = runner.vistas_libres.lock().unwrap().clone();
+        let correccion = vistas[1].last().unwrap();
+        assert_eq!(correccion.role, AgentRole::User);
+        assert!(
+            correccion.content.contains("consult"),
+            "{}",
+            correccion.content
+        );
+        // La corrección sigue en su sitio en los pasos siguientes y nunca llega al historial
+        assert_eq!(vistas[2][1].content, correccion.content);
+        assert!(historial.iter().all(|m| m.content != correccion.content));
+        assert!(
+            !deltas(&eventos).iter().any(|d| d.contains("16")),
+            "lo omitido nunca se muestra"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_api_dos_omisiones_fallan_cerrado_sin_gastar_el_reintento() {
+        let runner = RunnerDelArnes::de_la_api(
+            vec![],
+            vec![
+                libre_final("Son 16 bar."),
+                libre_final("Siguen siendo 16 bar."),
+            ],
+        );
+        let mut historial = vec![AgentMessage::user(DATO_CONCRETO)];
+        let (respuesta, eventos) = turno_con_arnes(runner.clone(), &mut historial).await;
+        assert_eq!(respuesta.unwrap(), MENSAJE_RESPUESTA_NO_VALIDADA);
+        assert_eq!(runner.pasos_libres(), 2);
+        assert_eq!(omisiones(&eventos), 2);
+        assert_eq!(etapas(&eventos).last(), Some(&EtapaArnes::SalidaSegura));
+        assert!(!etapas(&eventos).contains(&EtapaArnes::Reintento));
+    }
+
+    #[tokio::test]
+    async fn test_api_dirigido_sin_llamada_corrige_nombrando_la_tool() {
+        let runner = RunnerDelArnes::de_la_api(
+            vec![Ok(TurnoDirigido::SinLlamada)],
+            vec![
+                AgentTurnOutput::ToolCalls(vec![llamada_lookup()]),
+                libre_final("La temperatura es 125 °C."),
+            ],
+        );
+        let mut historial = vec![AgentMessage::user(CRUZABLE)];
+        let (respuesta, eventos) = turno_con_arnes(runner.clone(), &mut historial).await;
+        assert_eq!(respuesta.unwrap(), "La temperatura es 125 °C.");
+        assert_eq!(omisiones(&eventos), 1);
+        let vistas = runner.vistas_libres.lock().unwrap().clone();
+        assert!(
+            vistas[0]
+                .last()
+                .unwrap()
+                .content
+                .contains("lookup_double_entry_table")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_sin_intencion_o_en_modo_cli_no_hay_correccion() {
+        let runner = RunnerDelArnes::de_la_api(vec![], vec![libre_final("Es un cordón.")]);
+        let mut historial = vec![AgentMessage::user(SIN_INTENCION)];
+        let (respuesta, eventos) = turno_con_arnes(runner.clone(), &mut historial).await;
+        assert_eq!(respuesta.unwrap(), "Es un cordón.");
+        assert_eq!(omisiones(&eventos), 0);
+
+        // El runner de la CLI (por defecto) conserva el comportamiento de siempre
+        let cli = RunnerDelArnes::con_guion(
+            vec![],
+            vec![
+                libre_final("Son 16 bar."),
+                libre_final("Siguen siendo 16 bar."),
+            ],
+        );
+        let mut historial = vec![AgentMessage::user(DATO_CONCRETO)];
+        let (respuesta, eventos) = turno_con_arnes(cli.clone(), &mut historial).await;
+        assert_eq!(omisiones(&eventos), 0);
+        assert_eq!(cli.pasos_libres(), 1);
+        assert_eq!(respuesta.unwrap(), "Son 16 bar.");
     }
 }

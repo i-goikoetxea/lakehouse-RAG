@@ -498,3 +498,124 @@ async fn test_abortar_suelta_el_flujo_y_no_emite_mas_texto() {
     );
     assert!(*cerrado.lock().unwrap(), "el socket se cerró");
 }
+
+/// Servidor de tools mínimo: devuelve siempre la misma salida
+struct ToolsFijas;
+
+#[async_trait::async_trait]
+impl lakehouse_rag::application::ports::tool_server::ToolServerPort for ToolsFijas {
+    fn listar_herramientas(&self) -> Vec<ToolDefinition> {
+        herramientas()
+    }
+
+    async fn ejecutar_herramienta(
+        &self,
+        call: &ToolCall,
+    ) -> Result<
+        lakehouse_rag::application::dtos::tools::ToolResult,
+        lakehouse_rag::domain::errors::DomainError,
+    > {
+        Ok(lakehouse_rag::application::dtos::tools::ToolResult {
+            call_id: call.id.clone(),
+            tool_name: call.name.clone(),
+            output: json!({ "texto": "La presión de la línea L-999 es 125 bar." }),
+            is_error: false,
+        })
+    }
+}
+
+async fn turno_completo(
+    url: &str,
+    pregunta: &str,
+) -> (
+    String,
+    Vec<lakehouse_rag::application::dtos::agent::AgentExecutionEvent>,
+) {
+    use lakehouse_rag::application::use_cases::agent_orchestrator::AgentOrchestrator;
+    use lakehouse_rag::domain::models::center::CenterId;
+    let orquestador = AgentOrchestrator::new(Arc::new(runner(url)), Arc::new(ToolsFijas));
+    let eventos = Arc::new(Mutex::new(Vec::new()));
+    let destino = Arc::clone(&eventos);
+    let mut historial = vec![AgentMessage::user(pregunta)];
+    let respuesta = orquestador
+        .procesar_turno(
+            &ClaudeModel::sonnet(),
+            &CenterId::new("centro_prueba").unwrap(),
+            &mut historial,
+            Some(Arc::new(move |e| destino.lock().unwrap().push(e))),
+        )
+        .await
+        .unwrap();
+    let eventos = eventos.lock().unwrap().clone();
+    (respuesta, eventos)
+}
+
+#[tokio::test]
+async fn test_texto_en_vivo_rechazado_en_message_stop_se_descarta() {
+    use lakehouse_rag::application::dtos::agent::AgentExecutionEvent;
+    let crudo = r#"Busco. {"tool_calls": [{"id": "c"#;
+    let servidor = servidor_con(&[
+        flujo_de_texto(&["Busco. ", &crudo["Busco. ".len()..]]),
+        flujo_de_texto(&["Es un cordón de refuerzo."]),
+    ])
+    .await;
+    let (respuesta, eventos) =
+        turno_completo(&servidor.uri(), "¿Qué es el refuerzo de soldadura?").await;
+    assert_eq!(respuesta, "Es un cordón de refuerzo.");
+    let primero_en_vivo = eventos
+        .iter()
+        .position(|e| matches!(e, AgentExecutionEvent::TextDelta(t) if t == "Busco. "))
+        .expect("el texto salió en vivo");
+    let descartado = eventos
+        .iter()
+        .position(|e| *e == AgentExecutionEvent::TextoEnVivoDescartado)
+        .expect("se descarta lo emitido");
+    assert!(primero_en_vivo < descartado);
+}
+
+#[tokio::test]
+async fn test_omision_corregida_de_punta_a_punta_por_la_api() {
+    let servidor = servidor_con(&[
+        flujo_de_texto(&["La presión de diseño es 16 bar."]),
+        flujo_de_tools(
+            ["toolu_a", "toolu_b"],
+            ["search_normative_context", "search_normative_context"],
+        ),
+        flujo_de_texto(&["La presión es 125 bar."]),
+    ])
+    .await;
+    let (respuesta, eventos) =
+        turno_completo(&servidor.uri(), "¿Qué presión tiene la línea L-999?").await;
+    assert_eq!(respuesta, "La presión es 125 bar.");
+    let omisiones = eventos
+        .iter()
+        .filter(|e| {
+            matches!(
+                e,
+                lakehouse_rag::application::dtos::agent::AgentExecutionEvent::ArnesIntervino {
+                    etapa:
+                        lakehouse_rag::application::dtos::agent::EtapaArnes::OmisionDeHerramienta,
+                    ..
+                }
+            )
+        })
+        .count();
+    assert_eq!(omisiones, 1);
+    let cuerpos = cuerpos_recibidos(&servidor).await;
+    let segunda = cuerpos[1]["messages"].as_array().unwrap();
+    assert_eq!(
+        segunda.len(),
+        1,
+        "la corrección va en el mensaje del operador"
+    );
+    let bloques = segunda[0]["content"].as_array().unwrap();
+    assert!(
+        bloques[1]["text"]
+            .as_str()
+            .unwrap()
+            .contains("RECORDATORIO")
+    );
+    // La corrección sigue en su sitio en el paso siguiente (historial de solo añadir)
+    let tercera = cuerpos[2]["messages"].as_array().unwrap();
+    assert_eq!(tercera[0]["content"][1]["text"], bloques[1]["text"]);
+}

@@ -33,6 +33,9 @@ pub fn explicar_intervencion(etapa: EtapaArnes, motivo: &str) -> String {
         EtapaArnes::VerificacionPagina => {
             "Se comprobó la página de las citas literales y alguna no coincide con el documento: el detalle está al final de la respuesta.".to_string()
         }
+        EtapaArnes::OmisionDeHerramienta => {
+            "El asistente iba a responder sin consultar los datos del centro: se le pidió que los consultara.".to_string()
+        }
         EtapaArnes::VerificacionProcedencia => {
             "Se comprobó de dónde salen las cifras calculadas o citadas que no aparecen tal cual en los datos consultados.".to_string()
         }
