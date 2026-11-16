@@ -230,11 +230,10 @@ async fn test_salida_segura_entrega_el_mensaje_fijo_marcado_y_conserva_las_tools
 
 #[tokio::test]
 async fn test_el_historial_no_conserva_recordatorio_ni_respuesta_rechazada() {
-    // El seguimiento responde con la cifra del historial sin consultar: se pide consultar una
-    // vez y, si insiste, salida segura. Ninguno de los dos rastros queda en el historial
+    // El seguimiento no tiene intención: su respuesta pasa sin corrección (límite declarado) y
+    // el historial sigue sin el recordatorio ni la respuesta rechazada del primer turno
     let runner = Arc::new(RunnerRetenido::con_respuestas(&[
         Some(RESPUESTA_RECHAZADA),
-        Some("Son 125"),
         Some("Son 125"),
         Some("Son 125"),
     ]));
@@ -248,10 +247,8 @@ async fn test_el_historial_no_conserva_recordatorio_ni_respuesta_rechazada() {
         .enviar_mensaje("Resume el resultado", "obra", "sonnet")
         .await
         .unwrap();
-    assert!(
-        seguimiento.salida_segura,
-        "cifra del historial sin consulta"
-    );
+    assert!(!seguimiento.salida_segura);
+    assert!(seguimiento.reply_html.contains("Son 125"));
     historial_sin_rastro_del_arnes(&chat.historial("obra").await);
     assert!(
         runner.vistas.lock().unwrap()[1]

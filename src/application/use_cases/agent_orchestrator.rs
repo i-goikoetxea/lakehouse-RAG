@@ -2005,29 +2005,39 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_un_seguimiento_respondido_desde_el_historial_exige_consultar() {
-        // El turno anterior sí consultó; «reintenta» no tiene intención y el modelo contesta
-        // con la cifra del historial sin volver a consultar
-        let guion = || {
-            vec![
-                libre_final("Como te dije, son 125 bar (p. 3)."),
-                llamada_busqueda(),
-                libre_final("Consultado de nuevo: son 125 bar."),
-            ]
-        };
-        for (modo, runner) in runners(guion) {
+    async fn test_charla_con_numeros_no_se_corrige_en_ningun_modo() {
+        // Sin intención, cualquier dígito (aritmética, un año, el nombre del centro) pedía
+        // consultar sin motivo: solo `DatoConcreto` lo exige
+        for (pregunta, texto) in [
+            (
+                "Hola, ¿qué puedes hacer?",
+                "Hola. Consulto los documentos del centro obra-prueba-v7.",
+            ),
+            ("What year comes after 2025?", "2026."),
+        ] {
+            for (modo, runner) in runners(|| vec![libre_final(texto)]) {
+                let mut historial = vec![AgentMessage::user(pregunta)];
+                let (respuesta, eventos) = turno_con_arnes(runner.clone(), &mut historial).await;
+                assert_eq!(respuesta.unwrap(), texto, "{modo}: {pregunta}");
+                assert_eq!(omisiones(&eventos), 0, "{modo}: {pregunta}");
+                assert_eq!(runner.pasos_libres(), 1, "{modo}: {pregunta}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_un_seguimiento_sin_intencion_no_se_corrige_limite_declarado() {
+        // «reintenta» no tiene intención: la cifra del historial pasa sin consulta (límite
+        // declarado en `cierre_v1_20261116.md`)
+        for (modo, runner) in runners(|| vec![libre_final("Como te dije, son 125 bar.")]) {
             let mut historial = vec![
                 AgentMessage::user(DATO_CONCRETO),
                 AgentMessage::assistant("La presión es 125 bar.".to_string()),
                 AgentMessage::user("reintenta"),
             ];
             let (respuesta, eventos) = turno_con_arnes(runner.clone(), &mut historial).await;
-            assert_eq!(
-                respuesta.unwrap(),
-                "Consultado de nuevo: son 125 bar.",
-                "{modo}"
-            );
-            assert_eq!(omisiones(&eventos), 1, "{modo}");
+            assert_eq!(respuesta.unwrap(), "Como te dije, son 125 bar.", "{modo}");
+            assert_eq!(omisiones(&eventos), 0, "{modo}");
         }
     }
 }

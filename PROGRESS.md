@@ -1686,13 +1686,15 @@
 
 **Errores y límites (primero):**
 - **Calidad de respuesta sin medir de nuevo.** La regla nueva del guard no ha pasado por un A/B. Las 148 respuestas guardadas consultaron todas alguna tool, así que no la ejercitan.
-- **Falsas correcciones posibles.** Cualquier dígito sin consulta pide consultar una vez, también en una respuesta conversacional. Lo destapó un test adversarial. Lo medirá el replay ciego.
+- **Primera versión retirada por ruido.** Con la intención `Ninguna` incluida, el humo de la API corrigió 3 de 6 preguntas de charla; en una, el dígito venía del nombre del centro. Por decisión del usuario, la regla queda limitada a `DatoConcreto`.
+- **Límite declarado:** los seguimientos sin intención («reintenta») no se cubren.
+- **Ruido que queda:** «¿Cuánto es 12 por 3?» se clasifica como `DatoConcreto` y sigue corrigiéndose; en la API ya pasaba antes.
 - **V14 (el fallo del 121/122):** caso límite aceptado, sin tocar. Es un bloqueo `N.M` intermitente, y relajarlo es c12/c19.
 - **Primera pasada de la suite colgada 34 min.** Un doble de test esperaba para siempre al agotar su guion; ahora falla con un mensaje.
 
 **Cambios:**
-- [x] Guard: una cifra sin ninguna consulta en el turno exige consultar, en CLI y API y también sin intención («reintenta»). Una corrección y, si se repite, salida segura. Solo cifras.
+- [x] Guard: en `DatoConcreto`, una cifra sin ninguna consulta en el turno exige consultar, en CLI y en API. Una corrección y, si se repite, salida segura. Solo cifras.
 - [x] Versión 1.0.0 (`Cargo.toml` y `tauri.conf.json`) y test de que dev y build sirven el mismo frontend estático (no hay `npm`).
 - [x] Ejecutable de producción con `cargo tauri build` en la rama.
 
-**Medido:** suite **1247/0/36** (base 1218/0/36), sumando los binarios repetidos a la primera pasada sin repetir la suite entera. `fmt` y `clippy`: limpios.
+**Medido:** suite **1249/0/36** (base 1218/0/36), sumando los binarios repetidos a la primera pasada sin repetir la suite entera. `fmt` y `clippy`: limpios.

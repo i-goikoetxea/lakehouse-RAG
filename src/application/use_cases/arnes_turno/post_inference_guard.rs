@@ -220,20 +220,20 @@ impl PostInferenceGuard {
         comprobar_ejes_aclarados(respuesta, registro)
     }
 
-    /// La respuesta da una cifra concreta (que no sale de la pregunta ni es una referencia
-    /// estructural) sin ninguna consulta en el turno. Vale para cualquier intención que el guard
-    /// no ata a una tool de Capa 2, también `Ninguna` (seguimientos como «reintenta»), y en los
-    /// dos transportes. Las intenciones de Capa 2 ya tienen su regla (`CapaDosNoIntentada`).
-    /// Solo cifras, a propósito: detectar hechos o citas sin cifras exigiría reglas que dependen
-    /// del idioma, y bloquearía conversación legítima.
+    /// Una pregunta de dato concreto respondida con una cifra (que no sale de la pregunta ni es
+    /// una referencia estructural) sin ninguna consulta en el turno, en los dos transportes.
+    /// Solo `DatoConcreto`: con `Ninguna` (charla, aritmética, seguimientos como «reintenta»)
+    /// cualquier dígito, incluso el del nombre del centro, pedía consultar sin motivo (humo de
+    /// la API, 3 de 6 preguntas de charla). Las intenciones de Capa 2 tienen su propia regla
+    /// (`CapaDosNoIntentada`). Solo cifras: detectar hechos o citas exigiría reglas por idioma.
     pub fn afirma_sin_consulta(
         respuesta: &str,
         pregunta: &str,
         intencion: &IntencionTurno,
         registro: &RegistroTurno,
     ) -> bool {
-        if !registro.resultados().is_empty()
-            || herramientas_de_capa_dos(intencion).is_some()
+        if *intencion != IntencionTurno::DatoConcreto
+            || !registro.resultados().is_empty()
             || llamada_en_crudo::detectar(respuesta).is_some()
         {
             return false;
@@ -1792,18 +1792,50 @@ El campo `vigencia_no_declarada` vino vacío.";
     }
 
     #[test]
-    fn test_cifras_sin_ninguna_consulta_exigen_consultar_en_cualquier_idioma() {
+    fn test_dato_concreto_con_cifras_sin_consulta_exige_consultar_en_cualquier_idioma() {
+        assert!(afirma_sin_consulta(
+            "¿Qué presión tiene la línea L-999?",
+            "Son 16 bar."
+        ));
+        // La intención se fija aquí: lo que se prueba es la regla, no el clasificador
         for (pregunta, respuesta) in [
-            ("¿Qué presión tiene la línea L-999?", "Son 16 bar."),
             (
-                "reintenta",
-                "Según el procedimiento, el recubrimiento mínimo es de 25 mm (p. 4).",
+                "¿Qué recubrimiento mínimo exige el procedimiento?",
+                "El recubrimiento mínimo es de 25 mm (p. 4).",
             ),
-            ("try again", "The design pressure is 16 bar."),
-            ("e agora?", "O prazo é de 30 dias."),
+            (
+                "What is the design pressure of line L-999?",
+                "The design pressure is 16 bar.",
+            ),
+            ("Qual é o prazo de entrega?", "O prazo é de 30 dias."),
         ] {
             assert!(
-                afirma_sin_consulta(pregunta, respuesta),
+                PostInferenceGuard::afirma_sin_consulta(
+                    respuesta,
+                    pregunta,
+                    &IntencionTurno::DatoConcreto,
+                    &RegistroTurno::default(),
+                ),
+                "{pregunta} → {respuesta}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_charla_con_numeros_o_con_el_nombre_del_centro_no_exige_consultar() {
+        for (pregunta, respuesta) in [
+            (
+                "Hola, ¿qué puedes hacer?",
+                "Hola. Consulto los documentos del centro activo obra-prueba-v7.",
+            ),
+            ("What year comes after 2025?", "2026."),
+            ("hola", "Tengo 3 documentos cargados en el centro planta_2."),
+            // Límite declarado: un seguimiento sin intención no se cubre
+            ("reintenta", "Como te dije, son 125 bar (p. 3)."),
+            ("Resume el resultado", "Son 125 bar."),
+        ] {
+            assert!(
+                !afirma_sin_consulta(pregunta, respuesta),
                 "{pregunta} → {respuesta}"
             );
         }
@@ -1879,8 +1911,8 @@ El campo `vigencia_no_declarada` vino vacío.";
         )]);
         assert!(!PostInferenceGuard::afirma_sin_consulta(
             "Son 16 bar.",
-            "reintenta",
-            &IntencionTurno::Ninguna,
+            "¿Qué presión tiene la línea L-999?",
+            &IntencionTurno::DatoConcreto,
             &registro,
         ));
     }
