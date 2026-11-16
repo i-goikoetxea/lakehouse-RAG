@@ -66,7 +66,10 @@ fn servicio_con(runner: MockAgentRunner) -> GuiChatService {
 #[tokio::test]
 async fn test_respuesta_con_html_malicioso_se_escapa() {
     let servicio = servicio_con(MockAgentRunner::new_scripted(vec![
-        AgentTurnOutput::FinalMessage("<img src=x onerror=alert(1)>\nLínea 2 & fin".to_string()),
+        // Sin cifras: con una cifra y sin consulta, el arnés pediría consultar (no es lo que se prueba)
+        AgentTurnOutput::FinalMessage(
+            "<img src=x onerror=alert(document.cookie)>\nLínea dos & fin".to_string(),
+        ),
     ]));
 
     let respuesta = servicio
