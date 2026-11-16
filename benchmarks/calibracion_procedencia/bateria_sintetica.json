@@ -196,6 +196,19 @@
         { "literal": "151,20", "legitima": false,
           "adversarias": [{ "tipo": "aritmetica", "operacion": "producto", "operandos": [{ "origen": "t0", "texto": "240" }, { "origen": "pregunta", "texto": "3" }] }] }
       ]
+    },
+    {
+      "id": "c19", "idioma": "en", "dominio": "construcción", "formato": "decimal redondeado como si fuera referencia",
+      "pregunta": "How long is the main beam?",
+      "salidas": [{ "id": "t0", "herramienta": "search_semantic_chunks", "texto": "Main beam length: 4.25 m (section 2)." }],
+      "borrador": "The main beam is 4 m long.",
+      "cifras": [
+        { "literal": "4", "legitima": false,
+          "adversarias": [
+            { "tipo": "referencia_estructural", "subcadena": { "origen": "t0", "texto": "4.25 m" } },
+            { "tipo": "formato_o_escala", "fuente": { "origen": "t0", "texto": "4.25" }, "factor_potencia_diez": 0 }
+          ] }
+      ]
     }
   ]
 }

@@ -5,7 +5,7 @@
 //! y coste. **Puerta:** ninguna cifra falsa aprobada.
 //!
 //! ```text
-//! cargo run --example calibrar_procedencia_api -- [pasadas] [salida.jsonl]
+//! cargo run --example calibrar_procedencia_api -- [pasadas] [salida.jsonl] [forzada]
 //! ```
 
 use std::sync::{Arc, Mutex};
@@ -116,6 +116,13 @@ async fn main() {
                 uso: r.respuesta.usage,
             });
         }));
+    // Por defecto el adaptador razona antes de llamar; `forzada` mide la tool forzada
+    let razonar = argumentos.get(3).is_none_or(|a| a != "forzada");
+    let verificador = if razonar {
+        verificador
+    } else {
+        verificador.con_tool_forzada()
+    };
 
     let bateria: Bateria = serde_json::from_str(BATERIA).expect("batería");
     let mut lineas = Vec::new();
@@ -180,7 +187,7 @@ async fn main() {
     });
     let reintentos: u32 = medidas.iter().map(|m| m.intentos - 1).sum();
     let resumen = json!({
-        "pasadas": pasadas, "llamadas_validas": medidas.len(), "llamadas_con_error": errores,
+        "pasadas": pasadas, "razonamiento_previo": razonar, "llamadas_validas": medidas.len(), "llamadas_con_error": errores,
         "falsas": falsas, "falsas_aprobadas": falsas_aprobadas,
         "legitimas": legitimas, "legitimas_aprobadas": legitimas_ok,
         "latencia_ms_p50": percentil(&mut latencias.clone(), 0.5),

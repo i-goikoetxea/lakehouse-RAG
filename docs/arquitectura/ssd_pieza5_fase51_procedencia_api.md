@@ -54,7 +54,7 @@ src/infrastructure/llm/modo_llm.rs   ModoLlm { Cli, Api } (por defecto Cli)
 - Modelo `claude-haiku-5-5`, `max_tokens` 4096, **sin `temperature`** (§1).
 - `system`: el prompt de procedencia como bloque de texto con `cache_control: ephemeral`.
 - `tools`: una sola, `emitir_trazas_procedencia`, con el esquema cerrado adaptado a `strict` y `cache_control: ephemeral`.
-- `tool_choice`: `{"type": "tool", "name": "emitir_trazas_procedencia"}`.
+- `tool_choice`: **`{"type": "auto"}` por defecto**, con la tool `strict` y la instrucción de responder solo con ella. Es un ajuste tras la calibración (informe `pieza5_fase51_20261115.md` §1): con `{"type": "tool", ...}`, Haiku 5.5 no piensa antes de llamar e invertía el signo del factor de escala en los cambios de unidad. La tool forzada queda como opción, `con_tool_forzada()`. Sin llamada, la cifra falla cerrada igual.
 - `messages`: un turno `user` con la `SolicitudProcedencia` en JSON. Sin historial.
 - Lectura: el primer bloque `tool_use` con ese nombre → `TrazasPropuestas` (con `deny_unknown_fields`). Sin `tool_use`, con otra tool o fuera del esquema → error: **falla cerrada**, la cifra no pasa, como hoy.
 

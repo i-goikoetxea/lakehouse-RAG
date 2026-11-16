@@ -23,7 +23,7 @@ pub const TOOL_TRAZAS: &str = "emitir_trazas_procedencia";
 const MAX_TOKENS_PROCEDENCIA: u32 = 4096;
 const DESCRIPCION_TOOL: &str = "Devuelve, para cada cifra pedida, la traza de procedencia que la respalda. Es la única forma de responder.";
 const PROMPT_PROCEDENCIA_API: &str = "Eres un comprobador de procedencia. Recibes en JSON una pregunta, las salidas de herramientas de un turno (cada una con su id t0, t1…) y un borrador de respuesta. Para cada cifra de la lista `cifras`, indica de dónde sale con uno de los 4 tipos del esquema:
-- formato_o_escala: la misma cantidad escrita de otro modo (separadores, decimales) o en otra potencia de diez (unidades);
+- formato_o_escala: la misma cantidad escrita de otro modo (separadores, decimales) o en otra potencia de diez (unidades). Se cumple cifra = valor de `fuente` × 10^factor_potencia_diez. El factor es negativo si la cifra es menor que la fuente (2000 g → 2 kg: −3), positivo si es mayor (0,5 km → 500 m: 3) y 0 si solo cambia la escritura;
 - aritmetica: el resultado de una operación declarada (suma, resta, producto, division, porcentaje) sobre operandos que aparecen en los textos;
 - referencia_estructural: un número de artículo, apartado, página, fecha u otra referencia que aparece en una subcadena de los textos;
 - conteo_elementos: el número de elementos distintos que se enumeran en los textos.
@@ -40,6 +40,10 @@ pub struct AnthropicProcedenciaVerifier {
     cliente: AnthropicHttpClient,
     modelo: String,
     observador: Option<ObservadorMetricas>,
+    /// `tool_choice: auto` (por defecto) para que el modelo piense antes de llamar: con la tool
+    /// forzada, Claude Haiku 5.5 responde sin bloque de pensamiento y en la calibración 5.1
+    /// invertía el signo del factor de escala. Sin llamada, falla cerrada igual
+    razonamiento_previo: bool,
 }
 
 impl AnthropicProcedenciaVerifier {
@@ -48,6 +52,23 @@ impl AnthropicProcedenciaVerifier {
             cliente,
             modelo: MODELO_PROCEDENCIA_API.into(),
             observador: None,
+            razonamiento_previo: true,
+        }
+    }
+
+    /// `tool_choice` forzado a la tool de trazas: más rápido y barato, sin pensamiento previo
+    pub fn con_tool_forzada(mut self) -> Self {
+        self.razonamiento_previo = false;
+        self
+    }
+
+    fn eleccion_tool(&self) -> EleccionTool {
+        if self.razonamiento_previo {
+            EleccionTool::Auto
+        } else {
+            EleccionTool::Tool {
+                name: TOOL_TRAZAS.into(),
+            }
         }
     }
 
@@ -85,9 +106,7 @@ impl AnthropicProcedenciaVerifier {
                 strict: true,
                 cache_control: Some(ControlCache::efimera()),
             }],
-            tool_choice: Some(EleccionTool::Tool {
-                name: TOOL_TRAZAS.into(),
-            }),
+            tool_choice: Some(self.eleccion_tool()),
         })
     }
 
@@ -218,6 +237,7 @@ mod tests {
         )
         .unwrap();
         let peticion = AnthropicProcedenciaVerifier::new(cliente)
+            .con_tool_forzada()
             .construir_peticion(&solicitud())
             .unwrap();
         let cuerpo = serde_json::to_value(&peticion).unwrap();
@@ -243,6 +263,41 @@ mod tests {
         let mensaje: SolicitudProcedencia =
             serde_json::from_str(cuerpo["messages"][0]["content"].as_str().unwrap()).unwrap();
         assert_eq!(mensaje, solicitud());
+    }
+
+    /// Con razonamiento previo, `auto` deja pensar a Haiku antes de llamar (la tool forzada se lo
+    /// salta); la falta de llamada sigue fallando cerrada
+    #[tokio::test]
+    async fn test_por_defecto_razona_antes_con_auto_y_sin_llamada_falla_cerrado() {
+        let servidor = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id": "msg", "model": MODELO_PROCEDENCIA_API, "stop_reason": "end_turn",
+                "content": [{ "type": "text", "text": "No hay trazas." }], "usage": {} })))
+            .mount(&servidor)
+            .await;
+        let verificador = verificador(&servidor);
+        let cuerpo =
+            serde_json::to_value(verificador.construir_peticion(&solicitud()).unwrap()).unwrap();
+        assert_eq!(cuerpo["tool_choice"], json!({ "type": "auto" }));
+        assert_eq!(cuerpo["tools"][0]["strict"], true);
+        assert!(verificador.proponer_trazas(&solicitud()).await.is_err());
+    }
+
+    /// Calibración 5.1: sin la fórmula, Haiku invertía el signo del factor en los cambios de unidad
+    #[test]
+    fn test_el_prompt_define_la_formula_y_el_signo_del_factor() {
+        for tipo in [
+            "formato_o_escala",
+            "aritmetica",
+            "referencia_estructural",
+            "conteo_elementos",
+        ] {
+            assert!(PROMPT_PROCEDENCIA_API.contains(tipo), "{tipo}");
+        }
+        assert!(PROMPT_PROCEDENCIA_API.contains("× 10^factor_potencia_diez"));
+        assert!(PROMPT_PROCEDENCIA_API.contains("negativo"));
+        assert!(PROMPT_PROCEDENCIA_API.contains("positivo"));
     }
 
     #[test]
