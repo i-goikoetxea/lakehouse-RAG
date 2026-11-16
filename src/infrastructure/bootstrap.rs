@@ -14,6 +14,7 @@ use crate::infrastructure::embeddings::fastembed_engine::MODELO_POR_DEFECTO;
 use crate::infrastructure::embeddings::lazy_engine::LazyFastEmbedEngine;
 use crate::infrastructure::llm::anthropic_api::AnthropicMessagesRunner;
 use crate::infrastructure::llm::modo_llm::{ModoLlm, agente_para, verificador_procedencia_para};
+use crate::infrastructure::llm::preferencia_modo::{ModoResuelto, resolver_modo_al_arrancar};
 use crate::infrastructure::llm::{
     ClaudeAgentConfig, ClaudeHeadlessConfig, ClaudeHeadlessDistiller, ClaudeHeadlessModelCatalog,
     ClaudeModelCatalogConfig,
@@ -85,8 +86,12 @@ pub fn motores_consulta_con(
 pub struct ComposicionReal {
     pub dependencias: DependenciasLakehouse,
     pub indice: Arc<dyn IndiceSemanticoPort>,
-    /// El runner de la API cuando `LAKEHOUSE_RAG_MODO_LLM=api`, para leer sus métricas (A/B)
+    /// El runner de la API cuando el modo es `api`, para leer sus métricas (A/B)
     pub agente_api: Option<Arc<AnthropicMessagesRunner>>,
+    /// Modo pedido al arrancar (entorno > `llm_config.json` > `Cli`) y su origen
+    pub modo_pedido: ModoResuelto,
+    /// Modo que de verdad usa el agente: `Cli` si se pidió `Api` sin cliente
+    pub modo_en_uso: ModoLlm,
 }
 
 /// Registro JSON, centros en disco, LanceDB, FastEmbed diferido y Claude Code
@@ -96,10 +101,22 @@ pub fn composicion_real(config: &ConfiguracionComposicion) -> ComposicionReal {
         config.directorio_cache_embeddings.clone(),
     ));
     let motores = motores_consulta(embeddings.clone());
-    // `LAKEHOUSE_RAG_MODO_LLM=api` elige la API de Messages para el agente y la procedencia; por
-    // defecto, `claude -p`
-    let modo = ModoLlm::desde_entorno();
+    // El modo `api` (por `LAKEHOUSE_RAG_MODO_LLM` o por `llm_config.json`) elige la API de
+    // Messages para el agente y la procedencia; por defecto, `claude -p`
+    let modo_pedido = resolver_modo_al_arrancar(&config.directorio_config);
+    let modo = modo_pedido.modo;
     let agente = agente_para(modo, ClaudeAgentConfig::default());
+    let modo_en_uso = if agente.api.is_some() {
+        ModoLlm::Api
+    } else {
+        ModoLlm::Cli
+    };
+    tracing::info!(
+        pedido = ?modo,
+        origen = modo_pedido.origen.nombre(),
+        en_uso = ?modo_en_uso,
+        "modo del LLM resuelto al arrancar"
+    );
     ComposicionReal {
         dependencias: DependenciasLakehouse {
             registro: Arc::new(JsonCenterRegistry::new(&config.directorio_config)),
@@ -122,10 +139,28 @@ pub fn composicion_real(config: &ConfiguracionComposicion) -> ComposicionReal {
         },
         indice: motores.indice,
         agente_api: agente.api,
+        modo_pedido,
+        modo_en_uso,
     }
 }
 
 /// Composición real que usan la GUI, el MCP y la CLI
 pub fn componer_lakehouse(config: &ConfiguracionComposicion) -> Arc<LakehouseApp> {
-    Arc::new(LakehouseApp::new(composicion_real(config).dependencias))
+    componer_lakehouse_con_modo(config).app
+}
+
+/// La fachada y el motor del LLM con que quedó compuesta (lo muestra la ventana)
+pub struct LakehouseCompuesta {
+    pub app: Arc<LakehouseApp>,
+    pub modo_pedido: ModoResuelto,
+    pub modo_en_uso: ModoLlm,
+}
+
+pub fn componer_lakehouse_con_modo(config: &ConfiguracionComposicion) -> LakehouseCompuesta {
+    let composicion = composicion_real(config);
+    LakehouseCompuesta {
+        app: Arc::new(LakehouseApp::new(composicion.dependencias)),
+        modo_pedido: composicion.modo_pedido,
+        modo_en_uso: composicion.modo_en_uso,
+    }
 }

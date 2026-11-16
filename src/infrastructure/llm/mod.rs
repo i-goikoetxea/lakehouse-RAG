@@ -6,6 +6,7 @@ pub mod claude_model_catalog;
 pub mod mock_agent_runner;
 pub mod mock_distiller;
 pub mod modo_llm;
+pub mod preferencia_modo;
 pub mod sesion_claude;
 pub mod stream_json;
 
