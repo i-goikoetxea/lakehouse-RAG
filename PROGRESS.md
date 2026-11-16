@@ -1615,3 +1615,47 @@
   - Decidir la regla de las referencias compuestas en `arnes_turno` (informe §3). La trampa c19 («4.25 m» presentado como «4 m») debe seguir rechazada.
   - Los reintentos de transporte no se han ejercitado contra la API real.
   - La batería la escribió la sesión que afina el adaptador: la calidad general la mide el A/B de la 5.2 en el set v2.
+
+### Sesión Pieza 5, Fase 5.2: el agente por la API de Messages (2026-11-16)
+
+**Estado: `[COMPLETADO]`, pendiente del A/B ciego de la sesión principal y de aprobación; sin merge ni push.** Rama `claude/pieza5-fase52-a1f4cf`, desde `main` `5e88f6e`. Contrato: `docs/arquitectura/ssd_pieza5_fase52_agente_api.md`. Informe: `benchmarks/informes/pieza5_fase52_20261116.md`. No se ha leído el set oculto.
+
+**Errores y límites (primero):**
+- **Humo real:** 0 respuestas incorrectas de 6, pero es una batería sintética propia y saturada. No mide la calidad general; eso lo hace el A/B en el set v2.
+- **Sin ejercitar en real:** la corrección de omisión (0 omisiones de Sonnet 5.5 en 6 preguntas), el descarte en vivo, Detener, los reintentos de transporte y la procedencia de Haiku (0 microllamadas). Solo están probados con dobles.
+- **c12** («apartado 3 del artículo 7») queda como límite declarado, sin listas.
+- **Hallazgo en modo CLI, sin corregir:** una respuesta a un dato concreto con una cifra y sin ninguna consulta pasa el guard sin reintento. En modo API la intercepta la corrección de omisión. Lo decide la sesión principal.
+- **TDD no estricto** en el lector SSE, el cliente, el runner y el test del secreto: se escribieron junto a la implementación.
+
+**Cambios:**
+- [x] **Referencias `N.M`** (`edf199b`), token literal con el mismo precedente en los Niveles 1 y 2:
+  - se cierran «73» ⇄ «7.3» y «42» con «Cláusula 4.2» (c20, en portugués);
+  - c19 sigue rechazado y «1.250» sigue siendo de miles.
+- [x] **`AnthropicMessagesRunner`** (`12987ab`), con `claude-sonnet-5-5`:
+  - SSE en todos los pasos y `tool_choice: auto`, sin `temperature`;
+  - caché en `system`, en la última tool y en el último mensaje;
+  - `thinking` adaptativo con `drop_block`, y los turnos de tools se devuelven con su `thinking`;
+  - turno dirigido con directiva de sistema;
+  - métricas por paso: `ttft`, tokens y coste.
+- [x] **Corrección de omisión, solo en modo API** (`db0d645`): una vez y, si se repite, salida segura (`EtapaArnes::OmisionDeHerramienta`). El modo CLI queda idéntico.
+- [x] **Configuración** (`89aff95`):
+  - `modo_llm` elige el runner del agente, con `cli` por defecto;
+  - comandos Tauri `guardar_api_key` (keyring) y `estado_api_key` (máscara `sk-ant-…`);
+  - test adversarial del secreto: WebView, logs y telemetría.
+- [x] **Herramientas:** A/B `examples/ab_agente.rs` (`8e800d3`) y humo `examples/humo_agente_api.rs` (`d620300`).
+
+**Medido:**
+- Suite: base 1180/0/36; tras el commit 1, 1184/0/36; final **1218/0/36**. `clippy -D warnings` y `fmt --check`: limpios.
+- 148 respuestas guardadas: idéntico antes y después.
+- Humo, 6 preguntas, una ejecución, con carga en el equipo:
+  - 17 llamadas, por **0,097 USD**;
+  - `ttft` del primer paso de 0,6-1,5 s y 3,3-9,6 s por pregunta;
+  - caché leída de ~11 200 tokens por paso;
+  - 0 reintentos y 0 bloques `thinking` descartados.
+
+**Notas para la siguiente sesión:**
+- **A/B ciego:**
+  - `cargo run --release --example ab_agente -- --centro <id> --preguntas <in.jsonl> --modo api|cli --salida <out.jsonl>`;
+  - pasa `--modelo claude-sonnet-5-5` en los dos modos;
+  - el centro tiene que estar activo de antemano.
+- **Para el modo API en la GUI,** la key se guarda con `guardar_api_key` y el modo se lee al arrancar (`LAKEHOUSE_RAG_MODO_LLM=api`). Todavía no hay controles en la interfaz.

@@ -59,24 +59,49 @@ pub enum EleccionTool {
     None,
 }
 
+/// Contenido de un mensaje: texto simple o bloques (`text`, `tool_use`, `tool_result`,
+/// `thinking`…), que se devuelven tal como los dio la API
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(untagged)]
+pub enum ContenidoEntrada {
+    Texto(String),
+    Bloques(Vec<Value>),
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct MensajeEntrada {
     pub role: &'static str,
-    pub content: String,
+    pub content: ContenidoEntrada,
 }
 
 impl MensajeEntrada {
     pub fn usuario(content: impl Into<String>) -> Self {
         Self {
             role: "user",
-            content: content.into(),
+            content: ContenidoEntrada::Texto(content.into()),
+        }
+    }
+
+    pub fn con_bloques(role: &'static str, bloques: Vec<Value>) -> Self {
+        Self {
+            role,
+            content: ContenidoEntrada::Bloques(bloques),
+        }
+    }
+
+    /// Instrucción del operador a mitad de conversación (`role: "system"`), sin tocar el
+    /// prefijo cacheado
+    pub fn sistema(content: impl Into<String>) -> Self {
+        Self {
+            role: "system",
+            content: ContenidoEntrada::Texto(content.into()),
         }
     }
 }
 
 /// Cuerpo de la petición. Sin `temperature`: Claude Haiku 5.5 y la versión `2026-10-21` la
 /// rechazan (SSD de la Fase 5.1 §1)
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Default)]
 pub struct PeticionMensajes {
     pub model: String,
     pub max_tokens: u32,
@@ -87,6 +112,14 @@ pub struct PeticionMensajes {
     pub tools: Vec<DefinicionTool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_choice: Option<EleccionTool>,
+    /// `{"type": "adaptive", …}`; sin él, el valor por defecto del modelo
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thinking: Option<Value>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub stream: bool,
+    /// Cabecera `anthropic-beta` (no va en el cuerpo)
+    #[serde(skip)]
+    pub betas: Vec<String>,
 }
 
 /// Bloques de la respuesta, leídos por `type` y nunca por posición (puede haber `thinking`)
@@ -125,6 +158,15 @@ pub struct TarifaModelo {
     pub lectura_cache: f64,
     pub salida: f64,
 }
+
+/// Claude Sonnet 5.5: 2 / 10 $/MTok; escritura de caché de 5 min ×1,25 y lectura a 0,10 $/MTok
+/// (skill `claude-api`, consultada el 2026-11-16)
+pub const TARIFA_SONNET_5_5: TarifaModelo = TarifaModelo {
+    entrada: 2.0,
+    escritura_cache: 2.5,
+    lectura_cache: 0.10,
+    salida: 10.0,
+};
 
 /// Claude Haiku 5.5 con prompts ≤ 100 K tokens: 0,10 / 0,50 $/MTok; caché ×1,25 y ×0,1
 pub const TARIFA_HAIKU_5_5: TarifaModelo = TarifaModelo {
@@ -187,6 +229,7 @@ mod tests {
                 cache_control: Some(ControlCache::efimera()),
             }],
             tool_choice: Some(EleccionTool::Tool { name: "t".into() }),
+            ..Default::default()
         };
         let cuerpo = serde_json::to_value(&peticion).unwrap();
         assert_eq!(cuerpo["tool_choice"], json!({"type": "tool", "name": "t"}));
@@ -204,6 +247,46 @@ mod tests {
             json!({"role": "user", "content": "hola"})
         );
         assert!(cuerpo.get("temperature").is_none());
+        assert!(cuerpo.get("stream").is_none() && cuerpo.get("thinking").is_none());
+        assert!(cuerpo.get("betas").is_none());
+    }
+
+    #[test]
+    fn test_mensajes_con_bloques_de_sistema_y_flujo() {
+        let peticion = PeticionMensajes {
+            model: "m".into(),
+            max_tokens: 10,
+            messages: vec![
+                MensajeEntrada::con_bloques(
+                    "assistant",
+                    vec![json!({"type": "text", "text": "a"})],
+                ),
+                MensajeEntrada::sistema("llama a x"),
+            ],
+            stream: true,
+            betas: vec!["b".into()],
+            ..Default::default()
+        };
+        let cuerpo = serde_json::to_value(&peticion).unwrap();
+        assert_eq!(cuerpo["messages"][0]["content"][0]["text"], "a");
+        assert_eq!(
+            cuerpo["messages"][1],
+            json!({"role": "system", "content": "llama a x"})
+        );
+        assert_eq!(cuerpo["stream"], true);
+        assert!(cuerpo.get("betas").is_none());
+    }
+
+    #[test]
+    fn test_coste_estimado_con_la_tarifa_de_sonnet() {
+        let uso = Uso {
+            input_tokens: 1_000_000,
+            cache_creation_input_tokens: 1_000_000,
+            cache_read_input_tokens: 1_000_000,
+            output_tokens: 1_000_000,
+        };
+        let coste = uso.coste_estimado_usd(&TARIFA_SONNET_5_5);
+        assert!((coste - 14.6).abs() < 1e-9, "{coste}");
     }
 
     #[test]

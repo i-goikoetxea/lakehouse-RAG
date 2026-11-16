@@ -12,10 +12,11 @@ use crate::application::use_cases::lakehouse_tool_service::{
 };
 use crate::infrastructure::embeddings::fastembed_engine::MODELO_POR_DEFECTO;
 use crate::infrastructure::embeddings::lazy_engine::LazyFastEmbedEngine;
-use crate::infrastructure::llm::modo_llm::{ModoLlm, verificador_procedencia_para};
+use crate::infrastructure::llm::anthropic_api::AnthropicMessagesRunner;
+use crate::infrastructure::llm::modo_llm::{ModoLlm, agente_para, verificador_procedencia_para};
 use crate::infrastructure::llm::{
-    ClaudeAgentConfig, ClaudeAgentRunner, ClaudeHeadlessConfig, ClaudeHeadlessDistiller,
-    ClaudeHeadlessModelCatalog, ClaudeModelCatalogConfig,
+    ClaudeAgentConfig, ClaudeHeadlessConfig, ClaudeHeadlessDistiller, ClaudeHeadlessModelCatalog,
+    ClaudeModelCatalogConfig,
 };
 use crate::infrastructure::parsers::ParserPorFormato;
 use crate::infrastructure::query_engine::datafusion_engine::DataFusionEngine;
@@ -84,6 +85,8 @@ pub fn motores_consulta_con(
 pub struct ComposicionReal {
     pub dependencias: DependenciasLakehouse,
     pub indice: Arc<dyn IndiceSemanticoPort>,
+    /// El runner de la API cuando `LAKEHOUSE_RAG_MODO_LLM=api`, para leer sus métricas (A/B)
+    pub agente_api: Option<Arc<AnthropicMessagesRunner>>,
 }
 
 /// Registro JSON, centros en disco, LanceDB, FastEmbed diferido y Claude Code
@@ -93,6 +96,10 @@ pub fn composicion_real(config: &ConfiguracionComposicion) -> ComposicionReal {
         config.directorio_cache_embeddings.clone(),
     ));
     let motores = motores_consulta(embeddings.clone());
+    // `LAKEHOUSE_RAG_MODO_LLM=api` elige la API de Messages para el agente y la procedencia; por
+    // defecto, `claude -p`
+    let modo = ModoLlm::desde_entorno();
+    let agente = agente_para(modo, ClaudeAgentConfig::default());
     ComposicionReal {
         dependencias: DependenciasLakehouse {
             registro: Arc::new(JsonCenterRegistry::new(&config.directorio_config)),
@@ -102,19 +109,19 @@ pub fn composicion_real(config: &ConfiguracionComposicion) -> ComposicionReal {
             destilador: Arc::new(ClaudeHeadlessDistiller::new(ClaudeHeadlessConfig::default())),
             modelo_embeddings: embeddings.modelo_activo(),
             embeddings,
-            agente: Arc::new(ClaudeAgentRunner::new(ClaudeAgentConfig::default())),
+            agente: agente.runner,
             herramientas: motores.herramientas,
             catalogo_modelos: Arc::new(ClaudeHeadlessModelCatalog::new(
                 ClaudeModelCatalogConfig::default(),
             )),
             reloj: Arc::new(RelojDelSistema),
-            // `LAKEHOUSE_RAG_MODO_LLM=api` elige la API de Messages; por defecto, `claude -p`
             verificador_procedencia: Some(verificador_procedencia_para(
-                ModoLlm::desde_entorno(),
+                modo,
                 ClaudeAgentConfig::default().binary_path,
             )),
         },
         indice: motores.indice,
+        agente_api: agente.api,
     }
 }
 

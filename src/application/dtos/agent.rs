@@ -163,6 +163,9 @@ pub enum EtapaArnes {
     VerificacionPagina,
     /// Microllamada del Nivel 2 del verificador de procedencia (Pieza 4)
     VerificacionProcedencia,
+    /// La intención exige consultar y el modelo respondió sin llamar a ninguna tool (Fase 5.2,
+    /// solo en los transportes que no pueden forzar la llamada)
+    OmisionDeHerramienta,
 }
 
 /// Eventos emitidos durante la ejecución reactiva del agente (para TUI y streaming)

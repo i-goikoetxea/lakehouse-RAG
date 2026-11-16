@@ -52,6 +52,13 @@ pub trait AgentRunnerPort: Send + Sync {
             dirigida.as_str()
         )))
     }
+
+    /// `true` si el transporte no puede forzar la llamada a una tool (`tool_choice` `auto`): el
+    /// orquestador corrige entonces una vez la respuesta sin consulta en una intención que la
+    /// exige. Por defecto `false`, y el comportamiento es el de siempre
+    fn necesita_correccion_de_omision(&self) -> bool {
+        false
+    }
 }
 
 /// Recibe cada fragmento de texto visible de la respuesta mientras llega

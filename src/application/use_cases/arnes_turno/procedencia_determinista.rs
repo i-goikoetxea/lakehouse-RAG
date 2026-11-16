@@ -738,20 +738,21 @@ pub(super) fn es_referencia_estructural(
     contexto: &ContextoProcedencia,
 ) -> bool {
     let cifra = &respuesta.cifras[indice];
-    let variantes = variantes_del_literal(&cifra.literal);
-    let mut agujas: Vec<String> = Vec::new();
-    if let Some(palabra) = palabra_anterior(&respuesta.letras, cifra.posicion) {
-        for variante in &variantes {
-            agujas.push(format!("{palabra} {variante}"));
-            agujas.push(format!("{palabra}{variante}"));
+    let agujas = if exige_lectura_literal(&cifra.literal) {
+        // `7.3` es un token indivisible: sin cambiar el punto y con el mismo precedente
+        precedente_de(&respuesta.letras, cifra.posicion)
+            .map(|precedente| agujas_de(&precedente, std::slice::from_ref(&cifra.literal)))
+            .unwrap_or_default()
+    } else {
+        let variantes = variantes_del_literal(&cifra.literal);
+        let mut agujas: Vec<String> = palabra_anterior(&respuesta.letras, cifra.posicion)
+            .map(|palabra| agujas_de(&palabra, &variantes))
+            .unwrap_or_default();
+        for marcador in MARCADORES_ESTRUCTURALES {
+            agujas.extend(agujas_de(&marcador.to_string(), &variantes));
         }
-    }
-    for marcador in MARCADORES_ESTRUCTURALES {
-        for variante in &variantes {
-            agujas.push(format!("{marcador} {variante}"));
-            agujas.push(format!("{marcador}{variante}"));
-        }
-    }
+        agujas
+    };
     agujas.iter().any(|aguja| {
         contexto
             .textos
@@ -805,6 +806,59 @@ fn es_referencia_compuesta(
                 .iter()
                 .any(|(encabezado, n)| n == numero && nombra(encabezado))
     })
+}
+
+fn agujas_de(precedente: &str, variantes: &[String]) -> Vec<String> {
+    variantes
+        .iter()
+        .flat_map(|variante| {
+            [
+                format!("{precedente} {variante}"),
+                format!("{precedente}{variante}"),
+            ]
+        })
+        .collect()
+}
+
+/// Un número con algún grupo tras el separador que no es de miles (`7.3`, `4.25`, `4.12.1`) se
+/// compara como token literal, con sus separadores: `7.3` no es `73`. `1.250` sigue siendo de
+/// miles. Sin listas: solo la forma del número
+pub(super) fn exige_lectura_literal(numero: &str) -> bool {
+    let numero = numero.trim_start_matches(['-', '−']);
+    let grupos: Vec<&str> = numero.split(['.', ',']).collect();
+    let solo_digitos = grupos
+        .iter()
+        .all(|g| !g.is_empty() && g.chars().all(|l| l.is_ascii_digit()));
+    let forma_miles = grupos[0].len() <= 3 && grupos[1..].iter().all(|g| g.len() == 3);
+    grupos.len() > 1 && solo_digitos && !forma_miles
+}
+
+/// Lo que precede a la cifra en la respuesta: la palabra (con su punto de abreviatura) o el
+/// marcador `§`, `#` o `-`
+pub(super) fn precedente_de(letras: &[char], posicion: usize) -> Option<String> {
+    palabra_anterior(letras, posicion).or_else(|| {
+        letras[..posicion]
+            .iter()
+            .rev()
+            .find(|l| !l.is_whitespace())
+            .filter(|l| MARCADORES_ESTRUCTURALES.contains(l))
+            .map(char::to_string)
+    })
+}
+
+/// ¿Alguna aparición de `literal` en el borrador lleva delante lo mismo que en `subcadena`?
+pub(super) fn mismo_precedente(borrador: &str, subcadena: &str, literal: &str) -> bool {
+    let letras: Vec<char> = borrador.chars().collect();
+    let texto = espacios_simples(&plegar_texto(subcadena));
+    extraer_cifras(borrador)
+        .iter()
+        .filter(|cifra| cifra.literal == literal)
+        .filter_map(|cifra| precedente_de(&letras, cifra.posicion))
+        .any(|precedente| {
+            agujas_de(&precedente, &[literal.to_string()])
+                .iter()
+                .any(|aguja| contiene_con_limites(&texto, aguja))
+        })
 }
 
 fn variantes_del_literal(literal: &str) -> Vec<String> {
@@ -1211,6 +1265,38 @@ mod tests {
         let ley = busqueda(&[("LEY-1", "Artículo 210. Plazos. El plazo es de 21 días.")]);
         assert!(estructurales("Lo regula el artículo 21.", std::slice::from_ref(&ley)).is_empty());
         assert!(estructurales("Lo regula la sección 210.", &[ley]).is_empty());
+    }
+
+    #[test]
+    fn test_referencia_jerarquica_es_un_token_literal_con_el_mismo_precedente() {
+        let fuente = busqueda(&[(
+            "DOC-1",
+            "Artículo 7.3. Plazos\nNote 12.4 Leases\n§ 5.2 Haftung\nArtigo 73. Recursos",
+        )]);
+        for (respuesta, cifra) in [
+            ("Lo regula el artículo 7.3.", "7.3"),
+            ("See Note 12.4.", "12.4"),
+            ("Siehe § 5.2.", "5.2"),
+        ] {
+            assert_eq!(
+                estructurales(respuesta, std::slice::from_ref(&fuente)),
+                vec![cifra],
+                "{respuesta}"
+            );
+        }
+        for respuesta in [
+            // Sin sus puntos, o con la coma, ya no es el mismo identificador
+            "Lo regula el artículo 7,3.",
+            "Ver artigo 7.3.",
+            // El marcador de la fuente no respalda otra palabra en la respuesta
+            "Lo regula el artículo 5.2.",
+            "The figure is 5.2.",
+        ] {
+            assert!(
+                estructurales(respuesta, std::slice::from_ref(&fuente)).is_empty(),
+                "{respuesta}"
+            );
+        }
     }
 
     #[test]
