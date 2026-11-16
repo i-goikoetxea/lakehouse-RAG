@@ -78,6 +78,7 @@ async fn test_la_key_no_aparece_en_logs_ni_en_errores() {
         messages: vec![MensajeEntrada::usuario("hola")],
         tools: Vec::new(),
         tool_choice: None,
+        ..Default::default()
     };
     let error = cliente.crear_mensaje(&peticion).await.unwrap_err();
 

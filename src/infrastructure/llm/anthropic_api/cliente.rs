@@ -8,7 +8,10 @@ use reqwest::StatusCode;
 use reqwest::header::{HeaderMap, RETRY_AFTER};
 use serde_json::Value;
 
+use futures::StreamExt;
+
 use super::error::ErrorApiAnthropic;
+use super::flujo::{AporteEvento, LectorSse, MensajeEnFlujo};
 use super::mensajes::{PeticionMensajes, RespuestaMensajes};
 use super::secreto::SecretApiKey;
 
@@ -77,6 +80,14 @@ impl ConfigClienteAnthropic {
         }
     }
 
+    /// Timeouts del contrato para el agente: 10 s de conexión y 60 s entre eventos del flujo
+    pub fn agente() -> Self {
+        Self {
+            timeout_lectura: Duration::from_secs(60),
+            ..Self::procedencia()
+        }
+    }
+
     pub fn con_base_url(mut self, base_url: impl Into<String>) -> Self {
         self.base_url = base_url.into();
         self
@@ -90,6 +101,19 @@ pub struct RespuestaConMetricas {
     pub intentos: u32,
     pub latencia: Duration,
 }
+
+/// El mensaje leído del flujo SSE y lo que costó: `ttft` es el tiempo hasta el primer delta de
+/// contenido, contado desde el primer intento
+#[derive(Debug, Clone, PartialEq)]
+pub struct RespuestaEnFlujo {
+    pub mensaje: MensajeEnFlujo,
+    pub intentos: u32,
+    pub latencia: Duration,
+    pub ttft: Option<Duration>,
+}
+
+/// Recibe cada fragmento de texto visible mientras llega
+pub type ObservadorFragmentos<'a> = &'a (dyn Fn(&str) + Send + Sync);
 
 enum FalloIntento {
     Reintentable {
@@ -161,6 +185,157 @@ impl AnthropicHttpClient {
                     tokio::time::sleep(espera).await;
                 }
             }
+        }
+    }
+
+    /// Como `crear_mensaje`, con `stream: true`. Los reintentos de transporte solo se hacen
+    /// mientras no ha llegado ningún contenido: después ya pudo emitirse texto en vivo
+    pub async fn crear_mensaje_en_flujo(
+        &self,
+        peticion: &PeticionMensajes,
+        al_texto: ObservadorFragmentos<'_>,
+    ) -> Result<RespuestaEnFlujo, ErrorApiAnthropic> {
+        let mut peticion = peticion.clone();
+        peticion.stream = true;
+        let inicio = Instant::now();
+        let politica = &self.config.reintentos;
+        let mut intentos = 0;
+        loop {
+            intentos += 1;
+            match self.un_intento_en_flujo(&peticion, inicio, al_texto).await {
+                Ok((mensaje, ttft)) => {
+                    return validar_stop_reason_de(mensaje.stop_reason.as_deref()).map(|()| {
+                        RespuestaEnFlujo {
+                            mensaje,
+                            intentos,
+                            latencia: inicio.elapsed(),
+                            ttft,
+                        }
+                    });
+                }
+                Err(FalloIntento::Definitivo(error)) => return Err(error),
+                Err(FalloIntento::Reintentable {
+                    espera_indicada,
+                    descripcion,
+                }) => {
+                    if intentos > politica.max_reintentos {
+                        return Err(ErrorApiAnthropic::ReintentosAgotados {
+                            intentos,
+                            ultimo: descripcion,
+                        });
+                    }
+                    let espera = politica.espera(intentos - 1, espera_indicada);
+                    tracing::warn!(
+                        intento = intentos,
+                        espera_ms = espera.as_millis() as u64,
+                        motivo = %descripcion,
+                        "API de Anthropic (flujo): reintento de transporte"
+                    );
+                    tokio::time::sleep(espera).await;
+                }
+            }
+        }
+    }
+
+    async fn un_intento_en_flujo(
+        &self,
+        peticion: &PeticionMensajes,
+        inicio: Instant,
+        al_texto: ObservadorFragmentos<'_>,
+    ) -> Result<(MensajeEnFlujo, Option<Duration>), FalloIntento> {
+        let mut envio = self
+            .http
+            .post(self.url_mensajes())
+            .header("x-api-key", self.key.exponer())
+            .header("anthropic-version", VERSION_API)
+            .header("accept", "text/event-stream");
+        if !peticion.betas.is_empty() {
+            envio = envio.header("anthropic-beta", peticion.betas.join(","));
+        }
+        let respuesta = envio
+            .json(peticion)
+            .send()
+            .await
+            .map_err(|e| self.fallo_de_transporte(&e))?;
+        let estado = respuesta.status();
+        if !estado.is_success() {
+            let espera_indicada = leer_retry_after(respuesta.headers());
+            let cuerpo = respuesta
+                .text()
+                .await
+                .map_err(|e| self.fallo_de_transporte(&e))?;
+            let detalle = self.sin_secreto(&detalle_de_error(&cuerpo));
+            return Err(clasificar_estado(estado, detalle, espera_indicada));
+        }
+        let mut lector = LectorSse::default();
+        let mut mensaje = MensajeEnFlujo::default();
+        let mut ttft = None;
+        let mut bytes = respuesta.bytes_stream();
+        while let Some(trozo) = bytes.next().await {
+            let trozo = trozo.map_err(|e| {
+                let fallo = self.fallo_de_transporte(&e);
+                if ttft.is_some() {
+                    FalloIntento::Definitivo(ErrorApiAnthropic::RespuestaNoValida(format!(
+                        "el flujo se cortó a mitad de la respuesta: {}",
+                        self.sin_secreto(&e.to_string())
+                    )))
+                } else {
+                    fallo
+                }
+            })?;
+            for datos in lector.alimentar(&trozo) {
+                match mensaje.aplicar(&datos) {
+                    Ok(AporteEvento::Texto(fragmento)) => {
+                        ttft.get_or_insert_with(|| inicio.elapsed());
+                        al_texto(&fragmento);
+                    }
+                    Ok(AporteEvento::OtroContenido) => {
+                        ttft.get_or_insert_with(|| inicio.elapsed());
+                    }
+                    Ok(AporteEvento::Fin | AporteEvento::Nada) => {}
+                    Err(error) => return Err(self.fallo_en_flujo(error, ttft.is_some())),
+                }
+            }
+            if mensaje.terminado() {
+                break;
+            }
+        }
+        if !mensaje.terminado() {
+            let error =
+                ErrorApiAnthropic::RespuestaNoValida("el flujo terminó sin message_stop".into());
+            return Err(if ttft.is_some() {
+                FalloIntento::Definitivo(error)
+            } else {
+                FalloIntento::Reintentable {
+                    espera_indicada: None,
+                    descripcion: error.to_string(),
+                }
+            });
+        }
+        Ok((mensaje, ttft))
+    }
+
+    /// Un `error` sobrecargado o interno antes del primer contenido se reintenta; después, no
+    fn fallo_en_flujo(&self, error: ErrorApiAnthropic, hubo_contenido: bool) -> FalloIntento {
+        let error = match error {
+            ErrorApiAnthropic::EstadoNoReintentable { estado, detalle } => {
+                ErrorApiAnthropic::EstadoNoReintentable {
+                    estado,
+                    detalle: self.sin_secreto(&detalle),
+                }
+            }
+            otro => otro,
+        };
+        match &error {
+            ErrorApiAnthropic::EstadoNoReintentable { estado, detalle }
+                if !hubo_contenido && ErrorApiAnthropic::estado_reintentable(*estado) =>
+            {
+                FalloIntento::Reintentable {
+                    espera_indicada: None,
+                    descripcion: format!("{estado}: {detalle}"),
+                }
+            }
+            _ => FalloIntento::Definitivo(error),
         }
     }
 
@@ -255,10 +430,14 @@ fn clasificar_estado(
 fn validar_stop_reason(
     respuesta: RespuestaMensajes,
 ) -> Result<RespuestaMensajes, ErrorApiAnthropic> {
-    match respuesta.stop_reason.as_deref() {
+    validar_stop_reason_de(respuesta.stop_reason.as_deref()).map(|()| respuesta)
+}
+
+fn validar_stop_reason_de(stop_reason: Option<&str>) -> Result<(), ErrorApiAnthropic> {
+    match stop_reason {
         Some("max_tokens") => Err(ErrorApiAnthropic::RespuestaTruncada),
         Some("refusal") => Err(ErrorApiAnthropic::Rechazo),
-        _ => Ok(respuesta),
+        _ => Ok(()),
     }
 }
 
@@ -304,6 +483,7 @@ mod tests {
             messages: vec![MensajeEntrada::usuario("hola")],
             tools: Vec::new(),
             tool_choice: None,
+            ..Default::default()
         }
     }
 
@@ -323,6 +503,155 @@ mod tests {
 
     async fn peticiones_recibidas(servidor: &MockServer) -> usize {
         servidor.received_requests().await.map_or(0, |r| r.len())
+    }
+
+    fn sse(eventos: &[Value]) -> String {
+        eventos
+            .iter()
+            .map(|e| {
+                format!(
+                    "event: {}
+data: {e}
+
+",
+                    e["type"].as_str().unwrap()
+                )
+            })
+            .collect()
+    }
+
+    fn flujo_de_texto(texto: &str, stop_reason: &str) -> String {
+        sse(&[
+            json!({"type":"message_start","message":{"id":"m","model":"claude-sonnet-5-5","content":[],"usage":{"input_tokens":5,"cache_read_input_tokens":900,"output_tokens":1}}}),
+            json!({"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}),
+            json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":texto}}),
+            json!({"type":"content_block_stop","index":0}),
+            json!({"type":"message_delta","delta":{"stop_reason":stop_reason},"usage":{"output_tokens":7}}),
+            json!({"type":"message_stop"}),
+        ])
+    }
+
+    fn respuesta_sse(cuerpo: String) -> ResponseTemplate {
+        ResponseTemplate::new(200).set_body_raw(cuerpo, "text/event-stream")
+    }
+
+    async fn en_flujo(
+        servidor: &MockServer,
+        peticion: &PeticionMensajes,
+    ) -> (Result<RespuestaEnFlujo, ErrorApiAnthropic>, Vec<String>) {
+        let textos = std::sync::Mutex::new(Vec::new());
+        let anotar = |t: &str| textos.lock().unwrap().push(t.to_string());
+        let resultado = cliente(servidor)
+            .crear_mensaje_en_flujo(peticion, &anotar)
+            .await;
+        (resultado, textos.into_inner().unwrap())
+    }
+
+    #[tokio::test]
+    async fn test_flujo_pide_stream_con_betas_y_entrega_texto_y_uso() {
+        let servidor = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(wiremock::matchers::headers(
+                "anthropic-beta",
+                vec!["beta-a", "beta-b"],
+            ))
+            .and(wiremock::matchers::body_partial_json(
+                json!({"stream": true}),
+            ))
+            .respond_with(respuesta_sse(flujo_de_texto("Hola", "end_turn")))
+            .mount(&servidor)
+            .await;
+        let mut con_betas = peticion();
+        con_betas.betas = vec!["beta-a".into(), "beta-b".into()];
+        let (resultado, textos) = en_flujo(&servidor, &con_betas).await;
+        let resultado = resultado.unwrap();
+        assert_eq!(textos, vec!["Hola"]);
+        assert_eq!(resultado.mensaje.contenido[0]["text"], "Hola");
+        assert_eq!(resultado.mensaje.uso.cache_read_input_tokens, 900);
+        assert_eq!(resultado.mensaje.uso.output_tokens, 7);
+        assert!(resultado.ttft.is_some_and(|t| t <= resultado.latencia));
+    }
+
+    #[tokio::test]
+    async fn test_flujo_reintenta_un_429_y_un_error_antes_del_contenido() {
+        let servidor = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(
+                ResponseTemplate::new(429)
+                    .insert_header("retry-after", "0")
+                    .set_body_json(error_api("rate_limit_error", "despacio")),
+            )
+            .up_to_n_times(1)
+            .mount(&servidor)
+            .await;
+        let sobrecarga = sse(&[
+            json!({"type":"message_start","message":{"id":"m","model":"x","usage":{}}}),
+            json!({"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}),
+        ]);
+        Mock::given(method("POST"))
+            .respond_with(respuesta_sse(sobrecarga))
+            .up_to_n_times(1)
+            .mount(&servidor)
+            .await;
+        Mock::given(method("POST"))
+            .respond_with(respuesta_sse(flujo_de_texto("Ya", "end_turn")))
+            .mount(&servidor)
+            .await;
+        let (resultado, textos) = en_flujo(&servidor, &peticion()).await;
+        assert_eq!(resultado.unwrap().intentos, 3);
+        assert_eq!(textos, vec!["Ya"]);
+    }
+
+    #[tokio::test]
+    async fn test_flujo_con_error_tras_el_contenido_no_se_reintenta() {
+        let servidor = MockServer::start().await;
+        let cortado = sse(&[
+            json!({"type":"message_start","message":{"id":"m","model":"x","usage":{}}}),
+            json!({"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}),
+            json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Medio"}}),
+            json!({"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}),
+        ]);
+        Mock::given(method("POST"))
+            .respond_with(respuesta_sse(cortado))
+            .mount(&servidor)
+            .await;
+        let (resultado, textos) = en_flujo(&servidor, &peticion()).await;
+        assert!(matches!(
+            resultado.unwrap_err(),
+            ErrorApiAnthropic::EstadoNoReintentable { estado: 529, .. }
+        ));
+        assert_eq!(textos, vec!["Medio"]);
+        assert_eq!(peticiones_recibidas(&servidor).await, 1);
+    }
+
+    #[tokio::test]
+    async fn test_flujo_max_tokens_refusal_o_sin_message_stop_no_valen() {
+        for (cuerpo, esperado) in [
+            (flujo_de_texto("Cortado", "max_tokens"), "truncada"),
+            (flujo_de_texto("No", "refusal"), "rechazo"),
+        ] {
+            let servidor = MockServer::start().await;
+            Mock::given(method("POST"))
+                .respond_with(respuesta_sse(cuerpo))
+                .mount(&servidor)
+                .await;
+            let error = en_flujo(&servidor, &peticion()).await.0.unwrap_err();
+            match esperado {
+                "truncada" => assert_eq!(error, ErrorApiAnthropic::RespuestaTruncada),
+                _ => assert_eq!(error, ErrorApiAnthropic::Rechazo),
+            }
+        }
+        let servidor = MockServer::start().await;
+        let sin_fin = flujo_de_texto("Hola", "end_turn").replace("event: message_stop", "event: x");
+        let sin_fin = sin_fin.replace(r#"{"type":"message_stop"}"#, r#"{"type":"x"}"#);
+        Mock::given(method("POST"))
+            .respond_with(respuesta_sse(sin_fin))
+            .mount(&servidor)
+            .await;
+        assert!(matches!(
+            en_flujo(&servidor, &peticion()).await.0.unwrap_err(),
+            ErrorApiAnthropic::RespuestaNoValida(_)
+        ));
     }
 
     #[tokio::test]

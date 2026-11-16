@@ -107,6 +107,7 @@ impl AnthropicProcedenciaVerifier {
                 cache_control: Some(ControlCache::efimera()),
             }],
             tool_choice: Some(self.eleccion_tool()),
+            ..Default::default()
         })
     }
 
