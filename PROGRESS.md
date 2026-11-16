@@ -1552,7 +1552,7 @@
 
 ### Sesión Paso 1 (2026-11-15): pulido determinista del Nivel 1
 
-**Estado: `[COMPLETADO]`, pendiente de aprobación. Rama `claude/paso1-nivel1-a810a2` desde `dfab51a`, sin push ni merge.** Informe: `benchmarks/informes/paso1_nivel1_20261115.md`. No se ha leído el set oculto.
+**Estado: `[COMPLETADO]`, integrado en `main` (2026-11-16), sin push. Replay ciego de las 156 respuestas guardadas: 0 rechazos nuevos (2→2, los mismos), avisos de página 1→0, mutaciones detectadas 188/228 sin cambio.** Rama `claude/paso1-nivel1-a810a2`. Informe: `benchmarks/informes/paso1_nivel1_20261115.md`. No se ha leído el set oculto.
 
 **Errores y retrocesos (primero):**
 - **Con 4 cifras citadas, el Monte Carlo ya fallaba en `main`:** 0,347 % solo por la regla de pares, y 0,391 % con la clausura de 3-4. Se corrigió con una regla general: los operandos van citados seguidos y la cifra derivada va junto a ellos (sin contar años ni fechas). Después, el máximo es 0,086 % en 36 mediciones.
@@ -1579,3 +1579,39 @@
   - ¿Cuántas notas de extracto corto se silencian, y eran errores reales?
 - Solo hay 148 respuestas guardadas en disco (no las 477), y ninguna ejercita el Nivel 1 ni tiene citas confirmadas.
 - El SSD §4.6 dice todavía «timeout de 10 s».
+
+### Sesión Pieza 5, Fase 5.1: procedencia por la API de Messages (2026-11-15)
+
+**Estado: `[COMPLETADO]`, integrado en `main` (2026-11-16), sin push.** Rama `claude/pieza5-fase51-7335a5`, desde `main` `dfab51a`. Contrato: `docs/arquitectura/ssd_pieza5_fase51_procedencia_api.md`. Informe: `benchmarks/informes/pieza5_fase51_20261115.md`. No se ha leído el set oculto.
+
+- **Errores de respuesta, medidos con Haiku 5.5 real** (batería sintética propia, 2 ejecuciones de 3 pasadas):
+  - **0 de 33 cifras falsas aprobadas** en cada ejecución; 0 de 119 en las 4 ejecuciones;
+  - **6 de 48 legítimas no aprobadas**, siempre «Artículo 7.3» (c12). Haiku propone la traza correcta y **Rust la rechaza**: `contiene_los_digitos` lee «7.3» como 73. Sin corregir; regla propuesta y su riesgo en el informe §3;
+  - el error que sí era del modelo, el signo del factor de escala con la tool forzada (5 de 5 pasadas), queda corregido: `tool_choice: auto` con la tool `strict` le deja pensar antes. Ahora pasa 6 de 6.
+- **La comparación sin normalizar** (`traza.cifra` byte a byte) **no apareció**: 0 casos.
+- **Desviaciones del encargo:**
+  - no se envía `temperature` (Haiku 5.5 y la API `2026-10-21` dan 400);
+  - `tool_choice` no va forzado por defecto, por la corrección anterior.
+- **Para la 5.2:** Sonnet 5.5 y Opus 5.5 rechazan `tool_choice` forzado.
+- **Medido** (modo por defecto, equipo con carga):
+  - p50 de 2,2 s y p95 de 3,0-3,3 s;
+  - unos 0,00022 USD por microllamada;
+  - la caché lee unos 1 560 tokens por llamada;
+  - 0 reintentos en 207 llamadas;
+  - gasto total de unos 0,037 USD.
+- [x] SSD corto con la verificación de la documentación oficial: modelo `claude-haiku-5-5`, `cache_control`, `strict`, `anthropic-version: 2026-10-21` y tarifas.
+- [x] `AnthropicHttpClient`:
+  - timeouts de 10 s y 30 s; 3 reintentos con `retry-after` y jitter; 400, 401 y 403 accionables;
+  - `max_tokens` y `refusal` nunca se aceptan;
+  - `SecretApiKey` escribe `[REDACTED]`; almacén `keyring`, sin GUI.
+- [x] `AnthropicProcedenciaVerifier` y `ModoLlm` (`LAKEHOUSE_RAG_MODO_LLM`). **Por defecto, `Cli`.**
+- [x] Dependencias aprobadas: `reqwest` 0.12 (la 0.12.28 del árbol, con rustls), `keyring` 3 con `windows-native` y `wiremock` 0.6 en `dev-dependencies`.
+- [x] Batería sintética de 19 casos en 7 idiomas, con trampas, y herramienta `examples/calibrar_procedencia_api.rs`.
+- [x] Guardián: la línea base da 1120 pasan, 2 fallan y 35 ignorados; al final, 1150, 1 y 36.
+  - Los fallos son de entorno: el worktree no tiene `vendor/pdfium/`, y un timeout es sensible a la carga.
+  - Ningún test previo empeora.
+  - `clippy -D warnings`, limpio.
+- **Para la siguiente sesión:**
+  - Decidir la regla de las referencias compuestas en `arnes_turno` (informe §3). La trampa c19 («4.25 m» presentado como «4 m») debe seguir rechazada.
+  - Los reintentos de transporte no se han ejercitado contra la API real.
+  - La batería la escribió la sesión que afina el adaptador: la calidad general la mide el A/B de la 5.2 en el set v2.
