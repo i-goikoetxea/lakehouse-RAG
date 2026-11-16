@@ -1618,7 +1618,7 @@
 
 ### Sesión Pieza 5, Fase 5.2: el agente por la API de Messages (2026-11-16)
 
-**Estado: `[COMPLETADO]`, pendiente del A/B ciego de la sesión principal y de aprobación; sin merge ni push.** Rama `claude/pieza5-fase52-a1f4cf`, desde `main` `5e88f6e`. Contrato: `docs/arquitectura/ssd_pieza5_fase52_agente_api.md`. Informe: `benchmarks/informes/pieza5_fase52_20261116.md`. No se ha leído el set oculto.
+**Estado: `[COMPLETADO]`, integrado en `main` (2026-11-16), sin push.** El A/B ciego en el set v2 dio **121/122**, frente a 120/122 de `da66519`, con 8/8, 9/9, 0 páginas falsas y 0 omisiones de tools. El coste fue de 12,15 USD en las 2 pasadas, por encima de lo estimado: queda pendiente revisar la caché (informe §0). Rama `claude/pieza5-fase52-a1f4cf`, desde `main` `5e88f6e`. Contrato: `docs/arquitectura/ssd_pieza5_fase52_agente_api.md`. Informe: `benchmarks/informes/pieza5_fase52_20261116.md`. No se ha leído el set oculto.
 
 **Errores y límites (primero):**
 - **Humo real:** 0 respuestas incorrectas de 6, pero es una batería sintética propia y saturada. No mide la calidad general; eso lo hace el A/B en el set v2.
