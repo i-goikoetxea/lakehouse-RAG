@@ -1,9 +1,22 @@
 //! Botón de configuración y modal del motor del LLM y de la API key (estático: la ventana no se
 //! abre en los tests). La lógica vive en `presentation::gui::config_llm` y tiene sus tests.
 
-const HTML: &str = include_str!("../src/presentation/gui/web/index.html");
-const APP_JS: &str = include_str!("../src/presentation/gui/web/app.js");
-const GUI_RS: &str = include_str!("../src/presentation/gui/mod.rs");
+/// Sin retornos de carro: con `core.autocrlf` el checkout de Windows trae CRLF
+fn sin_cr(texto: &str) -> String {
+    texto.replace(char::from(13), "")
+}
+
+fn html() -> String {
+    sin_cr(include_str!("../src/presentation/gui/web/index.html"))
+}
+
+fn app_js() -> String {
+    sin_cr(include_str!("../src/presentation/gui/web/app.js"))
+}
+
+fn gui_rs() -> String {
+    sin_cr(include_str!("../src/presentation/gui/mod.rs"))
+}
 
 fn bloque<'a>(texto: &'a str, desde: &str, hasta: &str) -> &'a str {
     let inicio = texto.find(desde).unwrap_or_else(|| panic!("falta {desde}"));
@@ -16,7 +29,8 @@ fn bloque<'a>(texto: &'a str, desde: &str, hasta: &str) -> &'a str {
 
 #[test]
 fn test_el_engranaje_va_tras_el_tema_y_antes_de_los_controles_de_ventana() {
-    let acciones = bloque(HTML, "class=\"titlebar-actions\"", "</header>");
+    let html = html();
+    let acciones = bloque(&html, "class=\"titlebar-actions\"", "</header>");
     let tema = acciones
         .find("id=\"btn-theme-toggle\"")
         .expect("botón de tema");
@@ -31,7 +45,8 @@ fn test_el_engranaje_va_tras_el_tema_y_antes_de_los_controles_de_ventana() {
 
 #[test]
 fn test_el_engranaje_es_un_svg_monocromo_con_nombre_accesible() {
-    let boton = bloque(HTML, "id=\"btn-config\"", "</button>");
+    let html = html();
+    let boton = bloque(&html, "id=\"btn-config\"", "</button>");
     assert!(
         boton.contains("<svg") && boton.contains("currentColor"),
         "{boton}"
@@ -45,7 +60,8 @@ fn test_el_engranaje_es_un_svg_monocromo_con_nombre_accesible() {
 
 #[test]
 fn test_el_modal_tiene_selector_de_modo_y_campo_password() {
-    let modal = bloque(HTML, "id=\"dialogo-config\"", "</dialog>");
+    let html = html();
+    let modal = bloque(&html, "id=\"dialogo-config\"", "</dialog>");
     assert!(modal.contains("name=\"config-modo\" value=\"cli\""));
     assert!(modal.contains("name=\"config-modo\" value=\"api\""));
     assert!(
@@ -63,7 +79,8 @@ fn test_el_modal_tiene_selector_de_modo_y_campo_password() {
 
 #[test]
 fn test_la_key_no_se_retiene_en_js_y_el_campo_se_vacia() {
-    let config = bloque(APP_JS, "// 14b. Configuración", "// 15. Arranque");
+    let app_js = app_js();
+    let config = bloque(&app_js, "// 14b. Configuración", "// 15. Arranque");
     assert!(
         config.contains("invoke('guardar_api_key', { key: campoKey.value })"),
         "la key va directa del campo al comando, sin variable intermedia"
@@ -95,7 +112,8 @@ fn test_la_key_no_se_retiene_en_js_y_el_campo_se_vacia() {
 
 #[test]
 fn test_los_comandos_de_configuracion_estan_registrados() {
-    let registro = bloque(GUI_RS, "generate_handler![", "]");
+    let gui_rs = gui_rs();
+    let registro = bloque(&gui_rs, "generate_handler![", "]");
     for comando in [
         "estado_api_key",
         "guardar_api_key",
@@ -107,7 +125,7 @@ fn test_los_comandos_de_configuracion_estan_registrados() {
             "falta {comando} en el invoke_handler"
         );
         assert!(
-            GUI_RS.contains(&format!("fn {comando}(")),
+            gui_rs.contains(&format!("fn {comando}(")),
             "falta el comando {comando}"
         );
     }
