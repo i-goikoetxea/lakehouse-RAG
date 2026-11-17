@@ -44,6 +44,8 @@ pub enum ChatStreamEvento {
         turno_id: String,
         nombre: String,
         es_error: bool,
+        /// No se ejecutó (circuito abierto o repetición): la ventana la muestra como desvío
+        redirigida: bool,
     },
     /// El texto no se emite hasta validarlo: la ventana indica que está comprobando
     TurnoRetenido { turno_id: String },
@@ -252,13 +254,17 @@ impl GuiChatService {
                     nombre: name.clone(),
                 })
             }
-            AgentExecutionEvent::ToolResultReceived { name, is_error, .. } => {
-                Some(ChatStreamEvento::HerramientaFin {
-                    turno_id,
-                    nombre: name.clone(),
-                    es_error: *is_error,
-                })
-            }
+            AgentExecutionEvent::ToolResultReceived {
+                name,
+                is_error,
+                redirigida,
+                ..
+            } => Some(ChatStreamEvento::HerramientaFin {
+                turno_id,
+                nombre: name.clone(),
+                es_error: *is_error,
+                redirigida: *redirigida,
+            }),
             AgentExecutionEvent::ArnesIntervino { etapa, motivo } => {
                 Some(ChatStreamEvento::Arnes {
                     turno_id,
@@ -312,6 +318,7 @@ impl GuiChatService {
                     name,
                     result,
                     is_error,
+                    redirigida,
                 } => {
                     let (args, inicio) = match pendientes.iter().position(|(n, _, _)| n == name) {
                         Some(idx) => {
@@ -328,6 +335,7 @@ impl GuiChatService {
                         result: result.clone(),
                         status: status.to_string(),
                         duration: format!("{}ms", instante.duration_since(inicio).as_millis()),
+                        redirigida: *redirigida,
                     });
                 }
                 _ => {}

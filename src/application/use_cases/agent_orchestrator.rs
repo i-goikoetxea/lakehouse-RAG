@@ -354,6 +354,8 @@ impl AgentOrchestrator {
 
                         // `registrar`: lo que ve el arnés. Una repetición no se registra: el
                         // original ya está en el registro y en el historial
+                        let redirigida =
+                            circuito.abierto(&call.name) || llamadas.repetida(call).is_some();
                         let (result, registrar) = if circuito.abierto(&call.name) {
                             (
                                 circuito.resultado_bloqueado(call, &herramientas_disponibles),
@@ -380,6 +382,7 @@ impl AgentOrchestrator {
                                 name: result.tool_name.clone(),
                                 result: result.output.clone(),
                                 is_error: result.is_error,
+                                redirigida,
                             });
                         }
 
@@ -2350,6 +2353,7 @@ mod tests {
                     name,
                     result,
                     is_error,
+                    ..
                 } => Some((name.clone(), *is_error, result.clone())),
                 _ => None,
             })
@@ -3222,5 +3226,39 @@ mod tests {
         .await
         .unwrap();
         assert!(runner.catalogos().iter().all(|c| *c == todas_las_tools()));
+    }
+
+    // --- Marca de llamada redirigida (aviso discreto en la ventana) ---
+
+    fn redirigidas(eventos: &[AgentExecutionEvent]) -> Vec<bool> {
+        eventos
+            .iter()
+            .filter_map(|e| match e {
+                AgentExecutionEvent::ToolResultReceived { redirigida, .. } => Some(*redirigida),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn test_redirigida_marca_solo_las_llamadas_bloqueadas_o_repetidas() {
+        let tools = ToolsQueFallan::nuevas(vec![SQL]);
+        let mut historial = vec![AgentMessage::user("Hola")];
+        let repetida = json!({ "centro_id": "planta_1" });
+        let eventos = turno_con_circuito(
+            vec![
+                llamada_a(SQL, "c1"),
+                llamada_a(SQL, "c2"),
+                llamada_a(SQL, "c3"),
+                llamada_con(CATALOGO, "c4", repetida.clone()),
+                llamada_con(CATALOGO, "c5", repetida),
+                AgentTurnOutput::FinalMessage("No consta.".to_string()),
+            ],
+            tools,
+            &mut historial,
+        )
+        .await;
+        // Fallo, fallo, bloqueada, ejecutada, repetida
+        assert_eq!(redirigidas(&eventos), vec![false, false, true, false, true]);
     }
 }

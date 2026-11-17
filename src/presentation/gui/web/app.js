@@ -670,8 +670,10 @@
       if (linea) {
         linea.pendiente = false;
         linea.nodo.classList.remove('en-curso');
-        if (datos.esError) linea.nodo.classList.add('fallo');
-        linea.nodo.querySelector('.estado').textContent = datos.esError ? '⚠' : '✓';
+        // Un error recuperable, un bloqueo o una repetición: el turno sigue por otra vía
+        const desvio = datos.esError || datos.redirigida;
+        if (desvio) linea.nodo.classList.add('redirigida');
+        linea.nodo.querySelector('.estado').textContent = desvio ? '↷' : '✓';
       }
     } else if (datos.tipo === 'turnoRetenido') {
       turno.retenido = true;
@@ -747,7 +749,9 @@
     const tools = data.toolsUsed || [];
     if (tools.length) {
       const bloque = el('div', 'tools-usadas');
-      tools.forEach((tool) => bloque.appendChild(lineaTool(tool)));
+      tools.filter((tool) => !esDesvio(tool)).forEach((tool) => bloque.appendChild(lineaTool(tool)));
+      const desvios = tools.filter(esDesvio);
+      if (desvios.length) bloque.appendChild(pillDesvios(desvios));
       mensaje.appendChild(bloque);
     }
 
@@ -802,6 +806,46 @@
     boton.type = 'button';
     boton.addEventListener('click', () => { pestanaElegidaPorUsuario = true; activarPestana(pestanaDeResultados(data)); });
     return boton;
+  }
+
+  /** Error recuperable de una tool, bloqueo del circuito o repetición: el turno siguió igualmente */
+  function esDesvio(tool) {
+    return tool.status !== 'ok' || tool.redirigida === true;
+  }
+
+  /** Los desvíos van juntos en un pill discreto, colapsado; al abrirlo, el detalle técnico completo */
+  function pillDesvios(desvios) {
+    const caja = el('details', 'desvios-tools');
+    const soloRepeticiones = desvios.every((t) => t.redirigida && t.status === 'ok');
+    const resumen = el('summary', 'pill-desvio', `${soloRepeticiones ? 'Consulta redirigida' : 'Vía alternativa'} · ${desvios.length}`);
+    resumen.title = 'Consultas que fallaron o no se ejecutaron; el asistente siguió por otra vía. Clic para ver el detalle';
+    caja.appendChild(resumen);
+    desvios.forEach((tool) => caja.appendChild(detalleDesvio(tool)));
+    return caja;
+  }
+
+  function detalleDesvio(tool) {
+    const bloque = el('div', 'desvio');
+    const cabecera = el('div', 'desvio-cabecera');
+    cabecera.appendChild(el('span', 'nombre', tool.name));
+    cabecera.appendChild(el('span', 'chip', tool.redirigida ? 'no ejecutada' : 'error'));
+    cabecera.appendChild(el('span', 'duracion', tool.duration));
+    bloque.appendChild(cabecera);
+    const aviso = textoDelAviso(tool.result);
+    if (aviso) bloque.appendChild(el('p', 'desvio-aviso', aviso));
+    bloque.appendChild(el('h5', 'texto-sutil', 'Parámetros'));
+    bloque.appendChild(el('pre', 'json', JSON.stringify(tool.args, null, 2)));
+    bloque.appendChild(el('h5', 'texto-sutil', 'Resultado'));
+    bloque.appendChild(el('pre', 'json', JSON.stringify(tool.result, null, 2)));
+    return bloque;
+  }
+
+  function textoDelAviso(resultado) {
+    if (resultado && typeof resultado === 'object') {
+      if (typeof resultado.error === 'string') return resultado.error;
+      if (typeof resultado.aviso === 'string') return resultado.aviso;
+    }
+    return '';
   }
 
   function lineaTool(tool) {

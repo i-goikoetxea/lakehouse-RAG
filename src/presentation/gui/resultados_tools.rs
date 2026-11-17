@@ -369,6 +369,7 @@ mod tests {
             status: status.to_string(),
             duration: "1ms".to_string(),
             resumen: String::new(),
+            redirigida: false,
         }
     }
 

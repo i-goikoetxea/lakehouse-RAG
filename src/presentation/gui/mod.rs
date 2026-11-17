@@ -445,6 +445,9 @@ pub struct ToolCardDto {
     pub duration: String,
     /// Línea legible del resultado (p. ej. «resuelto · 125 (*) °C»)
     pub resumen: String,
+    /// No se ejecutó: la bloqueó el circuito o repetía una llamada del turno
+    #[serde(default)]
+    pub redirigida: bool,
 }
 
 /// Respuesta completa para el asistente del frontend

@@ -190,6 +190,9 @@ pub enum AgentExecutionEvent {
         name: String,
         result: serde_json::Value,
         is_error: bool,
+        /// La llamada no se ejecutó: la bloqueó el circuito o repetía una ya hecha en el turno
+        #[serde(default)]
+        redirigida: bool,
     },
     TextDelta(String),
     /// El texto ya emitido en vivo en este turno no vale (se rechazó o era una llamada): la
