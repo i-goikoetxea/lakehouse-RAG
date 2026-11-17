@@ -1701,7 +1701,7 @@
 
 ### Sesión Motor FreeLLMAPI (2026-11-17): tercer motor del LLM
 
-**Estado: `[COMPLETADO]`, pendiente de la prueba manual del usuario. Sin merge, sin push y sin tag.** Rama `claude/motor-freellmapi-4d79f4`, desde `main` `d3986f3`. Contrato: `docs/arquitectura/ssd_motor_freellmapi.md`. Informe: `benchmarks/informes/motor_freellmapi_20261117.md`. No se ha leído el set oculto.
+**Estado: `[INTEGRADO]` en `main` (2026-11-17), junto con el blindaje para modelos ligeros (sección siguiente).** Rama `claude/motor-freellmapi-4d79f4`, desde `main` `d3986f3`. Contrato: `docs/arquitectura/ssd_motor_freellmapi.md`. Informe: `benchmarks/informes/motor_freellmapi_20261117.md`. No se ha leído el set oculto.
 
 **Errores y límites (primero):**
 - **Calidad sin medir.** El humo real dio 3/3 en 3 preguntas sintéticas propias: solo prueba el circuito.
@@ -1732,4 +1732,26 @@
 **Medido:**
 - `--lib` filtrado: 83/0/1. `integration_agente_api`: 12/12. `adversarial_api_key_gui`: 1/1. `gui_config_llm`: 8/8.
 - `clippy --all-targets -D warnings`: limpio. `fmt`: aplicado.
-- Ejecutable de producción (`cargo tauri build`, 24 min con 2 jobs): `D:\Proyectos\lakehouse RAG\.claude\worktrees\motor-freellmapi-4d79f4	argetelease\lakehouse_rag.exe`, con `pdfium.dll` al lado.
+- Ejecutable de producción (`cargo tauri build`, 24 min con 2 jobs): `D:\Proyectos\lakehouse RAG\.claude\worktrees\motor-freellmapi-4d79f4	arget
+elease\lakehouse_rag.exe`, con `pdfium.dll` al lado.
+
+### Sesión Blindaje para modelos ligeros (2026-11-17)
+
+**Estado: `[INTEGRADO]` en `main`.** Rama `claude/circuit-breaker-herramientas-6c3d9a`, que sale de la del motor FreeLLMAPI. Informe: `benchmarks/informes/blindaje_modelos_ligeros_20261117.md`. No se ha leído el set oculto.
+
+**Errores y límites (primero):**
+- **Calidad sin medir con un set.** Lo validó en vivo el usuario, con modelos locales o gratuitos y con Haiku, sin regresión en sus pruebas.
+- **El replay no ejercita el bucle de herramientas.** Por eso no cubre el circuito, la deduplicación ni el aterrizaje forzoso.
+- **Pendiente:** la procedencia en sesiones de varios turnos solo contrasta las cifras con el turno actual (informe §4).
+
+**Cambios** (un commit por ajuste):
+- [x] Circuit breaker por herramienta: 2 errores seguidos la bloquean y la retiran de `tools` durante el resto del turno.
+- [x] Diagnóstico de esquema en los errores de parseo y planificación de `execute_athena_sql`.
+- [x] Deduplicación de llamadas idénticas dentro del turno.
+- [x] Aterrizaje forzoso en la iteración 8 de 10, sin herramientas y con una sola pasada por el guard.
+- [x] Cambio de motor sin reiniciar la app.
+- [x] Avisos de herramienta recuperables como pill ámbar colapsado.
+
+**Medido:**
+- Suite completa: **1.323 en verde, 0 fallos y 36 ignorados.** Antes del arreglo hubo 3 fallos: uno de entorno (`pdfium.dll`) y el texto de anclaje de un test de `gui_config_llm`.
+- Replay ciego: **0 cambios en 278 filas** frente a `main` `d3986f3`.
