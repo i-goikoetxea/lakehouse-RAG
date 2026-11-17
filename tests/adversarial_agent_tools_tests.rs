@@ -12,7 +12,9 @@ use lakehouse_rag::application::dtos::agent::{AgentMessage, AgentTurnOutput, Cla
 use lakehouse_rag::application::dtos::tools::{LakehouseToolName, ToolCall, ToolResult};
 use lakehouse_rag::application::ports::agent_runner::AgentRunnerPort;
 use lakehouse_rag::application::ports::tool_server::ToolServerPort;
-use lakehouse_rag::application::use_cases::agent_orchestrator::AgentOrchestrator;
+use lakehouse_rag::application::use_cases::agent_orchestrator::{
+    AgentOrchestrator, MENSAJE_RESPUESTA_NO_VALIDADA,
+};
 use lakehouse_rag::domain::errors::DomainError;
 use lakehouse_rag::domain::models::center::CenterId;
 
@@ -366,6 +368,7 @@ async fn test_adv_bucle_infinito_de_herramientas_cortado_por_max_steps() {
     let runner = Arc::new(InfiniteLoopRunner {
         contador: Mutex::new(0),
     });
+    let observado = Arc::clone(&runner);
     let entorno = entorno_vacio();
     let centro = CenterId::new("planta_loop").unwrap();
     sembrar_centro(&entorno, &centro).await;
@@ -374,7 +377,7 @@ async fn test_adv_bucle_infinito_de_herramientas_cortado_por_max_steps() {
     let orchestrator = AgentOrchestrator::new(runner, entorno.servicio.clone()).with_max_steps(3);
     let mut historial = vec![AgentMessage::user("Inicia bucle")];
 
-    let err = orchestrator
+    let respuesta = orchestrator
         .procesar_turno(
             &ClaudeModel::new("opus").unwrap(),
             &centro,
@@ -382,11 +385,10 @@ async fn test_adv_bucle_infinito_de_herramientas_cortado_por_max_steps() {
             None,
         )
         .await
-        .unwrap_err();
+        .unwrap();
 
-    assert!(matches!(err, DomainError::AgentError(_)));
-    assert!(
-        err.to_string()
-            .contains("Se superó el límite máximo de iteraciones")
-    );
+    // Con 3 pasos, el segundo es el aterrizaje forzoso: el modelo vuelve a pedir una
+    // herramienta, no se ejecuta y el turno termina con el mensaje fijo, sin bucle
+    assert_eq!(respuesta, MENSAJE_RESPUESTA_NO_VALIDADA);
+    assert_eq!(*observado.contador.lock().unwrap(), 2);
 }

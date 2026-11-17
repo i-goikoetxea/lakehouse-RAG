@@ -36,6 +36,9 @@ pub fn explicar_intervencion(etapa: EtapaArnes, motivo: &str) -> String {
         EtapaArnes::OmisionDeHerramienta => {
             "El asistente iba a responder sin consultar los datos del centro: se le pidió que los consultara.".to_string()
         }
+        EtapaArnes::AterrizajeForzoso => {
+            "El asistente llevaba muchas consultas sin cerrar la respuesta: se le pidió responder solo con lo ya consultado.".to_string()
+        }
         EtapaArnes::VerificacionProcedencia => {
             "Se comprobó de dónde salen las cifras calculadas o citadas que no aparecen tal cual en los datos consultados.".to_string()
         }
@@ -107,6 +110,13 @@ mod tests {
         );
         assert!(texto.contains("página"), "{texto}");
         assert!(!texto.contains("valor_interno"), "{texto}");
+        sin_jerga(&texto);
+    }
+
+    #[test]
+    fn test_el_aterrizaje_forzoso_se_explica_sin_jerga() {
+        let texto = explicar_intervencion(EtapaArnes::AterrizajeForzoso, "límite de pasos");
+        assert!(texto.contains("ya consultado"), "{texto}");
         sin_jerga(&texto);
     }
 

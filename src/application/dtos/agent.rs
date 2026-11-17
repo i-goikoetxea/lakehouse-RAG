@@ -169,6 +169,9 @@ pub enum EtapaArnes {
     /// La intención exige consultar y el modelo respondió sin llamar a ninguna tool (Fase 5.2,
     /// solo en los transportes que no pueden forzar la llamada)
     OmisionDeHerramienta,
+    /// El turno agotó casi todas sus iteraciones: se pidió cerrar sin herramientas, solo con
+    /// lo ya consultado
+    AterrizajeForzoso,
 }
 
 /// Eventos emitidos durante la ejecución reactiva del agente (para TUI y streaming)

@@ -168,12 +168,46 @@ impl AgentOrchestrator {
         // Llamadas ya ejecutadas (herramienta y argumentos canónicos): solo de este turno
         let mut llamadas = LlamadasDelTurno::default();
 
+        // Tras `max_steps - MARGEN_DE_CIERRE` pasos sin respuesta final, el siguiente cierra
+        let paso_de_cierre = self
+            .max_steps
+            .checked_sub(MARGEN_DE_CIERRE)
+            .filter(|pasos| *pasos > 0)
+            .map(|pasos| pasos + 1);
+
         let mut paso = 0;
         while paso < self.max_steps {
             paso += 1;
 
             // Sin las herramientas con el circuito abierto: el modelo no las ve en este turno
             let visibles = herramientas_visibles(&herramientas_disponibles, &circuito);
+            // Aterrizaje forzoso: al límite de pasos, o sin ninguna herramienta habilitada
+            let sin_herramientas = visibles.is_empty() && !herramientas_disponibles.is_empty();
+            if Some(paso) == paso_de_cierre || sin_herramientas {
+                let catalogo: &[ToolDefinition] = if sin_herramientas {
+                    &herramientas_disponibles
+                } else {
+                    &visibles
+                };
+                let contexto = ContextoDelCierre {
+                    pregunta: &pregunta,
+                    intencion: &intencion,
+                    registro: &registro,
+                    consulto,
+                    avisos: [correccion.as_ref(), recordatorio.as_ref()],
+                };
+                return self
+                    .aterrizar(
+                        &motor,
+                        modelo,
+                        &system_prompt,
+                        historial,
+                        catalogo,
+                        contexto,
+                        &on_event,
+                    )
+                    .await;
+            }
             let emitido_en_vivo = Arc::new(AtomicBool::new(false));
             let turn_output = match std::mem::replace(&mut eleccion, EleccionHerramienta::Libre) {
                 EleccionHerramienta::Dirigida(dirigida) => {
@@ -438,6 +472,81 @@ impl AgentOrchestrator {
         )
     }
 
+    /// Aterrizaje forzoso: un último paso sin herramientas con la directiva de cerrar solo con
+    /// la evidencia del turno. La respuesta pasa por el guard como siempre, pero sin reintento:
+    /// si no lo supera, o si el modelo vuelve a pedir herramientas, sale el mensaje fijo
+    #[allow(clippy::too_many_arguments)]
+    async fn aterrizar(
+        &self,
+        motor: &MotorDeLaConsulta,
+        modelo: &ClaudeModel,
+        system_prompt: &str,
+        historial: &mut Vec<AgentMessage>,
+        herramientas: &[ToolDefinition],
+        contexto: ContextoDelCierre<'_>,
+        on_event: &Option<EventCallback>,
+    ) -> Result<String, DomainError> {
+        notificar_arnes(
+            on_event,
+            EtapaArnes::AterrizajeForzoso,
+            "límite de pasos cercano o sin herramientas habilitadas: se pide cerrar sin herramientas con la evidencia recuperada"
+                .to_string(),
+        );
+        let cierre = RecordatorioReintento::cierre(historial.len());
+        let [correccion, recordatorio] = contexto.avisos;
+        let vista = vista_del_modelo(historial, &[correccion, recordatorio, Some(&cierre)]);
+        let salida = motor
+            .runner
+            .ejecutar_turno_de_cierre(modelo, system_prompt, &vista, herramientas)
+            .await?;
+        let veredicto = match salida {
+            AgentTurnOutput::ToolCalls(_) => {
+                Err("el paso de cierre volvió a pedir herramientas".to_string())
+            }
+            AgentTurnOutput::FinalMessage(candidata)
+                if !contexto.consulto
+                    && ((motor.runner.necesita_correccion_de_omision()
+                        && *contexto.intencion != IntencionTurno::Ninguna)
+                        || PostInferenceGuard::afirma_sin_consulta(
+                            &candidata,
+                            contexto.pregunta,
+                            contexto.intencion,
+                            contexto.registro,
+                        )) =>
+            {
+                Err(ViolacionArnes::CapaDosNoIntentada.motivo())
+            }
+            AgentTurnOutput::FinalMessage(candidata) => self
+                .validar_con_procedencia(
+                    motor,
+                    &candidata,
+                    contexto.pregunta,
+                    contexto.intencion,
+                    contexto.registro,
+                    on_event,
+                )
+                .await
+                .map(|()| candidata)
+                .map_err(|violacion| violacion.motivo()),
+        };
+        let respuesta = match veredicto {
+            Ok(respuesta) => respuesta,
+            Err(motivo) => {
+                notificar_arnes(on_event, EtapaArnes::SalidaSegura, motivo);
+                MENSAJE_RESPUESTA_NO_VALIDADA.to_string()
+            }
+        };
+        let nota = nota_de_paginas(&respuesta, contexto.registro, on_event);
+        let respuesta = respuesta + nota.as_deref().unwrap_or_default();
+        // El paso de cierre no se emite en vivo: el texto sale una vez validado
+        if let Some(cb) = on_event {
+            cb(AgentExecutionEvent::TextDelta(respuesta.clone()));
+            cb(AgentExecutionEvent::Completed(respuesta.clone()));
+        }
+        historial.push(AgentMessage::assistant(respuesta.clone()));
+        Ok(respuesta)
+    }
+
     /// Sin llamada, el texto del modelo se descarta: el mensaje vacío lo juzga el guard
     /// (`CapaDosNoIntentada`), que aplica el mismo reintento único que a cualquier respuesta.
     #[allow(clippy::too_many_arguments)]
@@ -528,6 +637,20 @@ fn herramientas_visibles<'a>(
     }
 }
 
+/// Pasos que se reservan al final del turno: tras `max_steps - MARGEN_DE_CIERRE` pasos sin
+/// respuesta final, el siguiente es el aterrizaje forzoso (con 10, el noveno tras el octavo)
+pub const MARGEN_DE_CIERRE: usize = 2;
+
+/// Lo que el aterrizaje forzoso necesita del turno para juzgar la respuesta
+struct ContextoDelCierre<'a> {
+    pregunta: &'a str,
+    intencion: &'a IntencionTurno,
+    registro: &'a RegistroTurno,
+    consulto: bool,
+    /// Corrección de omisión y recordatorio de reintento vigentes, en la vista del modelo
+    avisos: [Option<&'a RecordatorioReintento>; 2],
+}
+
 /// Motor fijado al empezar una consulta
 struct MotorDeLaConsulta {
     runner: Arc<dyn AgentRunnerPort>,
@@ -548,6 +671,16 @@ impl RecordatorioReintento {
                 "RECORDATORIO DEL SISTEMA: la respuesta anterior se rechazó y el operador no la ha visto. Motivo: {}. Llama en este turno a la herramienta que corresponda y usa solo cifras de sus salidas o de la pregunta. Si la herramienta no devuelve el dato, dilo.",
                 violacion.motivo()
             )),
+        }
+    }
+
+    /// Directiva del aterrizaje forzoso: determinista y sin nada del dominio
+    fn cierre(posicion: usize) -> Self {
+        Self {
+            posicion,
+            mensaje: AgentMessage::user(
+                "RECORDATORIO DEL SISTEMA: este turno ha agotado las consultas disponibles y en este paso no puedes llamar a ninguna herramienta. Responde ya al operador usando solo la evidencia que devolvieron las herramientas en este turno. Lo que no conste en esa evidencia, di que no consta; no lo completes con conocimiento propio ni con valores de referencia.",
+            ),
         }
     }
 
@@ -2875,5 +3008,219 @@ mod tests {
             .find(|m| m.role == AgentRole::Tool)
             .unwrap();
         assert!(ultimo.content.contains("deshabilitada"));
+    }
+
+    // --- Aterrizaje forzoso ---
+
+    /// Pide siempre otra consulta distinta; el paso de cierre devuelve `cierre` y anota su vista
+    struct RunnerSinFin {
+        pasos: Mutex<usize>,
+        cierre: Mutex<Option<AgentTurnOutput>>,
+        vistas_de_cierre: Mutex<Vec<(Vec<AgentMessage>, Vec<String>)>>,
+    }
+
+    impl RunnerSinFin {
+        fn con_cierre(cierre: AgentTurnOutput) -> Arc<Self> {
+            Arc::new(Self {
+                pasos: Mutex::new(0),
+                cierre: Mutex::new(Some(cierre)),
+                vistas_de_cierre: Mutex::default(),
+            })
+        }
+    }
+
+    #[async_trait]
+    impl AgentRunnerPort for RunnerSinFin {
+        async fn ejecutar_turno(
+            &self,
+            _modelo: &ClaudeModel,
+            _system_prompt: &str,
+            _historial: &[AgentMessage],
+            _herramientas: &[ToolDefinition],
+        ) -> Result<AgentTurnOutput, DomainError> {
+            let mut pasos = self.pasos.lock().unwrap();
+            *pasos += 1;
+            Ok(llamada_a(CATALOGO, &format!("c{pasos}")))
+        }
+
+        async fn ejecutar_turno_de_cierre(
+            &self,
+            _modelo: &ClaudeModel,
+            _system_prompt: &str,
+            historial: &[AgentMessage],
+            herramientas: &[ToolDefinition],
+        ) -> Result<AgentTurnOutput, DomainError> {
+            self.vistas_de_cierre.lock().unwrap().push((
+                historial.to_vec(),
+                herramientas.iter().map(|h| h.name.clone()).collect(),
+            ));
+            Ok(self.cierre.lock().unwrap().take().expect("un solo cierre"))
+        }
+    }
+
+    async fn turno_sin_fin(
+        runner: Arc<RunnerSinFin>,
+        tools: Arc<ToolsQueFallan>,
+        historial: &mut Vec<AgentMessage>,
+    ) -> (Result<String, DomainError>, Vec<AgentExecutionEvent>) {
+        let eventos: Eventos = Arc::default();
+        let destino = eventos.clone();
+        let resultado = AgentOrchestrator::new(runner, tools)
+            .procesar_turno(
+                &ClaudeModel::sonnet(),
+                &CenterId::new("planta_1").unwrap(),
+                historial,
+                Some(Arc::new(move |e| destino.lock().unwrap().push(e))),
+            )
+            .await;
+        let eventos = eventos.lock().unwrap().clone();
+        (resultado, eventos)
+    }
+
+    #[tokio::test]
+    async fn test_cierre_tras_ocho_pasos_sin_respuesta_el_noveno_cierra_sin_herramientas() {
+        let runner = RunnerSinFin::con_cierre(libre_final("No consta en lo consultado."));
+        let tools = ToolsQueFallan::nuevas(vec![]);
+        let mut historial = vec![AgentMessage::user("Hola")];
+        let (resultado, eventos) =
+            turno_sin_fin(runner.clone(), tools.clone(), &mut historial).await;
+        assert_eq!(resultado.unwrap(), "No consta en lo consultado.");
+        assert_eq!(
+            *runner.pasos.lock().unwrap(),
+            AgentOrchestrator::DEFAULT_MAX_STEPS - MARGEN_DE_CIERRE
+        );
+        assert_eq!(tools.ejecuciones_de(CATALOGO), 8);
+        assert!(etapas(&eventos).contains(&EtapaArnes::AterrizajeForzoso));
+        assert!(eventos.contains(&AgentExecutionEvent::Completed(
+            "No consta en lo consultado.".into()
+        )));
+        let vistas = runner.vistas_de_cierre.lock().unwrap();
+        assert_eq!(vistas.len(), 1);
+        let (vista, catalogo) = &vistas[0];
+        // La directiva va al final de la vista y nunca al historial del operador
+        let directiva = vista.last().unwrap();
+        assert_eq!(directiva.role, AgentRole::User);
+        assert!(
+            directiva
+                .content
+                .contains("no puedes llamar a ninguna herramienta")
+        );
+        assert!(directiva.content.contains("no consta"));
+        assert!(!historial.iter().any(|m| m.content.contains("RECORDATORIO")));
+        // El catálogo es el del paso anterior: el transporte decide cómo prohibir las llamadas
+        assert_eq!(*catalogo, todas_las_tools());
+    }
+
+    #[tokio::test]
+    async fn test_cierre_que_vuelve_a_pedir_herramientas_acaba_en_la_salida_segura() {
+        let runner = RunnerSinFin::con_cierre(llamada_a(CATALOGO, "otra"));
+        let tools = ToolsQueFallan::nuevas(vec![]);
+        let mut historial = vec![AgentMessage::user("Hola")];
+        let (resultado, eventos) =
+            turno_sin_fin(runner.clone(), tools.clone(), &mut historial).await;
+        assert_eq!(resultado.unwrap(), MENSAJE_RESPUESTA_NO_VALIDADA);
+        // La llamada del cierre no se ejecuta y no hay más vueltas
+        assert_eq!(tools.ejecuciones_de(CATALOGO), 8);
+        assert_eq!(runner.vistas_de_cierre.lock().unwrap().len(), 1);
+        assert!(
+            etapas(&eventos).ends_with(&[EtapaArnes::AterrizajeForzoso, EtapaArnes::SalidaSegura])
+        );
+        assert_eq!(
+            historial.last().unwrap().content,
+            MENSAJE_RESPUESTA_NO_VALIDADA
+        );
+    }
+
+    #[tokio::test]
+    async fn test_cierre_que_no_supera_el_guard_no_reintenta() {
+        // Paso dirigido + 7 libres con consulta; el noveno (cierre) da una cifra sin anclar
+        let mut libres: Vec<AgentTurnOutput> = (0..7)
+            .map(|_| AgentTurnOutput::ToolCalls(vec![llamada_lookup()]))
+            .collect();
+        libres.push(libre_final("La temperatura mínima es 999 °C."));
+        let runner =
+            RunnerDelArnes::con_guion(vec![Ok(TurnoDirigido::Llamada(llamada_lookup()))], libres);
+        let mut historial = vec![AgentMessage::user(CRUZABLE)];
+        let (resultado, eventos) = turno_con_arnes(runner.clone(), &mut historial).await;
+        assert_eq!(resultado.unwrap(), MENSAJE_RESPUESTA_NO_VALIDADA);
+        assert_eq!(runner.pasos_libres(), 8, "el cierre es el último paso");
+        let etapas = etapas(&eventos);
+        assert!(etapas.ends_with(&[EtapaArnes::AterrizajeForzoso, EtapaArnes::SalidaSegura]));
+        assert!(!etapas.contains(&EtapaArnes::Reintento));
+        // Por defecto (CLI) el cierre va sin catálogo y con la directiva al final
+        let vistas = runner.vistas_libres.lock().unwrap();
+        assert!(
+            vistas
+                .last()
+                .unwrap()
+                .last()
+                .unwrap()
+                .content
+                .contains("no puedes llamar a ninguna herramienta")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_cierre_tambien_cuando_no_queda_ninguna_herramienta_habilitada() {
+        /// Catálogo de una sola herramienta, que siempre falla
+        struct UnaQueFalla;
+
+        #[async_trait]
+        impl ToolServerPort for UnaQueFalla {
+            fn listar_herramientas(&self) -> Vec<ToolDefinition> {
+                ToolDefinition::lakehouse_tools()
+                    .into_iter()
+                    .filter(|h| h.name == SQL)
+                    .collect()
+            }
+
+            async fn ejecutar_herramienta(
+                &self,
+                call: &ToolCall,
+            ) -> Result<ToolResult, DomainError> {
+                Ok(ToolResult {
+                    call_id: call.id.clone(),
+                    tool_name: call.name.clone(),
+                    output: json!({ "error": "fallo simulado" }),
+                    is_error: true,
+                })
+            }
+        }
+
+        let runner = RunnerQueAnotaTools::con_guion(vec![
+            llamada_a(SQL, "c1"),
+            llamada_a(SQL, "c2"),
+            libre_final("No se ha podido consultar."),
+        ]);
+        let mut historial = vec![AgentMessage::user("Hola")];
+        let eventos: Eventos = Arc::default();
+        let destino = eventos.clone();
+        let resultado = AgentOrchestrator::new(runner.clone(), Arc::new(UnaQueFalla))
+            .procesar_turno(
+                &ClaudeModel::sonnet(),
+                &CenterId::new("planta_1").unwrap(),
+                &mut historial,
+                Some(Arc::new(move |e| destino.lock().unwrap().push(e))),
+            )
+            .await;
+        assert_eq!(resultado.unwrap(), "No se ha podido consultar.");
+        assert!(etapas(&eventos.lock().unwrap()).contains(&EtapaArnes::AterrizajeForzoso));
+        // Tercer paso: cierre por defecto, sin catálogo
+        assert_eq!(runner.catalogos()[2], Vec::<String>::new());
+    }
+
+    #[tokio::test]
+    async fn test_cierre_no_actua_en_un_turno_que_responde_antes() {
+        let runner =
+            RunnerQueAnotaTools::con_guion(vec![llamada_a(CATALOGO, "c1"), libre_final("Hecho.")]);
+        let mut historial = vec![AgentMessage::user("Hola")];
+        turno_que_anota(
+            runner.clone(),
+            ToolsQueFallan::nuevas(vec![]),
+            &mut historial,
+        )
+        .await
+        .unwrap();
+        assert!(runner.catalogos().iter().all(|c| *c == todas_las_tools()));
     }
 }

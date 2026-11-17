@@ -53,6 +53,23 @@ pub trait AgentRunnerPort: Send + Sync {
         )))
     }
 
+    /// Aterrizaje forzoso: pide la respuesta final sin poder llamar a ninguna herramienta.
+    /// `herramientas` es el catálogo del paso anterior: un transporte con `tool_choice: none` lo
+    /// mantiene (el historial con `tool_use` sigue siendo válido y la caché no cambia). Por
+    /// defecto el paso va sin herramientas; si aun así llega una llamada, el orquestador no la
+    /// ejecuta.
+    async fn ejecutar_turno_de_cierre(
+        &self,
+        modelo: &ClaudeModel,
+        system_prompt: &str,
+        historial: &[AgentMessage],
+        herramientas: &[ToolDefinition],
+    ) -> Result<AgentTurnOutput, DomainError> {
+        let _ = herramientas;
+        self.ejecutar_turno(modelo, system_prompt, historial, &[])
+            .await
+    }
+
     /// `true` si el transporte no puede forzar la llamada a una tool (`tool_choice` `auto`): el
     /// orquestador corrige entonces una vez la respuesta sin consulta en una intención que la
     /// exige. Por defecto `false`, y el comportamiento es el de siempre

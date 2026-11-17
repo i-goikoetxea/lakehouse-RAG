@@ -183,6 +183,19 @@ impl AgentRunnerPort for RunnerConmutable {
             .await
     }
 
+    async fn ejecutar_turno_de_cierre(
+        &self,
+        modelo: &ClaudeModel,
+        system_prompt: &str,
+        historial: &[AgentMessage],
+        herramientas: &[ToolDefinition],
+    ) -> Result<AgentTurnOutput, DomainError> {
+        let runner = Arc::clone(&self.0.actual().runner);
+        runner
+            .ejecutar_turno_de_cierre(modelo, system_prompt, historial, herramientas)
+            .await
+    }
+
     fn necesita_correccion_de_omision(&self) -> bool {
         self.0.actual().runner.necesita_correccion_de_omision()
     }

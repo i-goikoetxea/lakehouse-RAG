@@ -179,6 +179,23 @@ impl AnthropicMessagesRunner {
         }
     }
 
+    /// Petición del aterrizaje forzoso: igual que un paso normal, pero el modelo no puede llamar
+    /// a ninguna herramienta (`tool_choice: none`, admitido con thinking)
+    pub fn construir_peticion_de_cierre(
+        &self,
+        modelo: &ClaudeModel,
+        system_prompt: &str,
+        historial: &[AgentMessage],
+        herramientas: &[ToolDefinition],
+    ) -> PeticionMensajes {
+        let mut peticion =
+            self.construir_peticion(modelo, system_prompt, historial, herramientas, None);
+        if !peticion.tools.is_empty() {
+            peticion.tool_choice = Some(EleccionTool::None);
+        }
+        peticion
+    }
+
     fn mensajes_de(&self, historial: &[AgentMessage]) -> Vec<MensajeEntrada> {
         let turnos = self.turnos.lock().map(|t| t.clone()).unwrap_or_default();
         let mut mensajes: Vec<(&'static str, Vec<Value>)> = Vec::new();
@@ -398,6 +415,21 @@ impl AgentRunnerPort for AnthropicMessagesRunner {
         Ok(TurnoDirigido::Llamada(llamada))
     }
 
+    /// `tool_choice: none` con el mismo catálogo: sin `tools` la API rechaza un historial con
+    /// `tool_use`, y cambiar `tool_choice` no invalida la caché de `tools` y `system`
+    async fn ejecutar_turno_de_cierre(
+        &self,
+        modelo: &ClaudeModel,
+        system_prompt: &str,
+        historial: &[AgentMessage],
+        herramientas: &[ToolDefinition],
+    ) -> Result<AgentTurnOutput, DomainError> {
+        let peticion =
+            self.construir_peticion_de_cierre(modelo, system_prompt, historial, herramientas);
+        let respuesta = self.paso(&peticion, None, false).await?;
+        Ok(self.interpretar(&respuesta))
+    }
+
     fn necesita_correccion_de_omision(&self) -> bool {
         true
     }
@@ -474,4 +506,64 @@ fn texto_de(contenido: &[Value]) -> String {
         .join("")
         .trim()
         .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::cliente::{AnthropicHttpClient, ConfigClienteAnthropic};
+    use super::super::secreto::SecretApiKey;
+    use super::*;
+    use crate::application::dtos::tools::ToolCall;
+
+    fn runner() -> AnthropicMessagesRunner {
+        AnthropicMessagesRunner::new(
+            AnthropicHttpClient::new(
+                SecretApiKey::new("sk-ant-test-NO-ES-REAL-0000000000").unwrap(),
+                ConfigClienteAnthropic::procedencia(),
+            )
+            .unwrap(),
+        )
+    }
+
+    fn historial_con_tool_use() -> Vec<AgentMessage> {
+        vec![
+            AgentMessage::user("¿Cuántas filas hay?"),
+            AgentMessage::assistant_with_tools(vec![ToolCall {
+                id: "c1".into(),
+                name: "execute_athena_sql".into(),
+                arguments: json!({ "sql_query": "SELECT 1" }),
+            }]),
+            AgentMessage::tool_result("c1", "{\"filas\":42}"),
+        ]
+    }
+
+    #[test]
+    fn test_cierre_mantiene_el_catalogo_y_prohibe_llamar() {
+        let runner = runner();
+        let modelo = ClaudeModel::sonnet();
+        let herramientas = ToolDefinition::lakehouse_tools();
+        let historial = historial_con_tool_use();
+        let normal = runner.construir_peticion(&modelo, "s", &historial, &herramientas, None);
+        let cierre = runner.construir_peticion_de_cierre(&modelo, "s", &historial, &herramientas);
+        let cuerpo = serde_json::to_value(&cierre).unwrap();
+        assert_eq!(cuerpo["tool_choice"], json!({ "type": "none" }));
+        // Mismo `tools` y `system` que el paso anterior: la caché de ese prefijo se conserva
+        assert_eq!(
+            serde_json::to_value(&normal.tools).unwrap(),
+            serde_json::to_value(&cierre.tools).unwrap()
+        );
+        assert_eq!(normal.system, cierre.system);
+        assert_eq!(normal.thinking, cierre.thinking);
+    }
+
+    #[test]
+    fn test_cierre_sin_catalogo_no_envia_tool_choice() {
+        let cierre = runner().construir_peticion_de_cierre(
+            &ClaudeModel::sonnet(),
+            "s",
+            &[AgentMessage::user("Hola")],
+            &[],
+        );
+        assert!(cierre.tool_choice.is_none());
+    }
 }
