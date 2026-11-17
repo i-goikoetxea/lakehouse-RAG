@@ -18,8 +18,8 @@ use crate::application::use_cases::arnes_turno::procedencia::{
     MAXIMO_CIFRAS_PENDIENTES, cifras_verificadas, salidas_del_turno,
 };
 use crate::application::use_cases::arnes_turno::{
-    CitaRevisada, EleccionHerramienta, IntencionTurno, IntentDetector, PostInferenceGuard,
-    PreInferenceInterceptor, RegistroTurno, VerificadorPaginas, ViolacionArnes,
+    CitaRevisada, EleccionHerramienta, IntencionTurno, IntentDetector, LlamadasDelTurno,
+    PostInferenceGuard, PreInferenceInterceptor, RegistroTurno, VerificadorPaginas, ViolacionArnes,
 };
 use crate::application::use_cases::circuito_herramientas::CircuitoHerramientas;
 use crate::domain::errors::DomainError;
@@ -149,6 +149,8 @@ impl AgentOrchestrator {
         let mut consulto = false;
         // Errores consecutivos por herramienta: solo de este turno
         let mut circuito = CircuitoHerramientas::default();
+        // Llamadas ya ejecutadas (herramienta y argumentos canónicos): solo de este turno
+        let mut llamadas = LlamadasDelTurno::default();
 
         let mut paso = 0;
         while paso < self.max_steps {
@@ -296,12 +298,27 @@ impl AgentOrchestrator {
                             });
                         }
 
-                        let result = if circuito.abierto(&call.name) {
-                            circuito.resultado_bloqueado(call, &herramientas_disponibles)
+                        // `registrar`: lo que ve el arnés. Una repetición no se registra: el
+                        // original ya está en el registro y en el historial
+                        let (result, registrar) = if circuito.abierto(&call.name) {
+                            (
+                                circuito.resultado_bloqueado(call, &herramientas_disponibles),
+                                true,
+                            )
+                        } else if let Some(original_es_error) = llamadas.repetida(call) {
+                            // Hereda el desenlace del original: repetir un fallo es otro error
+                            if original_es_error {
+                                circuito.anotar(&call.name, true);
+                            }
+                            (
+                                LlamadasDelTurno::resultado_repetido(call, original_es_error),
+                                false,
+                            )
                         } else {
                             let result = self.tools.ejecutar_herramienta(call).await?;
                             circuito.anotar(&call.name, result.is_error);
-                            result
+                            llamadas.anotar(call, result.is_error);
+                            (result, true)
                         };
 
                         if let Some(cb) = &on_event {
@@ -316,7 +333,9 @@ impl AgentOrchestrator {
                             call.id.clone(),
                             result.output.to_string(),
                         ));
-                        registro.registrar(result);
+                        if registrar {
+                            registro.registrar(result);
+                        }
                     }
                 }
             }
@@ -2098,11 +2117,20 @@ mod tests {
         }
     }
 
+    /// Cada llamada lleva argumentos distintos (su id): ninguna es una repetición
     fn llamada_a(nombre: &str, id: &str) -> AgentTurnOutput {
+        llamada_con(
+            nombre,
+            id,
+            json!({ "centro_id": "planta_1", "consulta": id }),
+        )
+    }
+
+    fn llamada_con(nombre: &str, id: &str, argumentos: serde_json::Value) -> AgentTurnOutput {
         AgentTurnOutput::ToolCalls(vec![ToolCall {
             id: id.to_string(),
             name: nombre.to_string(),
-            arguments: json!({ "centro_id": "planta_1" }),
+            arguments: argumentos,
         }])
     }
 
@@ -2196,7 +2224,7 @@ mod tests {
                 .map(|id| ToolCall {
                     id: id.to_string(),
                     name: SQL.to_string(),
-                    arguments: json!({}),
+                    arguments: json!({ "consulta": id }),
                 })
                 .collect(),
         );
@@ -2310,5 +2338,227 @@ mod tests {
             resultados_de_tools(&eventos)[0].2,
             json!({ "error": "fallo simulado" })
         );
+    }
+
+    // --- Deduplicación de llamadas idénticas ---
+
+    #[tokio::test]
+    async fn test_repetida_identica_no_se_ejecuta_y_remite_al_resultado_previo() {
+        let tools = ToolsQueFallan::nuevas(vec![]);
+        let mut historial = vec![AgentMessage::user("Hola")];
+        let eventos = turno_con_circuito(
+            vec![
+                llamada_con(
+                    CATALOGO,
+                    "c1",
+                    json!({ "centro_id": "planta_1", "a": [1, 2] }),
+                ),
+                // Mismos argumentos con las claves en otro orden
+                llamada_con(
+                    CATALOGO,
+                    "c2",
+                    json!({ "a": [1, 2], "centro_id": "planta_1" }),
+                ),
+                AgentTurnOutput::FinalMessage("No consta.".to_string()),
+            ],
+            tools.clone(),
+            &mut historial,
+        )
+        .await;
+        assert_eq!(tools.ejecuciones_de(CATALOGO), 1);
+        let resultados = resultados_de_tools(&eventos);
+        assert_eq!(resultados.len(), 2, "la repetida también se ve en la GUI");
+        assert!(!resultados[1].1, "repetir un acierto no es un error");
+        assert!(
+            resultados[1].2["aviso"]
+                .as_str()
+                .unwrap()
+                .contains("ya ejecutada en este turno")
+        );
+        let ultimo = historial
+            .iter()
+            .rev()
+            .find(|m| m.role == AgentRole::Tool)
+            .unwrap();
+        assert_eq!(ultimo.tool_call_id.as_deref(), Some("c2"));
+    }
+
+    #[tokio::test]
+    async fn test_repetida_con_otros_argumentos_si_se_ejecuta() {
+        let tools = ToolsQueFallan::nuevas(vec![]);
+        let mut historial = vec![AgentMessage::user("Hola")];
+        turno_con_circuito(
+            vec![
+                llamada_con(CATALOGO, "c1", json!({ "centro_id": "planta_1" })),
+                llamada_con(CATALOGO, "c2", json!({ "centro_id": "planta_2" })),
+                AgentTurnOutput::FinalMessage("No consta.".to_string()),
+            ],
+            tools.clone(),
+            &mut historial,
+        )
+        .await;
+        assert_eq!(tools.ejecuciones_de(CATALOGO), 2);
+    }
+
+    #[tokio::test]
+    async fn test_repetir_un_fallo_cuenta_para_el_circuito() {
+        let tools = ToolsQueFallan::nuevas(vec![SQL]);
+        let mut historial = vec![AgentMessage::user("Hola")];
+        let misma = || llamada_con(SQL, "x", json!({ "sql_query": "SELECT 1" }));
+        let eventos = turno_con_circuito(
+            vec![
+                misma(),
+                misma(),
+                // Con otros argumentos: el circuito ya está abierto (fallo + repetición)
+                llamada_a(SQL, "c3"),
+                AgentTurnOutput::FinalMessage("No consta.".to_string()),
+            ],
+            tools.clone(),
+            &mut historial,
+        )
+        .await;
+        assert_eq!(tools.ejecuciones_de(SQL), 1);
+        let resultados = resultados_de_tools(&eventos);
+        assert!(resultados[1].1, "repetir un fallo sigue siendo un error");
+        assert!(
+            resultados[2].2["error"]
+                .as_str()
+                .unwrap()
+                .contains("deshabilitada")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_repetir_un_acierto_no_reinicia_el_circuito() {
+        // Falla solo la llamada cuyos argumentos traen "falla": true
+        struct SegunArgumentos(Mutex<usize>);
+        #[async_trait]
+        impl ToolServerPort for SegunArgumentos {
+            fn listar_herramientas(&self) -> Vec<ToolDefinition> {
+                ToolDefinition::lakehouse_tools()
+            }
+            async fn ejecutar_herramienta(
+                &self,
+                call: &ToolCall,
+            ) -> Result<ToolResult, DomainError> {
+                *self.0.lock().unwrap() += 1;
+                Ok(ToolResult {
+                    call_id: call.id.clone(),
+                    tool_name: call.name.clone(),
+                    output: json!({}),
+                    is_error: call.arguments["falla"] == json!(true),
+                })
+            }
+        }
+        let tools = Arc::new(SegunArgumentos(Mutex::new(0)));
+        let runner = Arc::new(MockRunnerScripted {
+            respuestas: Mutex::new(vec![
+                llamada_con(SQL, "ok", json!({ "q": "a" })),
+                llamada_con(SQL, "f1", json!({ "q": "b", "falla": true })),
+                // Repite el acierto: no es una ejecución nueva, no reinicia
+                llamada_con(SQL, "ok_bis", json!({ "q": "a" })),
+                llamada_con(SQL, "f2", json!({ "q": "c", "falla": true })),
+                // Dos errores reales seguidos: bloqueada aunque traiga un acierto seguro
+                llamada_con(SQL, "bloqueada", json!({ "q": "d" })),
+                AgentTurnOutput::FinalMessage("No consta.".to_string()),
+            ]),
+        });
+        let mut historial = vec![AgentMessage::user("Hola")];
+        AgentOrchestrator::new(runner, tools.clone())
+            .procesar_turno(
+                &ClaudeModel::sonnet(),
+                &CenterId::new("planta_1").unwrap(),
+                &mut historial,
+                None,
+            )
+            .await
+            .unwrap();
+        // Ejecutadas: ok, f1, f2. ok_bis es repetición y «bloqueada» no pasa el circuito
+        assert_eq!(*tools.0.lock().unwrap(), 3);
+    }
+
+    #[tokio::test]
+    async fn test_repetida_no_se_registra_y_el_arnes_ve_la_original() {
+        // Pregunta de dato concreto: con la original registrada, una cifra que sale de su
+        // salida pasa el guard aunque la última llamada fuera una repetición
+        struct ToolsConCifra;
+        #[async_trait]
+        impl ToolServerPort for ToolsConCifra {
+            fn listar_herramientas(&self) -> Vec<ToolDefinition> {
+                ToolDefinition::lakehouse_tools()
+            }
+            async fn ejecutar_herramienta(
+                &self,
+                call: &ToolCall,
+            ) -> Result<ToolResult, DomainError> {
+                Ok(ToolResult {
+                    call_id: call.id.clone(),
+                    tool_name: call.name.clone(),
+                    output: json!({ "valor": "125 bar" }),
+                    is_error: false,
+                })
+            }
+        }
+        let misma = || {
+            llamada_con(
+                "search_normative_context",
+                "s",
+                json!({ "centro_id": "planta_1", "query": "presión" }),
+            )
+        };
+        let runner = Arc::new(MockRunnerScripted {
+            respuestas: Mutex::new(vec![
+                misma(),
+                misma(),
+                AgentTurnOutput::FinalMessage("La presión es 125 bar.".to_string()),
+            ]),
+        });
+        let eventos: Arc<Mutex<Vec<AgentExecutionEvent>>> = Arc::default();
+        let destino = eventos.clone();
+        let mut historial = vec![AgentMessage::user(DATO_CONCRETO)];
+        let respuesta = AgentOrchestrator::new(runner, Arc::new(ToolsConCifra))
+            .procesar_turno(
+                &ClaudeModel::sonnet(),
+                &CenterId::new("planta_1").unwrap(),
+                &mut historial,
+                Some(Arc::new(move |e| destino.lock().unwrap().push(e))),
+            )
+            .await
+            .unwrap();
+        assert_eq!(respuesta, "La presión es 125 bar.");
+        let intervenciones = eventos
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|e| matches!(e, AgentExecutionEvent::ArnesIntervino { .. }))
+            .count();
+        assert_eq!(intervenciones, 0);
+    }
+
+    #[tokio::test]
+    async fn test_las_llamadas_ejecutadas_no_pasan_de_un_turno_a_otro() {
+        let tools = ToolsQueFallan::nuevas(vec![]);
+        let misma = || llamada_con(CATALOGO, "c", json!({ "centro_id": "planta_1" }));
+        let mut historial = vec![AgentMessage::user("Hola")];
+        turno_con_circuito(
+            vec![
+                misma(),
+                AgentTurnOutput::FinalMessage("No consta.".to_string()),
+            ],
+            tools.clone(),
+            &mut historial,
+        )
+        .await;
+        historial.push(AgentMessage::user("Otra vez"));
+        turno_con_circuito(
+            vec![
+                misma(),
+                AgentTurnOutput::FinalMessage("No consta.".to_string()),
+            ],
+            tools.clone(),
+            &mut historial,
+        )
+        .await;
+        assert_eq!(tools.ejecuciones_de(CATALOGO), 2);
     }
 }
