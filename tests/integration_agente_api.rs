@@ -11,8 +11,8 @@ use lakehouse_rag::application::dtos::agent::{
 use lakehouse_rag::application::dtos::tools::{LakehouseToolName, ToolCall, ToolDefinition};
 use lakehouse_rag::application::ports::agent_runner::{AgentRunnerPort, ObservadorTexto};
 use lakehouse_rag::infrastructure::llm::anthropic_api::{
-    AnthropicHttpClient, AnthropicMessagesRunner, ConfigClienteAnthropic, PoliticaReintentos,
-    SecretApiKey,
+    AnthropicHttpClient, AnthropicMessagesRunner, ConfigClienteAnthropic, PerfilApi,
+    PoliticaReintentos, SecretApiKey,
 };
 use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -33,6 +33,7 @@ fn config(base_url: &str) -> ConfigClienteAnthropic {
             espera_maxima: Duration::from_millis(2),
             tope_retry_after: Duration::from_millis(5),
         },
+        perfil: PerfilApi::ANTHROPIC,
     }
 }
 
@@ -618,4 +619,55 @@ async fn test_omision_corregida_de_punta_a_punta_por_la_api() {
     // La corrección sigue en su sitio en el paso siguiente (historial de solo añadir)
     let tercera = cuerpos[2]["messages"].as_array().unwrap();
     assert_eq!(tercera[0]["content"][1]["text"], bloques[1]["text"]);
+}
+
+/// El mismo runner con el perfil de FreeLLMAPI: el id del desplegable va tal cual, sin
+/// `thinking`, `cache_control`, `strict` ni `anthropic-beta`, y sin tarifas el coste no consta
+#[tokio::test]
+async fn test_con_el_perfil_freellmapi_el_runner_envia_lo_minimo_y_el_coste_no_consta() {
+    let servidor = servidor_con(&[
+        flujo_de_tools(
+            ["toolu_a", "toolu_b"],
+            ["search_normative_context", "search_normative_context"],
+        ),
+        flujo_de_texto(&["Ok"]),
+    ])
+    .await;
+    let runner = AnthropicMessagesRunner::new(
+        AnthropicHttpClient::new(
+            SecretApiKey::new("freellmapi-test-NO-ES-REAL-5678").unwrap(),
+            config(&servidor.uri()).con_perfil(PerfilApi::FREELLMAPI),
+        )
+        .unwrap(),
+    );
+    let modelo = ClaudeModel::new("auto:smart").unwrap();
+    for _ in 0..2 {
+        runner
+            .ejecutar_turno(
+                &modelo,
+                SISTEMA,
+                &[AgentMessage::user("x")],
+                &herramientas(),
+            )
+            .await
+            .unwrap();
+    }
+    let recibidas = servidor.received_requests().await.unwrap();
+    assert!(recibidas[0].headers.get("anthropic-beta").is_none());
+    assert_eq!(
+        recibidas[0].headers.get("anthropic-version").unwrap(),
+        "2023-06-01"
+    );
+    for cuerpo in cuerpos_recibidos(&servidor).await {
+        assert_eq!(cuerpo["model"], "auto:smart");
+        assert_eq!(cuerpo["tool_choice"], json!({"type": "auto"}));
+        let texto = cuerpo.to_string();
+        for ausente in ["thinking", "cache_control", "\"strict\""] {
+            assert!(!texto.contains(ausente), "{ausente} en {texto}");
+        }
+    }
+    let metricas = runner.tomar_metricas();
+    assert_eq!(metricas.len(), 2);
+    assert!(metricas.iter().all(|m| m.coste_usd.is_none()));
+    assert_eq!(metricas[0].output_tokens, 80, "los tokens sí se registran");
 }

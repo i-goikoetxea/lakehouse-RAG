@@ -51,12 +51,13 @@ fn valor(args: &[String], bandera: &str) -> Option<String> {
 
 fn argumentos() -> Result<Argumentos, String> {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let uso = "uso: --centro <id> --preguntas <entrada.jsonl> --modo api|cli --salida <salida.jsonl> [--modelo sonnet] [--repeticiones N]";
+    let uso = "uso: --centro <id> --preguntas <entrada.jsonl> --modo api|cli|freellmapi --salida <salida.jsonl> [--modelo sonnet] [--repeticiones N]";
     let requerido =
         |bandera: &str| valor(&args, bandera).ok_or_else(|| format!("falta {bandera}; {uso}"));
     let modo = match requerido("--modo")?.to_ascii_lowercase().as_str() {
         "api" => ModoLlm::Api,
         "cli" => ModoLlm::Cli,
+        "freellmapi" => ModoLlm::FreeLlmApi,
         otro => return Err(format!("modo desconocido «{otro}»; {uso}")),
     };
     Ok(Argumentos {
@@ -124,23 +125,22 @@ async fn main() -> Result<(), String> {
     let args = argumentos()?;
     let preguntas = leer_preguntas(&args.preguntas)?;
     let mut composicion = composicion_real(&ConfiguracionComposicion::desde_entorno());
-    let agente = agente_para(args.modo, ClaudeAgentConfig::default());
-    if args.modo == ModoLlm::Api && agente.api.is_none() {
-        return Err(
-            "modo api sin cliente: define ANTHROPIC_API_KEY o guárdala en el almacén del sistema"
-                .into(),
-        );
+    let url_freellmapi = composicion.freellmapi_url.clone();
+    let agente = agente_para(args.modo, &url_freellmapi, ClaudeAgentConfig::default());
+    if args.modo != ModoLlm::Cli && agente.api.is_none() {
+        return Err(format!(
+            "modo {} sin cliente: define su key en el entorno o guárdala en el almacén del sistema",
+            args.modo.nombre()
+        ));
     }
     composicion.dependencias.agente = agente.runner;
     composicion.dependencias.verificador_procedencia = Some(verificador_procedencia_para(
         args.modo,
+        &url_freellmapi,
         ClaudeAgentConfig::default().binary_path,
     ));
     let app = LakehouseApp::new(composicion.dependencias);
-    let modo = match args.modo {
-        ModoLlm::Api => "api",
-        ModoLlm::Cli => "cli",
-    };
+    let modo = args.modo.nombre();
 
     let mut salida = std::fs::File::create(&args.salida)
         .map_err(|e| format!("{}: {e}", args.salida.display()))?;

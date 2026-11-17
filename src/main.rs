@@ -21,7 +21,7 @@ use lakehouse_rag::infrastructure::bootstrap::{
 use lakehouse_rag::presentation::cli::ModoEjecucion;
 use lakehouse_rag::presentation::cli::proceso;
 use lakehouse_rag::presentation::gui::GuiController;
-use lakehouse_rag::presentation::gui::config_llm::MotorLlmSesion;
+use lakehouse_rag::presentation::gui::config_llm::MotorLlmVivo;
 
 fn main() -> anyhow::Result<()> {
     let modo = ModoEjecucion::desde_args(std::env::args());
@@ -64,16 +64,15 @@ fn main() -> anyhow::Result<()> {
             println!("Iniciando ventana nativa de escritorio con Tauri 2.0...");
             let configuracion = ConfiguracionComposicion::desde_entorno();
             let compuesta = componer_lakehouse_con_modo(&configuracion);
-            let motor = MotorLlmSesion {
+            let motor = MotorLlmVivo {
                 directorio_config: configuracion.directorio_config,
-                pedido_al_arrancar: compuesta.modo_pedido,
-                en_uso: compuesta.modo_en_uso,
+                motor: compuesta.motor,
             };
             println!(
                 "  • Motor del LLM: {:?} (pedido {:?}, origen {})",
-                motor.en_uso,
-                motor.pedido_al_arrancar.modo,
-                motor.pedido_al_arrancar.origen.nombre()
+                compuesta.modo_en_uso,
+                compuesta.modo_pedido.modo,
+                compuesta.modo_pedido.origen.nombre()
             );
             let app = compuesta.app;
             hidratar_en_arranque(&app);

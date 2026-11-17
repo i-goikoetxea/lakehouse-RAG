@@ -1,4 +1,5 @@
-//! Comandos de la API key para la ventana (Fase 5.2). El WebView solo escribe la key y lee un
+//! Comandos de las keys para la ventana (Fase 5.2): la de Anthropic y la de FreeLLMAPI, cada una
+//! con su variable de entorno y su entrada del almacén. El WebView solo escribe la key y lee un
 //! estado con máscara: nunca la recibe de vuelta, ni en el estado ni en un error.
 
 use serde::Serialize;
@@ -13,20 +14,16 @@ const LONGITUD_MAXIMA_KEY: usize = 512;
 #[serde(rename_all = "camelCase")]
 pub struct EstadoApiKeyDto {
     pub configurada: bool,
-    /// `sk-ant-…` y los 4 últimos caracteres
+    /// `sk-ant-…` o `freellmapi-…` y los 4 últimos caracteres
     pub mascara: Option<String>,
     /// De dónde sale la key que usará la app: `entorno`, `almacen` o ninguno
     pub origen: Option<String>,
-    /// Motor del LLM en uso en esta sesión (`api` o `cli`), tras el respaldo a `cli` sin key
+    /// Motor del LLM en uso en esta sesión (`cli`, `api` o `freellmapi`), tras el respaldo a `cli`
     pub modo_llm: String,
 }
 
 fn nombre_de_modo(modo: ModoLlm) -> String {
-    match modo {
-        ModoLlm::Api => "api",
-        ModoLlm::Cli => "cli",
-    }
-    .to_string()
+    modo.nombre().to_string()
 }
 
 /// Estado de la key: la variable de entorno manda sobre el almacén, como en la composición
@@ -124,5 +121,20 @@ mod tests {
             );
         }
         assert_eq!(almacen.leer().unwrap(), None);
+    }
+
+    #[test]
+    fn test_la_key_de_freellmapi_se_muestra_con_su_prefijo_y_sin_revelarse() {
+        let almacen = AlmacenEnMemoria::default();
+        let estado = guardar_api_key_en(
+            "freellmapi-PRUEBA-no-real-77aa".into(),
+            None,
+            &almacen,
+            ModoLlm::FreeLlmApi,
+        )
+        .unwrap();
+        assert_eq!(estado.mascara.as_deref(), Some("freellmapi-…77aa"));
+        assert_eq!(estado.modo_llm, "freellmapi");
+        assert!(!serde_json::to_string(&estado).unwrap().contains("PRUEBA"));
     }
 }

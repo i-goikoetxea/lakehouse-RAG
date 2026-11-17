@@ -18,9 +18,10 @@ use crate::application::use_cases::arnes_turno::procedencia::{
     MAXIMO_CIFRAS_PENDIENTES, cifras_verificadas, salidas_del_turno,
 };
 use crate::application::use_cases::arnes_turno::{
-    CitaRevisada, EleccionHerramienta, IntencionTurno, IntentDetector, PostInferenceGuard,
-    PreInferenceInterceptor, RegistroTurno, VerificadorPaginas, ViolacionArnes,
+    CitaRevisada, EleccionHerramienta, IntencionTurno, IntentDetector, LlamadasDelTurno,
+    PostInferenceGuard, PreInferenceInterceptor, RegistroTurno, VerificadorPaginas, ViolacionArnes,
 };
+use crate::application::use_cases::circuito_herramientas::CircuitoHerramientas;
 use crate::domain::errors::DomainError;
 use crate::domain::models::center::CenterId;
 
@@ -118,6 +119,20 @@ impl AgentOrchestrator {
         )
     }
 
+    /// Ejecutor y verificador que atenderán una consulta entera (los activos al empezarla)
+    fn motor_de_la_consulta(&self) -> MotorDeLaConsulta {
+        MotorDeLaConsulta {
+            runner: self
+                .runner
+                .motor_de_la_consulta()
+                .unwrap_or_else(|| Arc::clone(&self.runner)),
+            verificador: self
+                .verificador
+                .as_ref()
+                .map(|v| v.motor_de_la_consulta().unwrap_or_else(|| Arc::clone(v))),
+        }
+    }
+
     /// Ejecuta el bucle de turnos hasta obtener una respuesta final o agotar max_steps
     pub async fn procesar_turno(
         &self,
@@ -128,6 +143,8 @@ impl AgentOrchestrator {
     ) -> Result<String, DomainError> {
         let system_prompt = Self::build_system_prompt(centro_id);
         let herramientas_disponibles = self.tools.listar_herramientas();
+        // El motor se resuelve una vez: un cambio desde la ventana no afecta a esta consulta
+        let motor = self.motor_de_la_consulta();
         let pregunta = ultima_pregunta_del_operador(historial);
         let intencion = IntentDetector::clasificar(&pregunta);
         let plan = PreInferenceInterceptor::plan(&intencion);
@@ -139,26 +156,67 @@ impl AgentOrchestrator {
         let mut recordatorio: Option<RecordatorioReintento> = None;
         // Red de seguridad de los transportes sin `tool_choice` forzado (Fase 5.2)
         let corrige_omisiones =
-            self.runner.necesita_correccion_de_omision() && intencion != IntencionTurno::Ninguna;
+            motor.runner.necesita_correccion_de_omision() && intencion != IntencionTurno::Ninguna;
         let dirigida_del_plan = match plan.primer_paso {
             EleccionHerramienta::Dirigida(dirigida) => Some(dirigida),
             EleccionHerramienta::Libre => None,
         };
         let mut correccion: Option<RecordatorioReintento> = None;
         let mut consulto = false;
+        // Errores consecutivos por herramienta: solo de este turno
+        let mut circuito = CircuitoHerramientas::default();
+        // Llamadas ya ejecutadas (herramienta y argumentos canónicos): solo de este turno
+        let mut llamadas = LlamadasDelTurno::default();
+
+        // Tras `max_steps - MARGEN_DE_CIERRE` pasos sin respuesta final, el siguiente cierra
+        let paso_de_cierre = self
+            .max_steps
+            .checked_sub(MARGEN_DE_CIERRE)
+            .filter(|pasos| *pasos > 0)
+            .map(|pasos| pasos + 1);
 
         let mut paso = 0;
         while paso < self.max_steps {
             paso += 1;
 
+            // Sin las herramientas con el circuito abierto: el modelo no las ve en este turno
+            let visibles = herramientas_visibles(&herramientas_disponibles, &circuito);
+            // Aterrizaje forzoso: al límite de pasos, o sin ninguna herramienta habilitada
+            let sin_herramientas = visibles.is_empty() && !herramientas_disponibles.is_empty();
+            if Some(paso) == paso_de_cierre || sin_herramientas {
+                let catalogo: &[ToolDefinition] = if sin_herramientas {
+                    &herramientas_disponibles
+                } else {
+                    &visibles
+                };
+                let contexto = ContextoDelCierre {
+                    pregunta: &pregunta,
+                    intencion: &intencion,
+                    registro: &registro,
+                    consulto,
+                    avisos: [correccion.as_ref(), recordatorio.as_ref()],
+                };
+                return self
+                    .aterrizar(
+                        &motor,
+                        modelo,
+                        &system_prompt,
+                        historial,
+                        catalogo,
+                        contexto,
+                        &on_event,
+                    )
+                    .await;
+            }
             let emitido_en_vivo = Arc::new(AtomicBool::new(false));
             let turn_output = match std::mem::replace(&mut eleccion, EleccionHerramienta::Libre) {
                 EleccionHerramienta::Dirigida(dirigida) => {
                     self.paso_dirigido(
+                        &motor,
                         modelo,
                         &system_prompt,
                         historial,
-                        &herramientas_disponibles,
+                        &visibles,
                         dirigida,
                         &on_event,
                     )
@@ -168,10 +226,11 @@ impl AgentOrchestrator {
                     let vista =
                         vista_del_modelo(historial, &[correccion.as_ref(), recordatorio.as_ref()]);
                     self.paso_libre(
+                        &motor,
                         modelo,
                         &system_prompt,
                         &vista,
-                        &herramientas_disponibles,
+                        &visibles,
                         &on_event,
                         plan.retener_texto,
                         &emitido_en_vivo,
@@ -232,7 +291,7 @@ impl AgentOrchestrator {
                 AgentTurnOutput::FinalMessage(candidata) => {
                     let veredicto = self
                         .validar_con_procedencia(
-                            &candidata, &pregunta, &intencion, &registro, &on_event,
+                            &motor, &candidata, &pregunta, &intencion, &registro, &on_event,
                         )
                         .await;
                     let (respuesta, reemplazada) = match veredicto {
@@ -293,13 +352,37 @@ impl AgentOrchestrator {
                             });
                         }
 
-                        let result = self.tools.ejecutar_herramienta(call).await?;
+                        // `registrar`: lo que ve el arnés. Una repetición no se registra: el
+                        // original ya está en el registro y en el historial
+                        let redirigida =
+                            circuito.abierto(&call.name) || llamadas.repetida(call).is_some();
+                        let (result, registrar) = if circuito.abierto(&call.name) {
+                            (
+                                circuito.resultado_bloqueado(call, &herramientas_disponibles),
+                                true,
+                            )
+                        } else if let Some(original_es_error) = llamadas.repetida(call) {
+                            // Hereda el desenlace del original: repetir un fallo es otro error
+                            if original_es_error {
+                                circuito.anotar(&call.name, true);
+                            }
+                            (
+                                LlamadasDelTurno::resultado_repetido(call, original_es_error),
+                                false,
+                            )
+                        } else {
+                            let result = self.tools.ejecutar_herramienta(call).await?;
+                            circuito.anotar(&call.name, result.is_error);
+                            llamadas.anotar(call, result.is_error);
+                            (result, true)
+                        };
 
                         if let Some(cb) = &on_event {
                             cb(AgentExecutionEvent::ToolResultReceived {
                                 name: result.tool_name.clone(),
                                 result: result.output.clone(),
                                 is_error: result.is_error,
+                                redirigida,
                             });
                         }
 
@@ -307,7 +390,9 @@ impl AgentOrchestrator {
                             call.id.clone(),
                             result.output.to_string(),
                         ));
-                        registro.registrar(result);
+                        if registrar {
+                            registro.registrar(result);
+                        }
                     }
                 }
             }
@@ -324,6 +409,7 @@ impl AgentOrchestrator {
     /// violación de hoy (falla cerrada).
     async fn validar_con_procedencia(
         &self,
+        motor: &MotorDeLaConsulta,
         candidata: &str,
         pregunta: &str,
         intencion: &IntencionTurno,
@@ -339,7 +425,7 @@ impl AgentOrchestrator {
             violacion,
             ViolacionArnes::CifraSinAnclar { .. } | ViolacionArnes::CifraEnAbstencion { .. }
         );
-        let Some(verificador) = self.verificador.as_ref().filter(|_| es_de_cifras) else {
+        let Some(verificador) = motor.verificador.as_ref().filter(|_| es_de_cifras) else {
             return Err(violacion);
         };
         let pendientes =
@@ -389,10 +475,87 @@ impl AgentOrchestrator {
         )
     }
 
+    /// Aterrizaje forzoso: un último paso sin herramientas con la directiva de cerrar solo con
+    /// la evidencia del turno. La respuesta pasa por el guard como siempre, pero sin reintento:
+    /// si no lo supera, o si el modelo vuelve a pedir herramientas, sale el mensaje fijo
+    #[allow(clippy::too_many_arguments)]
+    async fn aterrizar(
+        &self,
+        motor: &MotorDeLaConsulta,
+        modelo: &ClaudeModel,
+        system_prompt: &str,
+        historial: &mut Vec<AgentMessage>,
+        herramientas: &[ToolDefinition],
+        contexto: ContextoDelCierre<'_>,
+        on_event: &Option<EventCallback>,
+    ) -> Result<String, DomainError> {
+        notificar_arnes(
+            on_event,
+            EtapaArnes::AterrizajeForzoso,
+            "límite de pasos cercano o sin herramientas habilitadas: se pide cerrar sin herramientas con la evidencia recuperada"
+                .to_string(),
+        );
+        let cierre = RecordatorioReintento::cierre(historial.len());
+        let [correccion, recordatorio] = contexto.avisos;
+        let vista = vista_del_modelo(historial, &[correccion, recordatorio, Some(&cierre)]);
+        let salida = motor
+            .runner
+            .ejecutar_turno_de_cierre(modelo, system_prompt, &vista, herramientas)
+            .await?;
+        let veredicto = match salida {
+            AgentTurnOutput::ToolCalls(_) => {
+                Err("el paso de cierre volvió a pedir herramientas".to_string())
+            }
+            AgentTurnOutput::FinalMessage(candidata)
+                if !contexto.consulto
+                    && ((motor.runner.necesita_correccion_de_omision()
+                        && *contexto.intencion != IntencionTurno::Ninguna)
+                        || PostInferenceGuard::afirma_sin_consulta(
+                            &candidata,
+                            contexto.pregunta,
+                            contexto.intencion,
+                            contexto.registro,
+                        )) =>
+            {
+                Err(ViolacionArnes::CapaDosNoIntentada.motivo())
+            }
+            AgentTurnOutput::FinalMessage(candidata) => self
+                .validar_con_procedencia(
+                    motor,
+                    &candidata,
+                    contexto.pregunta,
+                    contexto.intencion,
+                    contexto.registro,
+                    on_event,
+                )
+                .await
+                .map(|()| candidata)
+                .map_err(|violacion| violacion.motivo()),
+        };
+        let respuesta = match veredicto {
+            Ok(respuesta) => respuesta,
+            Err(motivo) => {
+                notificar_arnes(on_event, EtapaArnes::SalidaSegura, motivo);
+                MENSAJE_RESPUESTA_NO_VALIDADA.to_string()
+            }
+        };
+        let nota = nota_de_paginas(&respuesta, contexto.registro, on_event);
+        let respuesta = respuesta + nota.as_deref().unwrap_or_default();
+        // El paso de cierre no se emite en vivo: el texto sale una vez validado
+        if let Some(cb) = on_event {
+            cb(AgentExecutionEvent::TextDelta(respuesta.clone()));
+            cb(AgentExecutionEvent::Completed(respuesta.clone()));
+        }
+        historial.push(AgentMessage::assistant(respuesta.clone()));
+        Ok(respuesta)
+    }
+
     /// Sin llamada, el texto del modelo se descarta: el mensaje vacío lo juzga el guard
     /// (`CapaDosNoIntentada`), que aplica el mismo reintento único que a cualquier respuesta.
+    #[allow(clippy::too_many_arguments)]
     async fn paso_dirigido(
         &self,
+        motor: &MotorDeLaConsulta,
         modelo: &ClaudeModel,
         system_prompt: &str,
         historial: &[AgentMessage],
@@ -405,7 +568,7 @@ impl AgentOrchestrator {
             EtapaArnes::Directiva,
             format!("se solicita {}", dirigida.as_str()),
         );
-        let salida = self
+        let salida = motor
             .runner
             .ejecutar_turno_dirigido(modelo, system_prompt, historial, herramientas, dirigida)
             .await?;
@@ -426,6 +589,7 @@ impl AgentOrchestrator {
     #[allow(clippy::too_many_arguments)]
     async fn paso_libre(
         &self,
+        motor: &MotorDeLaConsulta,
         modelo: &ClaudeModel,
         system_prompt: &str,
         vista: &[AgentMessage],
@@ -442,17 +606,58 @@ impl AgentOrchestrator {
                     emitido.store(true, Ordering::SeqCst);
                     cb(AgentExecutionEvent::TextDelta(fragmento.to_string()))
                 });
-                self.runner
+                motor
+                    .runner
                     .ejecutar_turno_en_vivo(modelo, system_prompt, vista, herramientas, observador)
                     .await
             }
             _ => {
-                self.runner
+                motor
+                    .runner
                     .ejecutar_turno(modelo, system_prompt, vista, herramientas)
                     .await
             }
         }
     }
+}
+
+/// El catálogo sin las herramientas con el circuito abierto. Sin ninguna abierta es el mismo
+/// catálogo, sin copiarlo: el array `tools` no cambia y la caché de prompt de la API se conserva
+fn herramientas_visibles<'a>(
+    disponibles: &'a [ToolDefinition],
+    circuito: &CircuitoHerramientas,
+) -> Cow<'a, [ToolDefinition]> {
+    if disponibles.iter().any(|h| circuito.abierto(&h.name)) {
+        Cow::Owned(
+            disponibles
+                .iter()
+                .filter(|h| !circuito.abierto(&h.name))
+                .cloned()
+                .collect(),
+        )
+    } else {
+        Cow::Borrowed(disponibles)
+    }
+}
+
+/// Pasos que se reservan al final del turno: tras `max_steps - MARGEN_DE_CIERRE` pasos sin
+/// respuesta final, el siguiente es el aterrizaje forzoso (con 10, el noveno tras el octavo)
+pub const MARGEN_DE_CIERRE: usize = 2;
+
+/// Lo que el aterrizaje forzoso necesita del turno para juzgar la respuesta
+struct ContextoDelCierre<'a> {
+    pregunta: &'a str,
+    intencion: &'a IntencionTurno,
+    registro: &'a RegistroTurno,
+    consulto: bool,
+    /// Corrección de omisión y recordatorio de reintento vigentes, en la vista del modelo
+    avisos: [Option<&'a RecordatorioReintento>; 2],
+}
+
+/// Motor fijado al empezar una consulta
+struct MotorDeLaConsulta {
+    runner: Arc<dyn AgentRunnerPort>,
+    verificador: Option<Arc<dyn VerificadorProcedenciaPort>>,
 }
 
 /// Aviso al modelo que solo existe en su vista del reintento, nunca en el historial del operador
@@ -469,6 +674,16 @@ impl RecordatorioReintento {
                 "RECORDATORIO DEL SISTEMA: la respuesta anterior se rechazó y el operador no la ha visto. Motivo: {}. Llama en este turno a la herramienta que corresponda y usa solo cifras de sus salidas o de la pregunta. Si la herramienta no devuelve el dato, dilo.",
                 violacion.motivo()
             )),
+        }
+    }
+
+    /// Directiva del aterrizaje forzoso: determinista y sin nada del dominio
+    fn cierre(posicion: usize) -> Self {
+        Self {
+            posicion,
+            mensaje: AgentMessage::user(
+                "RECORDATORIO DEL SISTEMA: este turno ha agotado las consultas disponibles y en este paso no puedes llamar a ninguna herramienta. Responde ya al operador usando solo la evidencia que devolvieron las herramientas en este turno. Lo que no conste en esa evidencia, di que no consta; no lo completes con conocimiento propio ni con valores de referencia.",
+            ),
         }
     }
 
@@ -2039,5 +2254,1011 @@ mod tests {
             assert_eq!(respuesta.unwrap(), "Como te dije, son 125 bar.", "{modo}");
             assert_eq!(omisiones(&eventos), 0, "{modo}");
         }
+    }
+
+    // --- Circuit breaker por herramienta ---
+
+    /// Falla las herramientas cuyo nombre esté en `fallan` y anota cada ejecución real
+    struct ToolsQueFallan {
+        fallan: Vec<&'static str>,
+        ejecuciones: Mutex<Vec<String>>,
+    }
+
+    impl ToolsQueFallan {
+        fn nuevas(fallan: Vec<&'static str>) -> Arc<Self> {
+            Arc::new(Self {
+                fallan,
+                ejecuciones: Mutex::default(),
+            })
+        }
+
+        fn ejecuciones_de(&self, nombre: &str) -> usize {
+            self.ejecuciones
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|n| *n == nombre)
+                .count()
+        }
+    }
+
+    #[async_trait]
+    impl ToolServerPort for ToolsQueFallan {
+        fn listar_herramientas(&self) -> Vec<ToolDefinition> {
+            ToolDefinition::lakehouse_tools()
+        }
+
+        async fn ejecutar_herramienta(&self, call: &ToolCall) -> Result<ToolResult, DomainError> {
+            self.ejecuciones.lock().unwrap().push(call.name.clone());
+            let falla = self.fallan.contains(&call.name.as_str());
+            Ok(ToolResult {
+                call_id: call.id.clone(),
+                tool_name: call.name.clone(),
+                output: if falla {
+                    json!({ "error": "fallo simulado" })
+                } else {
+                    json!({ "ok": true })
+                },
+                is_error: falla,
+            })
+        }
+    }
+
+    /// Cada llamada lleva argumentos distintos (su id): ninguna es una repetición
+    fn llamada_a(nombre: &str, id: &str) -> AgentTurnOutput {
+        llamada_con(
+            nombre,
+            id,
+            json!({ "centro_id": "planta_1", "consulta": id }),
+        )
+    }
+
+    fn llamada_con(nombre: &str, id: &str, argumentos: serde_json::Value) -> AgentTurnOutput {
+        AgentTurnOutput::ToolCalls(vec![ToolCall {
+            id: id.to_string(),
+            name: nombre.to_string(),
+            arguments: argumentos,
+        }])
+    }
+
+    async fn turno_con_circuito(
+        guion: Vec<AgentTurnOutput>,
+        tools: Arc<ToolsQueFallan>,
+        historial: &mut Vec<AgentMessage>,
+    ) -> Vec<AgentExecutionEvent> {
+        let runner = Arc::new(MockRunnerScripted {
+            respuestas: Mutex::new(guion),
+        });
+        let eventos: Arc<Mutex<Vec<AgentExecutionEvent>>> = Arc::default();
+        let destino = eventos.clone();
+        AgentOrchestrator::new(runner, tools)
+            .procesar_turno(
+                &ClaudeModel::sonnet(),
+                &CenterId::new("planta_1").unwrap(),
+                historial,
+                Some(Arc::new(move |e| destino.lock().unwrap().push(e))),
+            )
+            .await
+            .unwrap();
+        eventos.lock().unwrap().clone()
+    }
+
+    fn resultados_de_tools(
+        eventos: &[AgentExecutionEvent],
+    ) -> Vec<(String, bool, serde_json::Value)> {
+        eventos
+            .iter()
+            .filter_map(|e| match e {
+                AgentExecutionEvent::ToolResultReceived {
+                    name,
+                    result,
+                    is_error,
+                    ..
+                } => Some((name.clone(), *is_error, result.clone())),
+                _ => None,
+            })
+            .collect()
+    }
+
+    const SQL: &str = "execute_athena_sql";
+    const CATALOGO: &str = "inspect_lakehouse_catalog";
+
+    #[tokio::test]
+    async fn test_circuito_tras_dos_errores_la_tercera_llamada_se_bloquea_sin_ejecutarse() {
+        let tools = ToolsQueFallan::nuevas(vec![SQL]);
+        let mut historial = vec![AgentMessage::user("Hola")];
+        let eventos = turno_con_circuito(
+            vec![
+                llamada_a(SQL, "c1"),
+                llamada_a(SQL, "c2"),
+                llamada_a(SQL, "c3"),
+                AgentTurnOutput::FinalMessage("No consta.".to_string()),
+            ],
+            tools.clone(),
+            &mut historial,
+        )
+        .await;
+        assert_eq!(tools.ejecuciones_de(SQL), 2);
+        let resultados = resultados_de_tools(&eventos);
+        assert_eq!(
+            resultados.len(),
+            3,
+            "la llamada bloqueada también se ve en la GUI"
+        );
+        let (nombre, es_error, salida) = &resultados[2];
+        assert_eq!(nombre, SQL);
+        assert!(*es_error);
+        let texto = salida["error"].as_str().unwrap();
+        assert!(texto.contains("deshabilitada"));
+        assert!(texto.contains(&format!("`{CATALOGO}`")));
+        assert!(!texto.contains(&format!("`{SQL}`,")));
+        // El modelo recibe el bloqueo como tool_result de su llamada
+        let ultimo_resultado = historial
+            .iter()
+            .rev()
+            .find(|m| m.role == AgentRole::Tool)
+            .unwrap();
+        assert_eq!(ultimo_resultado.tool_call_id.as_deref(), Some("c3"));
+        assert!(ultimo_resultado.content.contains("deshabilitada"));
+    }
+
+    #[tokio::test]
+    async fn test_circuito_tambien_bloquea_llamadas_paralelas_del_mismo_paso() {
+        let tools = ToolsQueFallan::nuevas(vec![SQL]);
+        let mut historial = vec![AgentMessage::user("Hola")];
+        let paralelas = AgentTurnOutput::ToolCalls(
+            ["p1", "p2", "p3"]
+                .iter()
+                .map(|id| ToolCall {
+                    id: id.to_string(),
+                    name: SQL.to_string(),
+                    arguments: json!({ "consulta": id }),
+                })
+                .collect(),
+        );
+        let eventos = turno_con_circuito(
+            vec![
+                paralelas,
+                AgentTurnOutput::FinalMessage("No consta.".to_string()),
+            ],
+            tools.clone(),
+            &mut historial,
+        )
+        .await;
+        assert_eq!(tools.ejecuciones_de(SQL), 2);
+        assert!(resultados_de_tools(&eventos)[2].1);
+    }
+
+    #[tokio::test]
+    async fn test_circuito_un_exito_intermedio_reinicia_el_contador_en_el_bucle() {
+        // La herramienta falla, acierta (otra herramienta no reinicia), y vuelve a fallar
+        struct Alterna(Mutex<Vec<bool>>);
+        #[async_trait]
+        impl ToolServerPort for Alterna {
+            fn listar_herramientas(&self) -> Vec<ToolDefinition> {
+                ToolDefinition::lakehouse_tools()
+            }
+            async fn ejecutar_herramienta(
+                &self,
+                call: &ToolCall,
+            ) -> Result<ToolResult, DomainError> {
+                let falla = self.0.lock().unwrap().remove(0);
+                Ok(ToolResult {
+                    call_id: call.id.clone(),
+                    tool_name: call.name.clone(),
+                    output: json!({}),
+                    is_error: falla,
+                })
+            }
+        }
+        let tools = Arc::new(Alterna(Mutex::new(vec![true, false, true, true])));
+        let runner = Arc::new(MockRunnerScripted {
+            respuestas: Mutex::new(vec![
+                llamada_a(SQL, "c1"),
+                llamada_a(SQL, "c2"),
+                llamada_a(SQL, "c3"),
+                llamada_a(SQL, "c4"),
+                AgentTurnOutput::FinalMessage("No consta.".to_string()),
+            ]),
+        });
+        let mut historial = vec![AgentMessage::user("Hola")];
+        AgentOrchestrator::new(runner, tools.clone())
+            .procesar_turno(
+                &ClaudeModel::sonnet(),
+                &CenterId::new("planta_1").unwrap(),
+                &mut historial,
+                None,
+            )
+            .await
+            .unwrap();
+        // Las cuatro se ejecutaron: el éxito de c2 reinició el contador
+        assert!(tools.0.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_circuito_el_contador_va_por_herramienta_en_el_bucle() {
+        let tools = ToolsQueFallan::nuevas(vec![SQL, CATALOGO]);
+        let mut historial = vec![AgentMessage::user("Hola")];
+        turno_con_circuito(
+            vec![
+                llamada_a(SQL, "c1"),
+                llamada_a(CATALOGO, "c2"),
+                llamada_a(SQL, "c3"),
+                llamada_a(CATALOGO, "c4"),
+                llamada_a(SQL, "c5"),
+                AgentTurnOutput::FinalMessage("No consta.".to_string()),
+            ],
+            tools.clone(),
+            &mut historial,
+        )
+        .await;
+        // Errores intercalados de otra herramienta no reinician: SQL se bloquea en c5
+        assert_eq!(tools.ejecuciones_de(SQL), 2);
+        assert_eq!(tools.ejecuciones_de(CATALOGO), 2);
+    }
+
+    #[tokio::test]
+    async fn test_circuito_el_estado_no_pasa_de_un_turno_a_otro() {
+        let tools = ToolsQueFallan::nuevas(vec![SQL]);
+        let mut historial = vec![AgentMessage::user("Hola")];
+        turno_con_circuito(
+            vec![
+                llamada_a(SQL, "c1"),
+                llamada_a(SQL, "c2"),
+                AgentTurnOutput::FinalMessage("No consta.".to_string()),
+            ],
+            tools.clone(),
+            &mut historial,
+        )
+        .await;
+        historial.push(AgentMessage::user("Otra vez"));
+        let eventos = turno_con_circuito(
+            vec![
+                llamada_a(SQL, "c3"),
+                AgentTurnOutput::FinalMessage("No consta.".to_string()),
+            ],
+            tools.clone(),
+            &mut historial,
+        )
+        .await;
+        assert_eq!(tools.ejecuciones_de(SQL), 3);
+        assert_eq!(
+            resultados_de_tools(&eventos)[0].2,
+            json!({ "error": "fallo simulado" })
+        );
+    }
+
+    // --- Deduplicación de llamadas idénticas ---
+
+    #[tokio::test]
+    async fn test_repetida_identica_no_se_ejecuta_y_remite_al_resultado_previo() {
+        let tools = ToolsQueFallan::nuevas(vec![]);
+        let mut historial = vec![AgentMessage::user("Hola")];
+        let eventos = turno_con_circuito(
+            vec![
+                llamada_con(
+                    CATALOGO,
+                    "c1",
+                    json!({ "centro_id": "planta_1", "a": [1, 2] }),
+                ),
+                // Mismos argumentos con las claves en otro orden
+                llamada_con(
+                    CATALOGO,
+                    "c2",
+                    json!({ "a": [1, 2], "centro_id": "planta_1" }),
+                ),
+                AgentTurnOutput::FinalMessage("No consta.".to_string()),
+            ],
+            tools.clone(),
+            &mut historial,
+        )
+        .await;
+        assert_eq!(tools.ejecuciones_de(CATALOGO), 1);
+        let resultados = resultados_de_tools(&eventos);
+        assert_eq!(resultados.len(), 2, "la repetida también se ve en la GUI");
+        assert!(!resultados[1].1, "repetir un acierto no es un error");
+        assert!(
+            resultados[1].2["aviso"]
+                .as_str()
+                .unwrap()
+                .contains("ya ejecutada en este turno")
+        );
+        let ultimo = historial
+            .iter()
+            .rev()
+            .find(|m| m.role == AgentRole::Tool)
+            .unwrap();
+        assert_eq!(ultimo.tool_call_id.as_deref(), Some("c2"));
+    }
+
+    #[tokio::test]
+    async fn test_repetida_con_otros_argumentos_si_se_ejecuta() {
+        let tools = ToolsQueFallan::nuevas(vec![]);
+        let mut historial = vec![AgentMessage::user("Hola")];
+        turno_con_circuito(
+            vec![
+                llamada_con(CATALOGO, "c1", json!({ "centro_id": "planta_1" })),
+                llamada_con(CATALOGO, "c2", json!({ "centro_id": "planta_2" })),
+                AgentTurnOutput::FinalMessage("No consta.".to_string()),
+            ],
+            tools.clone(),
+            &mut historial,
+        )
+        .await;
+        assert_eq!(tools.ejecuciones_de(CATALOGO), 2);
+    }
+
+    #[tokio::test]
+    async fn test_repetir_un_fallo_cuenta_para_el_circuito() {
+        let tools = ToolsQueFallan::nuevas(vec![SQL]);
+        let mut historial = vec![AgentMessage::user("Hola")];
+        let misma = || llamada_con(SQL, "x", json!({ "sql_query": "SELECT 1" }));
+        let eventos = turno_con_circuito(
+            vec![
+                misma(),
+                misma(),
+                // Con otros argumentos: el circuito ya está abierto (fallo + repetición)
+                llamada_a(SQL, "c3"),
+                AgentTurnOutput::FinalMessage("No consta.".to_string()),
+            ],
+            tools.clone(),
+            &mut historial,
+        )
+        .await;
+        assert_eq!(tools.ejecuciones_de(SQL), 1);
+        let resultados = resultados_de_tools(&eventos);
+        assert!(resultados[1].1, "repetir un fallo sigue siendo un error");
+        assert!(
+            resultados[2].2["error"]
+                .as_str()
+                .unwrap()
+                .contains("deshabilitada")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_repetir_un_acierto_no_reinicia_el_circuito() {
+        // Falla solo la llamada cuyos argumentos traen "falla": true
+        struct SegunArgumentos(Mutex<usize>);
+        #[async_trait]
+        impl ToolServerPort for SegunArgumentos {
+            fn listar_herramientas(&self) -> Vec<ToolDefinition> {
+                ToolDefinition::lakehouse_tools()
+            }
+            async fn ejecutar_herramienta(
+                &self,
+                call: &ToolCall,
+            ) -> Result<ToolResult, DomainError> {
+                *self.0.lock().unwrap() += 1;
+                Ok(ToolResult {
+                    call_id: call.id.clone(),
+                    tool_name: call.name.clone(),
+                    output: json!({}),
+                    is_error: call.arguments["falla"] == json!(true),
+                })
+            }
+        }
+        let tools = Arc::new(SegunArgumentos(Mutex::new(0)));
+        let runner = Arc::new(MockRunnerScripted {
+            respuestas: Mutex::new(vec![
+                llamada_con(SQL, "ok", json!({ "q": "a" })),
+                llamada_con(SQL, "f1", json!({ "q": "b", "falla": true })),
+                // Repite el acierto: no es una ejecución nueva, no reinicia
+                llamada_con(SQL, "ok_bis", json!({ "q": "a" })),
+                llamada_con(SQL, "f2", json!({ "q": "c", "falla": true })),
+                // Dos errores reales seguidos: bloqueada aunque traiga un acierto seguro
+                llamada_con(SQL, "bloqueada", json!({ "q": "d" })),
+                AgentTurnOutput::FinalMessage("No consta.".to_string()),
+            ]),
+        });
+        let mut historial = vec![AgentMessage::user("Hola")];
+        AgentOrchestrator::new(runner, tools.clone())
+            .procesar_turno(
+                &ClaudeModel::sonnet(),
+                &CenterId::new("planta_1").unwrap(),
+                &mut historial,
+                None,
+            )
+            .await
+            .unwrap();
+        // Ejecutadas: ok, f1, f2. ok_bis es repetición y «bloqueada» no pasa el circuito
+        assert_eq!(*tools.0.lock().unwrap(), 3);
+    }
+
+    #[tokio::test]
+    async fn test_repetida_no_se_registra_y_el_arnes_ve_la_original() {
+        // Pregunta de dato concreto: con la original registrada, una cifra que sale de su
+        // salida pasa el guard aunque la última llamada fuera una repetición
+        struct ToolsConCifra;
+        #[async_trait]
+        impl ToolServerPort for ToolsConCifra {
+            fn listar_herramientas(&self) -> Vec<ToolDefinition> {
+                ToolDefinition::lakehouse_tools()
+            }
+            async fn ejecutar_herramienta(
+                &self,
+                call: &ToolCall,
+            ) -> Result<ToolResult, DomainError> {
+                Ok(ToolResult {
+                    call_id: call.id.clone(),
+                    tool_name: call.name.clone(),
+                    output: json!({ "valor": "125 bar" }),
+                    is_error: false,
+                })
+            }
+        }
+        let misma = || {
+            llamada_con(
+                "search_normative_context",
+                "s",
+                json!({ "centro_id": "planta_1", "query": "presión" }),
+            )
+        };
+        let runner = Arc::new(MockRunnerScripted {
+            respuestas: Mutex::new(vec![
+                misma(),
+                misma(),
+                AgentTurnOutput::FinalMessage("La presión es 125 bar.".to_string()),
+            ]),
+        });
+        let eventos: Arc<Mutex<Vec<AgentExecutionEvent>>> = Arc::default();
+        let destino = eventos.clone();
+        let mut historial = vec![AgentMessage::user(DATO_CONCRETO)];
+        let respuesta = AgentOrchestrator::new(runner, Arc::new(ToolsConCifra))
+            .procesar_turno(
+                &ClaudeModel::sonnet(),
+                &CenterId::new("planta_1").unwrap(),
+                &mut historial,
+                Some(Arc::new(move |e| destino.lock().unwrap().push(e))),
+            )
+            .await
+            .unwrap();
+        assert_eq!(respuesta, "La presión es 125 bar.");
+        let intervenciones = eventos
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|e| matches!(e, AgentExecutionEvent::ArnesIntervino { .. }))
+            .count();
+        assert_eq!(intervenciones, 0);
+    }
+
+    #[tokio::test]
+    async fn test_las_llamadas_ejecutadas_no_pasan_de_un_turno_a_otro() {
+        let tools = ToolsQueFallan::nuevas(vec![]);
+        let misma = || llamada_con(CATALOGO, "c", json!({ "centro_id": "planta_1" }));
+        let mut historial = vec![AgentMessage::user("Hola")];
+        turno_con_circuito(
+            vec![
+                misma(),
+                AgentTurnOutput::FinalMessage("No consta.".to_string()),
+            ],
+            tools.clone(),
+            &mut historial,
+        )
+        .await;
+        historial.push(AgentMessage::user("Otra vez"));
+        turno_con_circuito(
+            vec![
+                misma(),
+                AgentTurnOutput::FinalMessage("No consta.".to_string()),
+            ],
+            tools.clone(),
+            &mut historial,
+        )
+        .await;
+        assert_eq!(tools.ejecuciones_de(CATALOGO), 2);
+    }
+
+    // --- Motor fijado al empezar la consulta ---
+
+    /// Como el runner conmutable de infraestructura: delega en el activo y lo da al empezar
+    struct RunnerQueCambia {
+        activo: Mutex<Arc<dyn AgentRunnerPort>>,
+    }
+
+    impl RunnerQueCambia {
+        fn activo(&self) -> Arc<dyn AgentRunnerPort> {
+            Arc::clone(&self.activo.lock().unwrap())
+        }
+    }
+
+    #[async_trait]
+    impl AgentRunnerPort for RunnerQueCambia {
+        async fn ejecutar_turno(
+            &self,
+            modelo: &ClaudeModel,
+            system_prompt: &str,
+            historial: &[AgentMessage],
+            herramientas: &[ToolDefinition],
+        ) -> Result<AgentTurnOutput, DomainError> {
+            self.activo()
+                .ejecutar_turno(modelo, system_prompt, historial, herramientas)
+                .await
+        }
+
+        fn motor_de_la_consulta(&self) -> Option<Arc<dyn AgentRunnerPort>> {
+            Some(self.activo())
+        }
+    }
+
+    /// Al ejecutar una herramienta, cambia el motor activo (el operador guarda otro a mitad)
+    struct ToolsQueCambianElMotor {
+        runner: Arc<RunnerQueCambia>,
+        siguiente: Mutex<Option<Arc<dyn AgentRunnerPort>>>,
+    }
+
+    #[async_trait]
+    impl ToolServerPort for ToolsQueCambianElMotor {
+        fn listar_herramientas(&self) -> Vec<ToolDefinition> {
+            ToolDefinition::lakehouse_tools()
+        }
+
+        async fn ejecutar_herramienta(&self, call: &ToolCall) -> Result<ToolResult, DomainError> {
+            if let Some(siguiente) = self.siguiente.lock().unwrap().take() {
+                *self.runner.activo.lock().unwrap() = siguiente;
+            }
+            Ok(ToolResult {
+                call_id: call.id.clone(),
+                tool_name: call.name.clone(),
+                output: json!({}),
+                is_error: false,
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn test_una_consulta_en_curso_no_cambia_de_motor_y_la_siguiente_si() {
+        let motor_a: Arc<dyn AgentRunnerPort> = Arc::new(MockRunnerScripted {
+            respuestas: Mutex::new(vec![
+                llamada_a(CATALOGO, "c1"),
+                AgentTurnOutput::FinalMessage("motor A".to_string()),
+            ]),
+        });
+        let motor_b: Arc<dyn AgentRunnerPort> = Arc::new(MockRunnerScripted {
+            respuestas: Mutex::new(vec![AgentTurnOutput::FinalMessage("motor B".to_string())]),
+        });
+        let runner = Arc::new(RunnerQueCambia {
+            activo: Mutex::new(motor_a),
+        });
+        let tools = Arc::new(ToolsQueCambianElMotor {
+            runner: Arc::clone(&runner),
+            siguiente: Mutex::new(Some(motor_b)),
+        });
+        let orquestador = AgentOrchestrator::new(runner, tools);
+        let centro = CenterId::new("planta_1").unwrap();
+        let mut historial = vec![AgentMessage::user("Hola")];
+        let primera = orquestador
+            .procesar_turno(&ClaudeModel::sonnet(), &centro, &mut historial, None)
+            .await
+            .unwrap();
+        assert_eq!(
+            primera, "motor A",
+            "el cambio a mitad no afecta a la consulta"
+        );
+        historial.push(AgentMessage::user("Otra"));
+        let segunda = orquestador
+            .procesar_turno(&ClaudeModel::sonnet(), &centro, &mut historial, None)
+            .await
+            .unwrap();
+        assert_eq!(segunda, "motor B");
+    }
+
+    // --- Herramientas retiradas del array `tools` ---
+
+    /// Guion fijo que anota los nombres del catálogo que recibe en cada paso
+    #[derive(Default)]
+    struct RunnerQueAnotaTools {
+        respuestas: Mutex<Vec<AgentTurnOutput>>,
+        catalogos: Mutex<Vec<Vec<String>>>,
+    }
+
+    impl RunnerQueAnotaTools {
+        fn con_guion(respuestas: Vec<AgentTurnOutput>) -> Arc<Self> {
+            Arc::new(Self {
+                respuestas: Mutex::new(respuestas),
+                ..Self::default()
+            })
+        }
+
+        fn catalogos(&self) -> Vec<Vec<String>> {
+            self.catalogos.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait]
+    impl AgentRunnerPort for RunnerQueAnotaTools {
+        async fn ejecutar_turno(
+            &self,
+            _modelo: &ClaudeModel,
+            _system_prompt: &str,
+            _historial: &[AgentMessage],
+            herramientas: &[ToolDefinition],
+        ) -> Result<AgentTurnOutput, DomainError> {
+            self.catalogos
+                .lock()
+                .unwrap()
+                .push(herramientas.iter().map(|h| h.name.clone()).collect());
+            Ok(self.respuestas.lock().unwrap().remove(0))
+        }
+    }
+
+    async fn turno_que_anota(
+        runner: Arc<RunnerQueAnotaTools>,
+        tools: Arc<ToolsQueFallan>,
+        historial: &mut Vec<AgentMessage>,
+    ) -> Result<String, DomainError> {
+        AgentOrchestrator::new(runner, tools)
+            .procesar_turno(
+                &ClaudeModel::sonnet(),
+                &CenterId::new("planta_1").unwrap(),
+                historial,
+                None,
+            )
+            .await
+    }
+
+    fn todas_las_tools() -> Vec<String> {
+        ToolDefinition::lakehouse_tools()
+            .into_iter()
+            .map(|h| h.name)
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn test_retirada_la_herramienta_bloqueada_sale_del_catalogo_del_resto_del_turno() {
+        let runner = RunnerQueAnotaTools::con_guion(vec![
+            llamada_a(SQL, "c1"),
+            llamada_a(SQL, "c2"),
+            llamada_a(CATALOGO, "c3"),
+            AgentTurnOutput::FinalMessage("No consta.".to_string()),
+        ]);
+        let mut historial = vec![AgentMessage::user("Hola")];
+        turno_que_anota(
+            runner.clone(),
+            ToolsQueFallan::nuevas(vec![SQL]),
+            &mut historial,
+        )
+        .await
+        .unwrap();
+        let catalogos = runner.catalogos();
+        assert_eq!(catalogos.len(), 4);
+        assert_eq!(catalogos[0], todas_las_tools());
+        assert_eq!(catalogos[1], todas_las_tools());
+        let sin_sql: Vec<String> = todas_las_tools().into_iter().filter(|n| n != SQL).collect();
+        assert_eq!(
+            catalogos[2], sin_sql,
+            "abierto el circuito, el modelo deja de verla"
+        );
+        assert_eq!(catalogos[3], sin_sql);
+    }
+
+    #[tokio::test]
+    async fn test_retirada_sin_fallos_el_catalogo_no_cambia_entre_pasos() {
+        let runner = RunnerQueAnotaTools::con_guion(vec![
+            llamada_a(SQL, "c1"),
+            llamada_a(CATALOGO, "c2"),
+            AgentTurnOutput::FinalMessage("Hecho.".to_string()),
+        ]);
+        let mut historial = vec![AgentMessage::user("Hola")];
+        turno_que_anota(
+            runner.clone(),
+            ToolsQueFallan::nuevas(vec![]),
+            &mut historial,
+        )
+        .await
+        .unwrap();
+        // El mismo array en cada paso: la caché de prompt de la API no se invalida
+        assert!(runner.catalogos().iter().all(|c| *c == todas_las_tools()));
+    }
+
+    #[tokio::test]
+    async fn test_retirada_un_solo_error_no_retira_la_herramienta() {
+        let runner = RunnerQueAnotaTools::con_guion(vec![
+            llamada_a(SQL, "c1"),
+            AgentTurnOutput::FinalMessage("No consta.".to_string()),
+        ]);
+        let mut historial = vec![AgentMessage::user("Hola")];
+        turno_que_anota(
+            runner.clone(),
+            ToolsQueFallan::nuevas(vec![SQL]),
+            &mut historial,
+        )
+        .await
+        .unwrap();
+        assert_eq!(runner.catalogos()[1], todas_las_tools());
+    }
+
+    #[tokio::test]
+    async fn test_retirada_la_herramienta_vuelve_en_el_turno_siguiente() {
+        let tools = ToolsQueFallan::nuevas(vec![SQL]);
+        let runner = RunnerQueAnotaTools::con_guion(vec![
+            llamada_a(SQL, "c1"),
+            llamada_a(SQL, "c2"),
+            AgentTurnOutput::FinalMessage("No consta.".to_string()),
+            AgentTurnOutput::FinalMessage("Hola.".to_string()),
+        ]);
+        let mut historial = vec![AgentMessage::user("Hola")];
+        turno_que_anota(runner.clone(), tools.clone(), &mut historial)
+            .await
+            .unwrap();
+        historial.push(AgentMessage::user("Otra"));
+        turno_que_anota(runner.clone(), tools, &mut historial)
+            .await
+            .unwrap();
+        let catalogos = runner.catalogos();
+        assert!(!catalogos[2].contains(&SQL.to_string()));
+        assert_eq!(catalogos[3], todas_las_tools());
+    }
+
+    #[tokio::test]
+    async fn test_retirada_si_el_modelo_la_llama_igualmente_sigue_bloqueada() {
+        let tools = ToolsQueFallan::nuevas(vec![SQL]);
+        let runner = RunnerQueAnotaTools::con_guion(vec![
+            llamada_a(SQL, "c1"),
+            llamada_a(SQL, "c2"),
+            llamada_a(SQL, "c3"),
+            AgentTurnOutput::FinalMessage("No consta.".to_string()),
+        ]);
+        let mut historial = vec![AgentMessage::user("Hola")];
+        turno_que_anota(runner, tools.clone(), &mut historial)
+            .await
+            .unwrap();
+        // El bloqueo queda de respaldo (p. ej. un modelo que alucina la herramienta retirada)
+        assert_eq!(tools.ejecuciones_de(SQL), 2);
+        let ultimo = historial
+            .iter()
+            .rev()
+            .find(|m| m.role == AgentRole::Tool)
+            .unwrap();
+        assert!(ultimo.content.contains("deshabilitada"));
+    }
+
+    // --- Aterrizaje forzoso ---
+
+    /// Pide siempre otra consulta distinta; el paso de cierre devuelve `cierre` y anota su vista
+    struct RunnerSinFin {
+        pasos: Mutex<usize>,
+        cierre: Mutex<Option<AgentTurnOutput>>,
+        vistas_de_cierre: Mutex<Vec<(Vec<AgentMessage>, Vec<String>)>>,
+    }
+
+    impl RunnerSinFin {
+        fn con_cierre(cierre: AgentTurnOutput) -> Arc<Self> {
+            Arc::new(Self {
+                pasos: Mutex::new(0),
+                cierre: Mutex::new(Some(cierre)),
+                vistas_de_cierre: Mutex::default(),
+            })
+        }
+    }
+
+    #[async_trait]
+    impl AgentRunnerPort for RunnerSinFin {
+        async fn ejecutar_turno(
+            &self,
+            _modelo: &ClaudeModel,
+            _system_prompt: &str,
+            _historial: &[AgentMessage],
+            _herramientas: &[ToolDefinition],
+        ) -> Result<AgentTurnOutput, DomainError> {
+            let mut pasos = self.pasos.lock().unwrap();
+            *pasos += 1;
+            Ok(llamada_a(CATALOGO, &format!("c{pasos}")))
+        }
+
+        async fn ejecutar_turno_de_cierre(
+            &self,
+            _modelo: &ClaudeModel,
+            _system_prompt: &str,
+            historial: &[AgentMessage],
+            herramientas: &[ToolDefinition],
+        ) -> Result<AgentTurnOutput, DomainError> {
+            self.vistas_de_cierre.lock().unwrap().push((
+                historial.to_vec(),
+                herramientas.iter().map(|h| h.name.clone()).collect(),
+            ));
+            Ok(self.cierre.lock().unwrap().take().expect("un solo cierre"))
+        }
+    }
+
+    async fn turno_sin_fin(
+        runner: Arc<RunnerSinFin>,
+        tools: Arc<ToolsQueFallan>,
+        historial: &mut Vec<AgentMessage>,
+    ) -> (Result<String, DomainError>, Vec<AgentExecutionEvent>) {
+        let eventos: Eventos = Arc::default();
+        let destino = eventos.clone();
+        let resultado = AgentOrchestrator::new(runner, tools)
+            .procesar_turno(
+                &ClaudeModel::sonnet(),
+                &CenterId::new("planta_1").unwrap(),
+                historial,
+                Some(Arc::new(move |e| destino.lock().unwrap().push(e))),
+            )
+            .await;
+        let eventos = eventos.lock().unwrap().clone();
+        (resultado, eventos)
+    }
+
+    #[tokio::test]
+    async fn test_cierre_tras_ocho_pasos_sin_respuesta_el_noveno_cierra_sin_herramientas() {
+        let runner = RunnerSinFin::con_cierre(libre_final("No consta en lo consultado."));
+        let tools = ToolsQueFallan::nuevas(vec![]);
+        let mut historial = vec![AgentMessage::user("Hola")];
+        let (resultado, eventos) =
+            turno_sin_fin(runner.clone(), tools.clone(), &mut historial).await;
+        assert_eq!(resultado.unwrap(), "No consta en lo consultado.");
+        assert_eq!(
+            *runner.pasos.lock().unwrap(),
+            AgentOrchestrator::DEFAULT_MAX_STEPS - MARGEN_DE_CIERRE
+        );
+        assert_eq!(tools.ejecuciones_de(CATALOGO), 8);
+        assert!(etapas(&eventos).contains(&EtapaArnes::AterrizajeForzoso));
+        assert!(eventos.contains(&AgentExecutionEvent::Completed(
+            "No consta en lo consultado.".into()
+        )));
+        let vistas = runner.vistas_de_cierre.lock().unwrap();
+        assert_eq!(vistas.len(), 1);
+        let (vista, catalogo) = &vistas[0];
+        // La directiva va al final de la vista y nunca al historial del operador
+        let directiva = vista.last().unwrap();
+        assert_eq!(directiva.role, AgentRole::User);
+        assert!(
+            directiva
+                .content
+                .contains("no puedes llamar a ninguna herramienta")
+        );
+        assert!(directiva.content.contains("no consta"));
+        assert!(!historial.iter().any(|m| m.content.contains("RECORDATORIO")));
+        // El catálogo es el del paso anterior: el transporte decide cómo prohibir las llamadas
+        assert_eq!(*catalogo, todas_las_tools());
+    }
+
+    #[tokio::test]
+    async fn test_cierre_que_vuelve_a_pedir_herramientas_acaba_en_la_salida_segura() {
+        let runner = RunnerSinFin::con_cierre(llamada_a(CATALOGO, "otra"));
+        let tools = ToolsQueFallan::nuevas(vec![]);
+        let mut historial = vec![AgentMessage::user("Hola")];
+        let (resultado, eventos) =
+            turno_sin_fin(runner.clone(), tools.clone(), &mut historial).await;
+        assert_eq!(resultado.unwrap(), MENSAJE_RESPUESTA_NO_VALIDADA);
+        // La llamada del cierre no se ejecuta y no hay más vueltas
+        assert_eq!(tools.ejecuciones_de(CATALOGO), 8);
+        assert_eq!(runner.vistas_de_cierre.lock().unwrap().len(), 1);
+        assert!(
+            etapas(&eventos).ends_with(&[EtapaArnes::AterrizajeForzoso, EtapaArnes::SalidaSegura])
+        );
+        assert_eq!(
+            historial.last().unwrap().content,
+            MENSAJE_RESPUESTA_NO_VALIDADA
+        );
+    }
+
+    #[tokio::test]
+    async fn test_cierre_que_no_supera_el_guard_no_reintenta() {
+        // Paso dirigido + 7 libres con consulta; el noveno (cierre) da una cifra sin anclar
+        let mut libres: Vec<AgentTurnOutput> = (0..7)
+            .map(|_| AgentTurnOutput::ToolCalls(vec![llamada_lookup()]))
+            .collect();
+        libres.push(libre_final("La temperatura mínima es 999 °C."));
+        let runner =
+            RunnerDelArnes::con_guion(vec![Ok(TurnoDirigido::Llamada(llamada_lookup()))], libres);
+        let mut historial = vec![AgentMessage::user(CRUZABLE)];
+        let (resultado, eventos) = turno_con_arnes(runner.clone(), &mut historial).await;
+        assert_eq!(resultado.unwrap(), MENSAJE_RESPUESTA_NO_VALIDADA);
+        assert_eq!(runner.pasos_libres(), 8, "el cierre es el último paso");
+        let etapas = etapas(&eventos);
+        assert!(etapas.ends_with(&[EtapaArnes::AterrizajeForzoso, EtapaArnes::SalidaSegura]));
+        assert!(!etapas.contains(&EtapaArnes::Reintento));
+        // Por defecto (CLI) el cierre va sin catálogo y con la directiva al final
+        let vistas = runner.vistas_libres.lock().unwrap();
+        assert!(
+            vistas
+                .last()
+                .unwrap()
+                .last()
+                .unwrap()
+                .content
+                .contains("no puedes llamar a ninguna herramienta")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_cierre_tambien_cuando_no_queda_ninguna_herramienta_habilitada() {
+        /// Catálogo de una sola herramienta, que siempre falla
+        struct UnaQueFalla;
+
+        #[async_trait]
+        impl ToolServerPort for UnaQueFalla {
+            fn listar_herramientas(&self) -> Vec<ToolDefinition> {
+                ToolDefinition::lakehouse_tools()
+                    .into_iter()
+                    .filter(|h| h.name == SQL)
+                    .collect()
+            }
+
+            async fn ejecutar_herramienta(
+                &self,
+                call: &ToolCall,
+            ) -> Result<ToolResult, DomainError> {
+                Ok(ToolResult {
+                    call_id: call.id.clone(),
+                    tool_name: call.name.clone(),
+                    output: json!({ "error": "fallo simulado" }),
+                    is_error: true,
+                })
+            }
+        }
+
+        let runner = RunnerQueAnotaTools::con_guion(vec![
+            llamada_a(SQL, "c1"),
+            llamada_a(SQL, "c2"),
+            libre_final("No se ha podido consultar."),
+        ]);
+        let mut historial = vec![AgentMessage::user("Hola")];
+        let eventos: Eventos = Arc::default();
+        let destino = eventos.clone();
+        let resultado = AgentOrchestrator::new(runner.clone(), Arc::new(UnaQueFalla))
+            .procesar_turno(
+                &ClaudeModel::sonnet(),
+                &CenterId::new("planta_1").unwrap(),
+                &mut historial,
+                Some(Arc::new(move |e| destino.lock().unwrap().push(e))),
+            )
+            .await;
+        assert_eq!(resultado.unwrap(), "No se ha podido consultar.");
+        assert!(etapas(&eventos.lock().unwrap()).contains(&EtapaArnes::AterrizajeForzoso));
+        // Tercer paso: cierre por defecto, sin catálogo
+        assert_eq!(runner.catalogos()[2], Vec::<String>::new());
+    }
+
+    #[tokio::test]
+    async fn test_cierre_no_actua_en_un_turno_que_responde_antes() {
+        let runner =
+            RunnerQueAnotaTools::con_guion(vec![llamada_a(CATALOGO, "c1"), libre_final("Hecho.")]);
+        let mut historial = vec![AgentMessage::user("Hola")];
+        turno_que_anota(
+            runner.clone(),
+            ToolsQueFallan::nuevas(vec![]),
+            &mut historial,
+        )
+        .await
+        .unwrap();
+        assert!(runner.catalogos().iter().all(|c| *c == todas_las_tools()));
+    }
+
+    // --- Marca de llamada redirigida (aviso discreto en la ventana) ---
+
+    fn redirigidas(eventos: &[AgentExecutionEvent]) -> Vec<bool> {
+        eventos
+            .iter()
+            .filter_map(|e| match e {
+                AgentExecutionEvent::ToolResultReceived { redirigida, .. } => Some(*redirigida),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn test_redirigida_marca_solo_las_llamadas_bloqueadas_o_repetidas() {
+        let tools = ToolsQueFallan::nuevas(vec![SQL]);
+        let mut historial = vec![AgentMessage::user("Hola")];
+        let repetida = json!({ "centro_id": "planta_1" });
+        let eventos = turno_con_circuito(
+            vec![
+                llamada_a(SQL, "c1"),
+                llamada_a(SQL, "c2"),
+                llamada_a(SQL, "c3"),
+                llamada_con(CATALOGO, "c4", repetida.clone()),
+                llamada_con(CATALOGO, "c5", repetida),
+                AgentTurnOutput::FinalMessage("No consta.".to_string()),
+            ],
+            tools,
+            &mut historial,
+        )
+        .await;
+        // Fallo, fallo, bloqueada, ejecutada, repetida
+        assert_eq!(redirigidas(&eventos), vec![false, false, true, false, true]);
     }
 }

@@ -231,9 +231,9 @@
       selectModelo.title = selectModelo.selectedOptions[0] ? selectModelo.selectedOptions[0].title : '';
     } catch (err) {
       vaciar(selectModelo);
-      selectModelo.appendChild(el('option', null, 'Claude Code no disponible'));
+      selectModelo.appendChild(el('option', null, 'Catálogo de modelos no disponible'));
       selectModelo.disabled = true;
-      registrar(`No se pudo obtener el catálogo de modelos de Claude Code: ${mensajeError(err)}`, 'error');
+      registrar(`No se pudo obtener el catálogo de modelos: ${mensajeError(err)}`, 'error');
     }
   }
 
@@ -670,8 +670,10 @@
       if (linea) {
         linea.pendiente = false;
         linea.nodo.classList.remove('en-curso');
-        if (datos.esError) linea.nodo.classList.add('fallo');
-        linea.nodo.querySelector('.estado').textContent = datos.esError ? '⚠' : '✓';
+        // Un error recuperable, un bloqueo o una repetición: el turno sigue por otra vía
+        const desvio = datos.esError || datos.redirigida;
+        if (desvio) linea.nodo.classList.add('redirigida');
+        linea.nodo.querySelector('.estado').textContent = desvio ? '↷' : '✓';
       }
     } else if (datos.tipo === 'turnoRetenido') {
       turno.retenido = true;
@@ -747,7 +749,9 @@
     const tools = data.toolsUsed || [];
     if (tools.length) {
       const bloque = el('div', 'tools-usadas');
-      tools.forEach((tool) => bloque.appendChild(lineaTool(tool)));
+      tools.filter((tool) => !esDesvio(tool)).forEach((tool) => bloque.appendChild(lineaTool(tool)));
+      const desvios = tools.filter(esDesvio);
+      if (desvios.length) bloque.appendChild(pillDesvios(desvios));
       mensaje.appendChild(bloque);
     }
 
@@ -802,6 +806,46 @@
     boton.type = 'button';
     boton.addEventListener('click', () => { pestanaElegidaPorUsuario = true; activarPestana(pestanaDeResultados(data)); });
     return boton;
+  }
+
+  /** Error recuperable de una tool, bloqueo del circuito o repetición: el turno siguió igualmente */
+  function esDesvio(tool) {
+    return tool.status !== 'ok' || tool.redirigida === true;
+  }
+
+  /** Los desvíos van juntos en un pill discreto, colapsado; al abrirlo, el detalle técnico completo */
+  function pillDesvios(desvios) {
+    const caja = el('details', 'desvios-tools');
+    const soloRepeticiones = desvios.every((t) => t.redirigida && t.status === 'ok');
+    const resumen = el('summary', 'pill-desvio', `${soloRepeticiones ? 'Consulta redirigida' : 'Vía alternativa'} · ${desvios.length}`);
+    resumen.title = 'Consultas que fallaron o no se ejecutaron; el asistente siguió por otra vía. Clic para ver el detalle';
+    caja.appendChild(resumen);
+    desvios.forEach((tool) => caja.appendChild(detalleDesvio(tool)));
+    return caja;
+  }
+
+  function detalleDesvio(tool) {
+    const bloque = el('div', 'desvio');
+    const cabecera = el('div', 'desvio-cabecera');
+    cabecera.appendChild(el('span', 'nombre', tool.name));
+    cabecera.appendChild(el('span', 'chip', tool.redirigida ? 'no ejecutada' : 'error'));
+    cabecera.appendChild(el('span', 'duracion', tool.duration));
+    bloque.appendChild(cabecera);
+    const aviso = textoDelAviso(tool.result);
+    if (aviso) bloque.appendChild(el('p', 'desvio-aviso', aviso));
+    bloque.appendChild(el('h5', 'texto-sutil', 'Parámetros'));
+    bloque.appendChild(el('pre', 'json', JSON.stringify(tool.args, null, 2)));
+    bloque.appendChild(el('h5', 'texto-sutil', 'Resultado'));
+    bloque.appendChild(el('pre', 'json', JSON.stringify(tool.result, null, 2)));
+    return bloque;
+  }
+
+  function textoDelAviso(resultado) {
+    if (resultado && typeof resultado === 'object') {
+      if (typeof resultado.error === 'string') return resultado.error;
+      if (typeof resultado.aviso === 'string') return resultado.aviso;
+    }
+    return '';
   }
 
   function lineaTool(tool) {
@@ -1107,13 +1151,15 @@
   // solo su máscara. El campo se vacía tras cada intento y la key no se guarda en ninguna variable.
   const dialogoConfig = $('dialogo-config');
   const campoKey = $('config-key-input');
-  const NOMBRE_MOTOR = { cli: 'CLI · claude -p', api: 'API de Messages' };
+  const campoKeyProxy = $('config-freellmapi-key-input');
+  const NOMBRE_MOTOR = { cli: 'CLI · claude -p', api: 'API de Messages', freellmapi: 'FreeLLMAPI · modelos gratuitos' };
   const ORIGEN_MODO = {
     entorno: 'lo fija la variable LAKEHOUSE_RAG_MODO_LLM',
     fichero: 'elegido aquí',
     por_defecto: 'valor por defecto',
   };
   const ORIGEN_KEY = { entorno: 'desde la variable ANTHROPIC_API_KEY', almacen: 'desde el almacén del sistema' };
+  const ORIGEN_KEY_PROXY = { entorno: 'desde la variable FREELLMAPI_API_KEY', almacen: 'desde el almacén del sistema' };
 
   function pintarModo(estado) {
     const enUso = $('config-en-uso');
@@ -1121,39 +1167,49 @@
     enUso.className = `chip chip-mono ${estado.respaldoCli ? 'chip-aviso' : 'chip-ok'}`;
     const elegido = estado.elegido || 'cli';
     document.querySelectorAll('input[name="config-modo"]').forEach((radio) => { radio.checked = radio.value === elegido; });
-    const pendiente = estado.pendienteDeReinicio ? ' · pendiente de reinicio' : '';
     $('config-al-reiniciar').textContent =
-      `Al reiniciar: ${NOMBRE_MOTOR[estado.alReiniciar] || estado.alReiniciar} (${ORIGEN_MODO[estado.origenAlReiniciar] || estado.origenAlReiniciar})${pendiente}.`;
+      `Pedido: ${NOMBRE_MOTOR[estado.alReiniciar] || estado.alReiniciar} (${ORIGEN_MODO[estado.origenAlReiniciar] || estado.origenAlReiniciar}). Se aplica al guardar; una pregunta en curso termina con el motor con que empezó.`;
     const avisos = $('config-avisos-modo');
     vaciar(avisos);
     estado.avisos.forEach((aviso) => avisos.appendChild(el('li', null, aviso)));
+    const campoUrl = $('config-freellmapi-url');
+    if (document.activeElement !== campoUrl) campoUrl.value = estado.freellmapiUrl || '';
   }
 
-  function pintarKey(estado) {
-    const chip = $('config-key-estado');
+  /** Pinta el estado de una key (Anthropic o FreeLLMAPI): solo la máscara, nunca la key */
+  function pintarEstadoKey(prefijo, origenes, estado) {
+    const chip = $(`${prefijo}-estado`);
     chip.textContent = estado.configurada ? 'Configurada' : 'Sin key';
     chip.className = `chip ${estado.configurada ? 'chip-ok' : 'chip-aviso'}`;
-    const mascara = $('config-key-mascara');
+    const mascara = $(`${prefijo}-mascara`);
     mascara.hidden = !estado.mascara;
     mascara.textContent = estado.mascara || '';
-    $('config-key-origen').textContent = estado.origen ? (ORIGEN_KEY[estado.origen] || estado.origen) : '';
+    $(`${prefijo}-origen`).textContent = estado.origen ? (origenes[estado.origen] || estado.origen) : '';
   }
+
+  function pintarKey(estado) { pintarEstadoKey('config-key', ORIGEN_KEY, estado); }
+  function pintarKeyProxy(estado) { pintarEstadoKey('config-freellmapi-key', ORIGEN_KEY_PROXY, estado); }
 
   async function cargarConfig() {
     try {
-      const [modo, key] = await Promise.all([invoke('estado_modo_llm'), invoke('estado_api_key')]);
+      const [modo, key, keyProxy] = await Promise.all([
+        invoke('estado_modo_llm'), invoke('estado_api_key'), invoke('estado_freellmapi_key'),
+      ]);
       pintarModo(modo);
       pintarKey(key);
+      pintarKeyProxy(keyProxy);
     } catch (err) {
       $('config-modo-error').textContent = `No se pudo leer la configuración: ${mensajeError(err)}`;
     }
   }
 
-  function vaciarCampoKey() { campoKey.value = ''; }
+  function vaciarCampoKey() { campoKey.value = ''; campoKeyProxy.value = ''; }
 
   $('btn-config').addEventListener('click', () => {
     $('config-modo-error').textContent = '';
     $('config-key-error').textContent = '';
+    $('config-freellmapi-key-error').textContent = '';
+    $('config-freellmapi-url-error').textContent = '';
     vaciarCampoKey();
     dialogoConfig.showModal();
     cargarConfig();
@@ -1168,7 +1224,8 @@
       try {
         const estado = await invoke('guardar_modo_llm', { modo: radio.value });
         pintarModo(estado);
-        registrar(`Motor elegido: ${NOMBRE_MOTOR[radio.value]}. Se aplica al reiniciar la app.`, 'ok');
+        registrar(`Motor en uso: ${NOMBRE_MOTOR[estado.enUso] || estado.enUso} (desde la próxima pregunta).`, 'ok');
+        await cargarModelos();
       } catch (err) {
         $('config-modo-error').textContent = mensajeError(err);
         await cargarConfig();
@@ -1187,14 +1244,56 @@
     boton.disabled = true;
     try {
       pintarKey(await invoke('guardar_api_key', { key: campoKey.value }));
-      registrar('API key guardada en el almacén del sistema. El motor se compone al arrancar: reinicia la app para usarla.', 'ok');
+      registrar('API key guardada en el almacén del sistema.', 'ok');
     } catch (err) {
       $('config-key-error').textContent = mensajeError(err);
     } finally {
       vaciarCampoKey();
       boton.disabled = false;
     }
-    await cargarConfig();
+    await Promise.all([cargarConfig(), cargarModelos()]);
+  });
+
+  // La key del proxy sigue el mismo camino que la de Anthropic: del campo al comando, sin variable
+  $('form-freellmapi-key').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const error = $('config-freellmapi-key-error');
+    error.textContent = '';
+    if (!campoKeyProxy.value.trim()) {
+      error.textContent = 'Pega la key de FreeLLMAPI antes de guardar.';
+      return;
+    }
+    const boton = $('btn-guardar-freellmapi-key');
+    boton.disabled = true;
+    try {
+      pintarKeyProxy(await invoke('guardar_freellmapi_key', { key: campoKeyProxy.value }));
+      registrar('Key de FreeLLMAPI guardada en el almacén del sistema.', 'ok');
+    } catch (err) {
+      error.textContent = mensajeError(err);
+    } finally {
+      campoKeyProxy.value = '';
+      boton.disabled = false;
+    }
+    await Promise.all([cargarConfig(), cargarModelos()]);
+  });
+
+  $('form-freellmapi-url').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const error = $('config-freellmapi-url-error');
+    error.textContent = '';
+    const boton = $('btn-guardar-freellmapi-url');
+    boton.disabled = true;
+    try {
+      const estado = await invoke('guardar_url_freellmapi', { url: $('config-freellmapi-url').value });
+      $('config-freellmapi-url').blur();
+      pintarModo(estado);
+      registrar('URL de FreeLLMAPI guardada.', 'ok');
+      await cargarModelos();
+    } catch (err) {
+      error.textContent = mensajeError(err);
+    } finally {
+      boton.disabled = false;
+    }
   });
 
   // 15. Arranque

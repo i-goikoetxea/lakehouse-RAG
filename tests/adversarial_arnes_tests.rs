@@ -19,7 +19,7 @@ use lakehouse_rag::application::dtos::tools::{
 use lakehouse_rag::application::ports::agent_runner::AgentRunnerPort;
 use lakehouse_rag::application::ports::tool_server::ToolServerPort;
 use lakehouse_rag::application::use_cases::agent_orchestrator::{
-    AgentOrchestrator, MENSAJE_RESPUESTA_NO_VALIDADA,
+    AgentOrchestrator, MARGEN_DE_CIERRE, MENSAJE_RESPUESTA_NO_VALIDADA,
 };
 use lakehouse_rag::application::use_cases::arnes_turno::{
     EleccionHerramienta, IntencionTurno, IntentDetector, PostInferenceGuard,
@@ -698,7 +698,7 @@ async fn test_adv_bucle_de_reintentos_nunca_supera_un_reintento() {
 }
 
 #[tokio::test]
-async fn test_adv_tools_sin_fin_tras_la_directiva_chocan_con_el_limite_de_pasos() {
+async fn test_adv_tools_sin_fin_tras_la_directiva_acaban_en_el_aterrizaje_forzoso() {
     let runner = RunnerGuionizado::nuevo(
         Some(TurnoDirigido::Llamada(lookup_valido())),
         vec![AgentTurnOutput::ToolCalls(vec![lookup_valido()])],
@@ -709,17 +709,22 @@ async fn test_adv_tools_sin_fin_tras_la_directiva_chocan_con_el_limite_de_pasos(
         PREGUNTA_CRUZABLE,
     )
     .await;
-    assert!(turno.resultado.is_err());
+    // El cierre vuelve a pedir herramientas: no se ejecutan y sale el mensaje fijo, sin bucle
+    assert_eq!(
+        turno.resultado.as_ref().unwrap(),
+        MENSAJE_RESPUESTA_NO_VALIDADA
+    );
     assert_eq!(
         runner.pasos_libres(),
-        AgentOrchestrator::DEFAULT_MAX_STEPS - 1
+        AgentOrchestrator::DEFAULT_MAX_STEPS - MARGEN_DE_CIERRE
     );
-    assert!(
-        !turno
-            .eventos
-            .iter()
-            .any(|e| matches!(e, AgentExecutionEvent::Completed(_)))
-    );
+    assert!(turno.eventos.iter().any(|e| matches!(
+        e,
+        AgentExecutionEvent::ArnesIntervino {
+            etapa: EtapaArnes::AterrizajeForzoso,
+            ..
+        }
+    )));
 }
 
 #[tokio::test]

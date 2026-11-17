@@ -12,13 +12,111 @@ use futures::StreamExt;
 
 use super::error::ErrorApiAnthropic;
 use super::flujo::{AporteEvento, LectorSse, MensajeEnFlujo};
-use super::mensajes::{PeticionMensajes, RespuestaMensajes};
+use super::mensajes::{ContenidoEntrada, PeticionMensajes, RespuestaMensajes};
 use super::secreto::SecretApiKey;
 
 pub const URL_BASE_POR_DEFECTO: &str = "https://api.anthropic.com";
 /// Versión de la API fijada (cabecera `anthropic-version`)
 pub const VERSION_API: &str = "2026-10-21";
+/// Versión documentada por FreeLLMAPI para su endpoint compatible con Anthropic
+pub const VERSION_API_FREELLMAPI: &str = "2023-06-01";
 const LONGITUD_MAXIMA_DETALLE: usize = 400;
+/// Tope de la respuesta de `GET /v1/models`: un catálogo legítimo ocupa unas decenas de KB
+const TAMANO_MAXIMO_CATALOGO: usize = 1024 * 1024;
+
+/// Qué admite el servidor de destino de la API de Messages. El cliente quita de cada petición lo
+/// que el perfil no admite justo antes de enviarla, así que el runner y la procedencia no se
+/// duplican (`docs/arquitectura/ssd_motor_freellmapi.md` §3.1)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PerfilApi {
+    /// Cabecera `anthropic-version`
+    pub version_api: &'static str,
+    pub thinking: bool,
+    pub cache_control: bool,
+    pub strict_tools: bool,
+    /// Cabecera `anthropic-beta`
+    pub betas: bool,
+    /// Traducir los alias de la CLI (`sonnet` → `claude-sonnet-5-5`); si no, el id va tal cual
+    pub alias_claude: bool,
+    /// Hay tarifas publicadas: si no, el coste es desconocido (`None`), nunca 0
+    pub tarifas: bool,
+    /// Sin `stop_reason` la respuesta falla cerrada. Anthropic siempre lo envía (el modo API no
+    /// cambia); un proxy puede omitirlo
+    pub exige_stop_reason: bool,
+}
+
+impl PerfilApi {
+    pub const ANTHROPIC: Self = Self {
+        version_api: VERSION_API,
+        thinking: true,
+        cache_control: true,
+        strict_tools: true,
+        betas: true,
+        alias_claude: true,
+        tarifas: true,
+        exige_stop_reason: false,
+    };
+
+    /// El proxy traduce a formato OpenAI: no documenta `thinking` ni `cache_control` y no
+    /// reenvía `anthropic-beta`. Desactivados de serie (medido en el SSD §2)
+    pub const FREELLMAPI: Self = Self {
+        version_api: VERSION_API_FREELLMAPI,
+        thinking: false,
+        cache_control: false,
+        strict_tools: false,
+        betas: false,
+        alias_claude: false,
+        tarifas: false,
+        exige_stop_reason: true,
+    };
+
+    /// La petición sin lo que el destino no admite
+    pub fn adaptar(&self, peticion: &PeticionMensajes) -> PeticionMensajes {
+        let mut adaptada = peticion.clone();
+        if !self.thinking {
+            adaptada.thinking = None;
+        }
+        if !self.betas {
+            adaptada.betas.clear();
+        }
+        if !self.strict_tools {
+            adaptada.tools.iter_mut().for_each(|t| t.strict = false);
+        }
+        if !self.cache_control {
+            adaptada
+                .system
+                .iter_mut()
+                .for_each(|b| b.cache_control = None);
+            adaptada
+                .tools
+                .iter_mut()
+                .for_each(|t| t.cache_control = None);
+            for mensaje in &mut adaptada.messages {
+                if let ContenidoEntrada::Bloques(bloques) = &mut mensaje.content {
+                    for bloque in bloques.iter_mut() {
+                        if let Some(campos) = bloque.as_object_mut() {
+                            campos.remove("cache_control");
+                        }
+                    }
+                }
+            }
+        }
+        adaptada
+    }
+}
+
+impl Default for PerfilApi {
+    fn default() -> Self {
+        Self::ANTHROPIC
+    }
+}
+
+/// Una entrada de `GET /v1/models` en formato Anthropic, sin validar todavía
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModeloListado {
+    pub id: String,
+    pub nombre_visible: Option<String>,
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct PoliticaReintentos {
@@ -67,6 +165,7 @@ pub struct ConfigClienteAnthropic {
     /// Máximo entre lecturas del socket
     pub timeout_lectura: Duration,
     pub reintentos: PoliticaReintentos,
+    pub perfil: PerfilApi,
 }
 
 impl ConfigClienteAnthropic {
@@ -77,6 +176,7 @@ impl ConfigClienteAnthropic {
             timeout_conexion: Duration::from_secs(10),
             timeout_lectura: Duration::from_secs(30),
             reintentos: PoliticaReintentos::default(),
+            perfil: PerfilApi::ANTHROPIC,
         }
     }
 
@@ -90,6 +190,11 @@ impl ConfigClienteAnthropic {
 
     pub fn con_base_url(mut self, base_url: impl Into<String>) -> Self {
         self.base_url = base_url.into();
+        self
+    }
+
+    pub fn con_perfil(mut self, perfil: PerfilApi) -> Self {
+        self.perfil = perfil;
         self
     }
 }
@@ -146,11 +251,72 @@ impl AnthropicHttpClient {
         format!("{}/v1/messages", self.config.base_url.trim_end_matches('/'))
     }
 
+    pub fn perfil(&self) -> PerfilApi {
+        self.config.perfil
+    }
+
+    /// `GET /v1/models?available=true` en formato Anthropic (con `anthropic-version`). Un solo
+    /// intento: lo pide la ventana y un error se muestra en vez de esperar
+    pub async fn listar_modelos(&self) -> Result<Vec<ModeloListado>, ErrorApiAnthropic> {
+        let url = format!(
+            "{}/v1/models?available=true",
+            self.config.base_url.trim_end_matches('/')
+        );
+        let respuesta = self
+            .http
+            .get(url)
+            .header("x-api-key", self.key.exponer())
+            .header("anthropic-version", self.config.perfil.version_api)
+            .send()
+            .await
+            .map_err(|e| {
+                ErrorApiAnthropic::RespuestaNoValida(format!(
+                    "sin conexión con el servidor: {}",
+                    self.sin_secreto(&e.to_string())
+                ))
+            })?;
+        let estado = respuesta.status();
+        let cuerpo = respuesta
+            .bytes()
+            .await
+            .map_err(|e| ErrorApiAnthropic::RespuestaNoValida(self.sin_secreto(&e.to_string())))?;
+        if !estado.is_success() {
+            let detalle = self.sin_secreto(&detalle_de_error(&String::from_utf8_lossy(&cuerpo)));
+            return Err(match clasificar_estado(estado, detalle.clone(), None) {
+                FalloIntento::Definitivo(error) => error,
+                FalloIntento::Reintentable { .. } => ErrorApiAnthropic::EstadoNoReintentable {
+                    estado: estado.as_u16(),
+                    detalle,
+                },
+            });
+        }
+        if cuerpo.len() > TAMANO_MAXIMO_CATALOGO {
+            return Err(ErrorApiAnthropic::RespuestaNoValida(
+                "el catálogo de modelos es desmesurado".into(),
+            ));
+        }
+        let valor: Value = serde_json::from_slice(&cuerpo)
+            .map_err(|e| ErrorApiAnthropic::RespuestaNoValida(format!("catálogo: {e}")))?;
+        let entradas = valor["data"].as_array().ok_or_else(|| {
+            ErrorApiAnthropic::RespuestaNoValida("el catálogo no trae `data`".into())
+        })?;
+        Ok(entradas
+            .iter()
+            .filter_map(|entrada| {
+                Some(ModeloListado {
+                    id: entrada["id"].as_str()?.to_string(),
+                    nombre_visible: entrada["display_name"].as_str().map(str::to_string),
+                })
+            })
+            .collect())
+    }
+
     /// Envía la petición con los reintentos de transporte y valida `stop_reason`
     pub async fn crear_mensaje(
         &self,
         peticion: &PeticionMensajes,
     ) -> Result<RespuestaConMetricas, ErrorApiAnthropic> {
+        let peticion = &self.config.perfil.adaptar(peticion);
         let inicio = Instant::now();
         let politica = &self.config.reintentos;
         let mut intentos = 0;
@@ -158,11 +324,12 @@ impl AnthropicHttpClient {
             intentos += 1;
             match self.un_intento(peticion).await {
                 Ok(respuesta) => {
-                    return validar_stop_reason(respuesta).map(|respuesta| RespuestaConMetricas {
-                        respuesta,
-                        intentos,
-                        latencia: inicio.elapsed(),
-                    });
+                    return validar_stop_reason(respuesta, self.config.perfil.exige_stop_reason)
+                        .map(|respuesta| RespuestaConMetricas {
+                            respuesta,
+                            intentos,
+                            latencia: inicio.elapsed(),
+                        });
                 }
                 Err(FalloIntento::Definitivo(error)) => return Err(error),
                 Err(FalloIntento::Reintentable {
@@ -195,7 +362,7 @@ impl AnthropicHttpClient {
         peticion: &PeticionMensajes,
         al_texto: ObservadorFragmentos<'_>,
     ) -> Result<RespuestaEnFlujo, ErrorApiAnthropic> {
-        let mut peticion = peticion.clone();
+        let mut peticion = self.config.perfil.adaptar(peticion);
         peticion.stream = true;
         let inicio = Instant::now();
         let politica = &self.config.reintentos;
@@ -204,13 +371,15 @@ impl AnthropicHttpClient {
             intentos += 1;
             match self.un_intento_en_flujo(&peticion, inicio, al_texto).await {
                 Ok((mensaje, ttft)) => {
-                    return validar_stop_reason_de(mensaje.stop_reason.as_deref()).map(|()| {
-                        RespuestaEnFlujo {
-                            mensaje,
-                            intentos,
-                            latencia: inicio.elapsed(),
-                            ttft,
-                        }
+                    return validar_stop_reason_de(
+                        mensaje.stop_reason.as_deref(),
+                        self.config.perfil.exige_stop_reason,
+                    )
+                    .map(|()| RespuestaEnFlujo {
+                        mensaje,
+                        intentos,
+                        latencia: inicio.elapsed(),
+                        ttft,
                     });
                 }
                 Err(FalloIntento::Definitivo(error)) => return Err(error),
@@ -247,7 +416,7 @@ impl AnthropicHttpClient {
             .http
             .post(self.url_mensajes())
             .header("x-api-key", self.key.exponer())
-            .header("anthropic-version", VERSION_API)
+            .header("anthropic-version", self.config.perfil.version_api)
             .header("accept", "text/event-stream");
         if !peticion.betas.is_empty() {
             envio = envio.header("anthropic-beta", peticion.betas.join(","));
@@ -347,7 +516,7 @@ impl AnthropicHttpClient {
             .http
             .post(self.url_mensajes())
             .header("x-api-key", self.key.exponer())
-            .header("anthropic-version", VERSION_API)
+            .header("anthropic-version", self.config.perfil.version_api)
             .json(peticion)
             .send()
             .await
@@ -429,14 +598,20 @@ fn clasificar_estado(
 /// `max_tokens` nunca es un resultado válido; `refusal` es una salida controlada
 fn validar_stop_reason(
     respuesta: RespuestaMensajes,
+    exige: bool,
 ) -> Result<RespuestaMensajes, ErrorApiAnthropic> {
-    validar_stop_reason_de(respuesta.stop_reason.as_deref()).map(|()| respuesta)
+    validar_stop_reason_de(respuesta.stop_reason.as_deref(), exige).map(|()| respuesta)
 }
 
-fn validar_stop_reason_de(stop_reason: Option<&str>) -> Result<(), ErrorApiAnthropic> {
+/// `max_tokens` y `refusal` nunca valen. Sin `stop_reason` no se sabe si la respuesta terminó:
+/// si el perfil lo exige (un proxy), falla cerrada
+fn validar_stop_reason_de(stop_reason: Option<&str>, exige: bool) -> Result<(), ErrorApiAnthropic> {
     match stop_reason {
         Some("max_tokens") => Err(ErrorApiAnthropic::RespuestaTruncada),
         Some("refusal") => Err(ErrorApiAnthropic::Rechazo),
+        None if exige => Err(ErrorApiAnthropic::RespuestaNoValida(
+            "la respuesta no trae stop_reason".into(),
+        )),
         _ => Ok(()),
     }
 }
@@ -464,6 +639,7 @@ mod tests {
                 espera_maxima: Duration::from_millis(5),
                 tope_retry_after: Duration::from_millis(50),
             },
+            perfil: PerfilApi::ANTHROPIC,
         }
     }
 
@@ -819,5 +995,170 @@ data: {e}
             "Wed, 21 Oct 2026 07:28:00 GMT".parse().unwrap(),
         );
         assert_eq!(leer_retry_after(&cabeceras), None);
+    }
+
+    fn cliente_freellmapi(servidor: &MockServer) -> AnthropicHttpClient {
+        AnthropicHttpClient::new(
+            SecretApiKey::new("freellmapi-test-NO-ES-REAL-1234").unwrap(),
+            config_rapida(&servidor.uri()).con_perfil(PerfilApi::FREELLMAPI),
+        )
+        .unwrap()
+    }
+
+    fn peticion_completa() -> PeticionMensajes {
+        let mut completa = peticion();
+        completa.system = vec![super::super::mensajes::BloqueSistema::texto(
+            "sistema",
+            Some(super::super::mensajes::ControlCache::efimera()),
+        )];
+        completa.messages = vec![MensajeEntrada::con_bloques(
+            "user",
+            vec![json!({"type":"text","text":"hola","cache_control":{"type":"ephemeral"}})],
+        )];
+        completa.tools = vec![super::super::mensajes::DefinicionTool {
+            name: "t".into(),
+            description: "d".into(),
+            input_schema: json!({"type":"object"}),
+            strict: true,
+            cache_control: Some(super::super::mensajes::ControlCache::efimera()),
+        }];
+        completa.thinking = Some(json!({"type":"adaptive"}));
+        completa.betas = vec!["beta-x".into()];
+        completa
+    }
+
+    #[test]
+    fn test_el_perfil_anthropic_no_toca_la_peticion() {
+        let completa = peticion_completa();
+        assert_eq!(PerfilApi::ANTHROPIC.adaptar(&completa), completa);
+    }
+
+    #[tokio::test]
+    async fn test_el_perfil_freellmapi_quita_lo_que_el_proxy_no_reenvia() {
+        let servidor = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/messages"))
+            .and(header("anthropic-version", VERSION_API_FREELLMAPI))
+            .respond_with(respuesta_sse(flujo_de_texto("Hola", "end_turn")))
+            .mount(&servidor)
+            .await;
+        cliente_freellmapi(&servidor)
+            .crear_mensaje_en_flujo(&peticion_completa(), &|_| {})
+            .await
+            .unwrap();
+        let recibidas = servidor.received_requests().await.unwrap();
+        let enviada = &recibidas[0];
+        assert!(enviada.headers.get("anthropic-beta").is_none());
+        let cuerpo = String::from_utf8_lossy(&enviada.body);
+        for ausente in ["thinking", "cache_control", "strict"] {
+            assert!(!cuerpo.contains(ausente), "{ausente} en {cuerpo}");
+        }
+        assert!(cuerpo.contains("\"stream\":true"), "{cuerpo}");
+    }
+
+    #[tokio::test]
+    async fn test_sin_stop_reason_falla_cerrada_con_el_perfil_freellmapi_y_anthropic_no_cambia() {
+        let servidor = MockServer::start().await;
+        let sin_stop = sse(&[
+            json!({"type":"message_start","message":{"id":"m","model":"auto","content":[]}}),
+            json!({"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}),
+            json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"417"}}),
+            json!({"type":"content_block_stop","index":0}),
+            json!({"type":"message_delta","delta":{}}),
+            json!({"type":"message_stop"}),
+        ]);
+        Mock::given(method("POST"))
+            .respond_with(respuesta_sse(sin_stop))
+            .mount(&servidor)
+            .await;
+        let resultado = cliente_freellmapi(&servidor)
+            .crear_mensaje_en_flujo(&peticion(), &|_| {})
+            .await;
+        assert!(
+            matches!(resultado, Err(ErrorApiAnthropic::RespuestaNoValida(_))),
+            "{resultado:?}"
+        );
+        let (anthropic, _) = en_flujo(&servidor, &peticion()).await;
+        assert!(anthropic.is_ok(), "el modo API no cambia: {anthropic:?}");
+        let servidor = MockServer::start().await;
+        let mut cuerpo = cuerpo_tool_use("end_turn");
+        cuerpo.as_object_mut().unwrap().remove("stop_reason");
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(cuerpo))
+            .mount(&servidor)
+            .await;
+        let error = cliente_freellmapi(&servidor)
+            .crear_mensaje(&peticion())
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(error, ErrorApiAnthropic::RespuestaNoValida(_)),
+            "{error:?}"
+        );
+        assert!(cliente(&servidor).crear_mensaje(&peticion()).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_listar_modelos_pide_los_disponibles_en_formato_anthropic() {
+        let servidor = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/models"))
+            .and(wiremock::matchers::query_param("available", "true"))
+            .and(header("anthropic-version", VERSION_API_FREELLMAPI))
+            .and(header("x-api-key", "freellmapi-test-NO-ES-REAL-1234"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": [
+                    {"type":"model","id":"auto","display_name":"Auto"},
+                    {"type":"model","id":"gemini-flash"},
+                    {"type":"model","display_name":"sin id"},
+                ],
+                "has_more": false,
+            })))
+            .mount(&servidor)
+            .await;
+        let modelos = cliente_freellmapi(&servidor)
+            .listar_modelos()
+            .await
+            .unwrap();
+        assert_eq!(
+            modelos,
+            vec![
+                ModeloListado {
+                    id: "auto".into(),
+                    nombre_visible: Some("Auto".into())
+                },
+                ModeloListado {
+                    id: "gemini-flash".into(),
+                    nombre_visible: None
+                },
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_listar_modelos_con_key_mala_o_proxy_caido_da_un_error_sin_la_key() {
+        let servidor = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(401).set_body_json(error_api(
+                "authentication_error",
+                "freellmapi-test-NO-ES-REAL-1234 no vale",
+            )))
+            .mount(&servidor)
+            .await;
+        let error = cliente_freellmapi(&servidor)
+            .listar_modelos()
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(error, ErrorApiAnthropic::Autenticacion),
+            "{error:?}"
+        );
+        let caido = AnthropicHttpClient::new(
+            SecretApiKey::new("freellmapi-test-NO-ES-REAL-1234").unwrap(),
+            config_rapida("http://127.0.0.1:1").con_perfil(PerfilApi::FREELLMAPI),
+        )
+        .unwrap();
+        let error = caido.listar_modelos().await.unwrap_err().to_string();
+        assert!(!error.contains("NO-ES-REAL"), "{error}");
     }
 }

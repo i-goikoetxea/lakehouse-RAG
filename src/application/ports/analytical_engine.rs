@@ -28,6 +28,14 @@ pub struct ResultadoConsultaLectura {
     pub truncado: bool,
 }
 
+/// Esquema de una tabla registrada en el motor: columnas con su tipo, en orden
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EsquemaTabla {
+    pub nombre: String,
+    /// (columna, tipo) tal como los declara el motor
+    pub columnas: Vec<(String, String)>,
+}
+
 /// Puerto que abstrae el motor analítico SQL en memoria y el aislamiento de centros
 #[async_trait]
 pub trait AnalyticalEnginePort: Send + Sync {
@@ -66,4 +74,10 @@ pub trait AnalyticalEnginePort: Send + Sync {
 
     /// Retorna la lista de tablas actualmente registradas en el contexto de sesión
     async fn listar_tablas_registradas(&self) -> Result<Vec<String>, DomainError>;
+
+    /// Esquemas reales de las tablas pedidas que estén registradas (las demás se omiten). Un
+    /// motor sin introspección devuelve una lista vacía
+    async fn esquemas_de_tablas(&self, _tablas: &[String]) -> Vec<EsquemaTabla> {
+        Vec::new()
+    }
 }

@@ -10,6 +10,10 @@ pub const VARIABLE_API_KEY: &str = "ANTHROPIC_API_KEY";
 /// Servicio y usuario de la entrada del almacén de credenciales del sistema
 pub const SERVICIO_KEYRING: &str = "lakehouse_rag";
 pub const USUARIO_KEYRING: &str = "anthropic_api_key";
+/// Variable de entorno de la key unificada del proxy FreeLLMAPI: manda sobre el almacén
+pub const VARIABLE_FREELLMAPI_KEY: &str = "FREELLMAPI_API_KEY";
+/// Entrada propia del almacén para la key de FreeLLMAPI, distinta de la de Anthropic
+pub const USUARIO_KEYRING_FREELLMAPI: &str = "freellmapi_api_key";
 const OCULTA: &str = "[REDACTED]";
 
 #[derive(Clone, PartialEq, Eq)]
@@ -56,19 +60,21 @@ impl SecretApiKey {
 }
 
 impl SecretApiKey {
-    /// Máscara para la GUI: el prefijo público `sk-ant-` (si lo tiene) y los 4 últimos caracteres
+    /// Máscara para la GUI: el prefijo público (`sk-ant-` o `freellmapi-`, si lo tiene) y los 4
+    /// últimos caracteres
     pub fn mascara_con_prefijo(&self) -> String {
-        let prefijo = if self.0.starts_with(PREFIJO_PUBLICO) {
-            PREFIJO_PUBLICO
-        } else {
-            ""
-        };
+        let prefijo = PREFIJOS_PUBLICOS
+            .iter()
+            .find(|p| self.0.starts_with(**p))
+            .copied()
+            .unwrap_or("");
         format!("{prefijo}{}", self.mascara())
     }
 }
 
-/// Prefijo común a todas las keys de la consola: no identifica ninguna
-const PREFIJO_PUBLICO: &str = "sk-ant-";
+/// Prefijos comunes a todas las keys de la consola de Anthropic y de FreeLLMAPI: no identifican
+/// ninguna
+const PREFIJOS_PUBLICOS: [&str; 2] = ["sk-ant-", "freellmapi-"];
 
 /// Dónde se guarda la key de la GUI. El de producción es el almacén del sistema; los tests usan
 /// uno en memoria y nunca tocan el del usuario
@@ -131,6 +137,15 @@ impl Default for AlmacenKeyring {
 }
 
 impl AlmacenKeyring {
+    /// La entrada de la key de FreeLLMAPI
+    pub fn freellmapi() -> Self {
+        Self::new(SERVICIO_KEYRING, USUARIO_KEYRING_FREELLMAPI)
+    }
+
+    pub fn usuario(&self) -> &str {
+        &self.usuario
+    }
+
     pub fn new(servicio: impl Into<String>, usuario: impl Into<String>) -> Self {
         Self {
             servicio: servicio.into(),
@@ -216,6 +231,17 @@ mod tests {
         assert_eq!(key.mascara_con_prefijo(), "sk-ant-…cdef");
         let otra = SecretApiKey::new("clave-sin-prefijo-1234").unwrap();
         assert_eq!(otra.mascara_con_prefijo(), "…1234");
+        let proxy = SecretApiKey::new("freellmapi-NO-ES-REAL-abcd9876").unwrap();
+        assert_eq!(proxy.mascara_con_prefijo(), "freellmapi-…9876");
+    }
+
+    #[test]
+    fn test_la_key_de_freellmapi_tiene_su_propia_entrada_en_el_almacen() {
+        assert_eq!(AlmacenKeyring::freellmapi().usuario(), "freellmapi_api_key");
+        assert_ne!(
+            AlmacenKeyring::freellmapi().usuario(),
+            AlmacenKeyring::default().usuario()
+        );
     }
 
     #[test]

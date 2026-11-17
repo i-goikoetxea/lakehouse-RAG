@@ -134,6 +134,7 @@ async fn test_el_turno_emite_herramientas_y_texto_en_orden_y_devuelve_el_payload
                 turno_id: "turno-1".into(),
                 nombre: "query_operational_matrix".into(),
                 es_error: false,
+                redirigida: false,
             },
             ChatStreamEvento::Texto {
                 turno_id: "turno-1".into(),
@@ -154,10 +155,11 @@ fn test_el_evento_se_serializa_en_camel_case_con_su_tipo() {
         turno_id: "t".into(),
         nombre: "lookup_double_entry_table".into(),
         es_error: true,
+        redirigida: false,
     };
     assert_eq!(
         serde_json::to_value(&evento).unwrap(),
-        json!({ "tipo": "herramientaFin", "turnoId": "t", "nombre": "lookup_double_entry_table", "esError": true })
+        json!({ "tipo": "herramientaFin", "turnoId": "t", "nombre": "lookup_double_entry_table", "esError": true, "redirigida": false })
     );
 }
 

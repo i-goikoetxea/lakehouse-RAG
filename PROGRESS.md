@@ -1698,3 +1698,59 @@
 - [x] Ejecutable de producción con `cargo tauri build` en la rama.
 
 **Medido:** suite **1249/0/36** (base 1218/0/36), sumando los binarios repetidos a la primera pasada sin repetir la suite entera. `fmt` y `clippy`: limpios.
+
+### Sesión Motor FreeLLMAPI (2026-11-17): tercer motor del LLM
+
+**Estado: `[INTEGRADO]` en `main` (2026-11-17), junto con el blindaje para modelos ligeros (sección siguiente).** Rama `claude/motor-freellmapi-4d79f4`, desde `main` `d3986f3`. Contrato: `docs/arquitectura/ssd_motor_freellmapi.md`. Informe: `benchmarks/informes/motor_freellmapi_20261117.md`. No se ha leído el set oculto.
+
+**Errores y límites (primero):**
+- **Calidad sin medir.** El humo real dio 3/3 en 3 preguntas sintéticas propias: solo prueba el circuito.
+- **Tope del humo superado en 1:** 10 llamadas del agente. Una pregunta abierta encadenó 6 pasos.
+- **Sin comprobar en real:** el Nivel 2 con `auto:smart`, el modal, el desplegable en la ventana y `keyring`.
+- **Suite completa no pasada,** por decisión del usuario. Solo los tests dirigidos.
+- **TDD sin fase roja observada.** Los tests se escribieron antes, pero se ejecutaron ya en verde.
+- **Incidente:** un `cargo build --all-targets` saturó el disco D:. A partir de ahí, solo targets concretos con `-j 2`.
+
+**Cambios:**
+- [x] `ClaudeModel` admite `:` (`auto:smart`).
+- [x] `PerfilApi` en `ConfigClienteAnthropic`:
+  - el perfil FreeLLMAPI quita `thinking`, `cache_control`, `strict` y `anthropic-beta`;
+  - envía `anthropic-version: 2023-06-01` y los ids tal cual;
+  - el coste queda desconocido y `stop_reason` ausente falla cerrado.
+  - **El perfil Anthropic no cambia nada.**
+- [x] `ModoLlm::FreeLlmApi`:
+  - `llm_config.json` guarda también la URL, validada, con `http://127.0.0.1:31415` por defecto;
+  - la key va en `FREELLMAPI_API_KEY` o en la entrada `keyring` `freellmapi_api_key`, y cada motor lee solo la suya;
+  - el catálogo sale de `GET /v1/models?available=true`, con `auto` arriba;
+  - la procedencia usa `auto:smart`.
+- [x] GUI:
+  - opción FreeLLMAPI con el aviso de terceros;
+  - URL editable y key con máscara `freellmapi-…`;
+  - el desplegable avisa si el proxy no responde.
+- [x] Humo: `humo_agente_api --motor freellmapi`. `ab_agente --modo freellmapi`.
+
+**Medido:**
+- `--lib` filtrado: 83/0/1. `integration_agente_api`: 12/12. `adversarial_api_key_gui`: 1/1. `gui_config_llm`: 8/8.
+- `clippy --all-targets -D warnings`: limpio. `fmt`: aplicado.
+- Ejecutable de producción (`cargo tauri build`, 24 min con 2 jobs): `D:\Proyectos\lakehouse RAG\.claude\worktrees\motor-freellmapi-4d79f4\target\release\lakehouse_rag.exe`, con `pdfium.dll` al lado.
+
+### Sesión Blindaje para modelos ligeros (2026-11-17)
+
+**Estado: `[INTEGRADO]` en `main`.** Rama `claude/circuit-breaker-herramientas-6c3d9a`, que sale de la del motor FreeLLMAPI. Informe: `benchmarks/informes/blindaje_modelos_ligeros_20261117.md`. No se ha leído el set oculto.
+
+**Errores y límites (primero):**
+- **Calidad sin medir con un set.** Lo validó en vivo el usuario, con modelos locales o gratuitos y con Haiku, sin regresión en sus pruebas.
+- **El replay no ejercita el bucle de herramientas.** Por eso no cubre el circuito, la deduplicación ni el aterrizaje forzoso.
+- **Pendiente:** la procedencia en sesiones de varios turnos solo contrasta las cifras con el turno actual (informe §4).
+
+**Cambios** (un commit por ajuste):
+- [x] Circuit breaker por herramienta: 2 errores seguidos la bloquean y la retiran de `tools` durante el resto del turno.
+- [x] Diagnóstico de esquema en los errores de parseo y planificación de `execute_athena_sql`.
+- [x] Deduplicación de llamadas idénticas dentro del turno.
+- [x] Aterrizaje forzoso en la iteración 8 de 10, sin herramientas y con una sola pasada por el guard.
+- [x] Cambio de motor sin reiniciar la app.
+- [x] Avisos de herramienta recuperables como pill ámbar colapsado.
+
+**Medido:**
+- Suite completa: **1.323 en verde, 0 fallos y 36 ignorados.** Antes del arreglo hubo 3 fallos: uno de entorno (`pdfium.dll`) y el texto de anclaje de un test de `gui_config_llm`.
+- Replay ciego: **0 cambios en 278 filas** frente a `main` `d3986f3`.

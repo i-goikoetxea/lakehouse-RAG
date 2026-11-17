@@ -17,10 +17,11 @@ use datafusion::sql::sqlparser::ast::Statement as SentenciaSql;
 use datafusion::sql::sqlparser::dialect::GenericDialect;
 
 use crate::application::ports::analytical_engine::{
-    AnalyticalEnginePort, PoliticaConsultaLectura, ResultadoConsultaLectura,
+    AnalyticalEnginePort, EsquemaTabla, PoliticaConsultaLectura, ResultadoConsultaLectura,
 };
 use crate::domain::errors::DomainError;
 use crate::domain::models::center::CenterId;
+use datafusion::sql::TableReference;
 
 /// Adaptador que encapsula SessionContext de Apache DataFusion garantizando
 /// aislamiento de centros y consultas SQL analíticas de solo lectura.
@@ -87,7 +88,7 @@ impl DataFusionEngine {
     /// DataFusion clasifica `COPY`, DDL, DML, `EXPLAIN`, `SET`… como otras sentencias.
     fn parsear_unica_consulta(sql: &str) -> Result<SentenciaDf, DomainError> {
         let mut sentencias = DFParser::parse_sql_with_dialect(sql, &GenericDialect {})
-            .map_err(|e| DomainError::QueryError(format!("SQL no válido: {e}")))?;
+            .map_err(|e| DomainError::SqlNoInterpretable(format!("SQL no válido: {e}")))?;
         if sentencias.len() != 1 {
             return Err(DomainError::QueryError(format!(
                 "Se admite exactamente una sentencia SQL (se recibieron {})",
@@ -142,10 +143,9 @@ impl DataFusionEngine {
     ) -> Result<DataFrame, DomainError> {
         let sentencia = Self::parsear_unica_consulta(sql)?;
         let estado = self.context.state();
-        let plan = estado
-            .statement_to_plan(sentencia)
-            .await
-            .map_err(|e| DomainError::QueryError(format!("Error de planificación SQL: {e}")))?;
+        let plan = estado.statement_to_plan(sentencia).await.map_err(|e| {
+            DomainError::SqlNoInterpretable(format!("Error de planificación SQL: {e}"))
+        })?;
         Self::validar_tablas_permitidas(&plan, politica)?;
         DataFrame::new(estado, plan)
             .limit(0, Some(politica.limite_filas.saturating_add(1)))
@@ -330,6 +330,31 @@ impl AnalyticalEnginePort for DataFusionEngine {
         lista.sort();
         Ok(lista)
     }
+
+    async fn esquemas_de_tablas(&self, tablas: &[String]) -> Vec<EsquemaTabla> {
+        let mut esquemas = Vec::new();
+        for nombre in tablas {
+            // Nombre registrado tal cual, sin normalizar mayúsculas ni comillas
+            let Ok(tabla) = self
+                .context
+                .table_provider(TableReference::bare(nombre.as_str()))
+                .await
+            else {
+                continue;
+            };
+            let columnas = tabla
+                .schema()
+                .fields()
+                .iter()
+                .map(|campo| (campo.name().clone(), campo.data_type().to_string()))
+                .collect();
+            esquemas.push(EsquemaTabla {
+                nombre: nombre.clone(),
+                columnas,
+            });
+        }
+        esquemas
+    }
 }
 
 #[cfg(test)]
@@ -367,6 +392,63 @@ mod tests {
 
         assert_eq!(res.len(), 1);
         assert_eq!(res[0].num_rows(), 2);
+    }
+
+    fn politica(tablas: &[&str]) -> PoliticaConsultaLectura {
+        PoliticaConsultaLectura {
+            tablas_permitidas: tablas.iter().map(|t| t.to_string()).collect(),
+            limite_filas: 100,
+            timeout: std::time::Duration::from_secs(10),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_datafusion_esquemas_de_tablas_lee_columnas_y_tipos_del_contexto() {
+        let engine = DataFusionEngine::new();
+        engine
+            .registrar_tabla("centro_metricas", vec![crear_lote_prueba()])
+            .await
+            .unwrap();
+        let esquemas = engine
+            .esquemas_de_tablas(&["centro_metricas".to_string(), "no_existe".to_string()])
+            .await;
+        assert_eq!(
+            esquemas,
+            vec![EsquemaTabla {
+                nombre: "centro_metricas".to_string(),
+                columnas: vec![
+                    ("id".to_string(), "Utf8".to_string()),
+                    ("valor".to_string(), "Int32".to_string()),
+                ],
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_datafusion_parseo_y_planificacion_son_sql_no_interpretable() {
+        let engine = DataFusionEngine::new();
+        engine
+            .registrar_tabla("metricas", vec![crear_lote_prueba()])
+            .await
+            .unwrap();
+        let p = politica(&["metricas"]);
+        for sql in [
+            "SELECT FROM WHERE",
+            "SELECT columna_inexistente FROM metricas",
+            "SELECT * FROM tabla_inexistente",
+        ] {
+            let err = engine.ejecutar_consulta_lectura(sql, &p).await.unwrap_err();
+            assert!(
+                matches!(err, DomainError::SqlNoInterpretable(_)),
+                "{sql}: {err:?}"
+            );
+        }
+        // Las demás negativas siguen siendo QueryError
+        let err = engine
+            .ejecutar_consulta_lectura("SELECT * FROM metricas", &politica(&[]))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, DomainError::QueryError(_)), "{err:?}");
     }
 
     #[tokio::test]

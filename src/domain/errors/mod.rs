@@ -32,6 +32,11 @@ pub enum DomainError {
     #[error("Error en motor analítico o consulta: '{0}'")]
     QueryError(String),
 
+    /// La consulta no se pudo parsear ni planificar (sintaxis, tabla o columna inexistente).
+    /// Se muestra igual que `QueryError`; el tipo permite añadir el diagnóstico de esquema
+    #[error("Error en motor analítico o consulta: '{0}'")]
+    SqlNoInterpretable(String),
+
     #[error("Error en grafo normativo: '{0}'")]
     GraphError(String),
 

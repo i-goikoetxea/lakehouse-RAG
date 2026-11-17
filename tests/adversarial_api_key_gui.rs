@@ -4,6 +4,9 @@
 //!
 //! Modal de configuración: la key tampoco llega al fichero de preferencias del modo
 //! (`llm_config.json`), ni aunque se pegue en el selector de modo o el fichero venga envenenado.
+//!
+//! Motor FreeLLMAPI: su key (`freellmapi-…`) tampoco sale por el estado, los errores del proxy,
+//! el catálogo de modelos, la URL pegada por error ni los logs.
 
 use std::io::Write;
 use std::sync::{Arc, Mutex};
@@ -11,17 +14,20 @@ use std::time::Duration;
 
 use lakehouse_rag::application::dtos::agent::{AgentMessage, ClaudeModel};
 use lakehouse_rag::application::ports::agent_runner::AgentRunnerPort;
+use lakehouse_rag::application::ports::model_catalog::ModelCatalogPort;
 use lakehouse_rag::infrastructure::llm::anthropic_api::{
-    AlmacenEnMemoria, AnthropicHttpClient, AnthropicMessagesRunner, ConfigClienteAnthropic,
-    PoliticaReintentos, SecretApiKey,
+    AlmacenEnMemoria, AlmacenSecreto, AnthropicHttpClient, AnthropicMessagesRunner,
+    ConfigClienteAnthropic, PerfilApi, PoliticaReintentos, SecretApiKey,
 };
+use lakehouse_rag::infrastructure::llm::freellmapi_catalogo::FreeLlmApiModelCatalog;
 use lakehouse_rag::infrastructure::llm::modo_llm::ModoLlm;
 use lakehouse_rag::infrastructure::llm::preferencia_modo::{
-    ARCHIVO_PREFERENCIAS_LLM, ModoResuelto, OrigenModo, leer_modo_guardado,
+    ARCHIVO_PREFERENCIAS_LLM, ModoResuelto, OrigenModo, leer_modo_guardado, leer_preferencias,
 };
 use lakehouse_rag::presentation::gui::api_key::{estado_api_key_en, guardar_api_key_en};
 use lakehouse_rag::presentation::gui::config_llm::{
-    MotorLlmSesion, estado_modo_llm_desde_disco, guardar_modo_llm_en,
+    KeysConfiguradas, MotorLlmSesion, estado_modo_llm_desde_disco, guardar_modo_llm_en,
+    guardar_url_freellmapi_en,
 };
 use serde_json::json;
 use wiremock::matchers::method;
@@ -29,6 +35,8 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 
 const KEY_FALSA: &str = "sk-ant-api03-SECRETO-NO-REAL-q7w8e9r0";
 const NUCLEO: &str = "SECRETO-NO-REAL";
+const KEY_PROXY_FALSA: &str = "freellmapi-PROXYSECRETO-NO-REAL-k4j5";
+const NUCLEO_PROXY: &str = "PROXYSECRETO";
 
 #[derive(Clone, Default)]
 struct LogsCapturados(Arc<Mutex<Vec<u8>>>);
@@ -129,6 +137,7 @@ async fn test_la_key_no_sale_por_el_webview_los_logs_ni_la_telemetria() {
             origen: OrigenModo::PorDefecto,
         },
         en_uso: ModoLlm::Cli,
+        freellmapi_url: "http://127.0.0.1:31415".into(),
     };
     std::fs::write(
         dir.path().join(ARCHIVO_PREFERENCIAS_LLM),
@@ -137,9 +146,12 @@ async fn test_la_key_no_sale_por_el_webview_los_logs_ni_la_telemetria() {
     .unwrap();
     assert_eq!(leer_modo_guardado(dir.path()), Some(ModoLlm::Api));
     let almacen_modal = AlmacenEnMemoria::default();
-    let key_guardada = guardar_api_key_en(KEY_FALSA.into(), None, &almacen_modal, ModoLlm::Cli)
-        .unwrap()
-        .configurada;
+    let key_guardada = KeysConfiguradas {
+        anthropic: guardar_api_key_en(KEY_FALSA.into(), None, &almacen_modal, ModoLlm::Cli)
+            .unwrap()
+            .configurada,
+        freellmapi: false,
+    };
     let pegada_en_el_modo =
         guardar_modo_llm_en(&sesion, KEY_FALSA, None, key_guardada).unwrap_err();
     assert!(!pegada_en_el_modo.contains(NUCLEO), "{pegada_en_el_modo}");
@@ -177,9 +189,99 @@ async fn test_la_key_no_sale_por_el_webview_los_logs_ni_la_telemetria() {
         "un fichero desmesurado se ignora"
     );
 
-    // 4. Nada de lo anterior dejó la key en los logs (sí la máscara)
+    // 4. FreeLLMAPI: la key del proxy no vuelve al WebView, ni por los errores del proxy (que la
+    // repiten), ni por el catálogo, ni pegada en el campo de la URL
+    let almacen_proxy = AlmacenEnMemoria::default();
+    let estado_proxy = guardar_api_key_en(
+        KEY_PROXY_FALSA.into(),
+        None,
+        &almacen_proxy,
+        ModoLlm::FreeLlmApi,
+    )
+    .unwrap();
+    assert_eq!(estado_proxy.mascara.as_deref(), Some("freellmapi-…k4j5"));
+    assert!(
+        almacen_modal
+            .leer()
+            .unwrap()
+            .is_some_and(|k| k.mascara_con_prefijo().starts_with("sk-ant-")),
+        "cada key en su almacén"
+    );
+    let proxy = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(400).set_body_json(json!({
+            "type": "error",
+            "error": {"type": "invalid_request_error", "message": format!("clave {KEY_PROXY_FALSA} rechazada")}
+        })))
+        .mount(&proxy)
+        .await;
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(500).set_body_string(format!("eco {KEY_PROXY_FALSA}")))
+        .mount(&proxy)
+        .await;
+    let config_proxy = ConfigClienteAnthropic::agente()
+        .con_perfil(PerfilApi::FREELLMAPI)
+        .con_base_url(proxy.uri());
+    let cliente_proxy = || {
+        AnthropicHttpClient::new(
+            SecretApiKey::new(KEY_PROXY_FALSA).unwrap(),
+            config_proxy.clone(),
+        )
+        .unwrap()
+    };
+    let runner_proxy = AnthropicMessagesRunner::new(cliente_proxy());
+    let error_proxy = runner_proxy
+        .ejecutar_turno(
+            &ClaudeModel::new("auto").unwrap(),
+            "sistema",
+            &[AgentMessage::user("hola")],
+            &[],
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+    let error_catalogo = FreeLlmApiModelCatalog::new(cliente_proxy(), proxy.uri())
+        .listar_modelos()
+        .await
+        .unwrap_err()
+        .to_string();
+    let recibidas = proxy.received_requests().await.unwrap();
+    assert!(
+        recibidas
+            .iter()
+            .all(|r| r.headers.get("x-api-key").unwrap() == KEY_PROXY_FALSA),
+        "al proxy solo va su key, nunca la de Anthropic"
+    );
+    let pegada_en_la_url =
+        guardar_url_freellmapi_en(&sesion, KEY_PROXY_FALSA, None, key_guardada).unwrap_err();
+    let elegido_proxy = guardar_modo_llm_en(
+        &sesion,
+        "freellmapi",
+        None,
+        KeysConfiguradas {
+            anthropic: true,
+            freellmapi: true,
+        },
+    )
+    .unwrap();
+    for carga in [
+        serde_json::to_string(&estado_proxy).unwrap(),
+        error_proxy,
+        error_catalogo,
+        pegada_en_la_url,
+        serde_json::to_string(&elegido_proxy).unwrap(),
+        serde_json::to_string(&runner_proxy.tomar_metricas()).unwrap(),
+    ] {
+        assert!(!carga.contains(NUCLEO_PROXY), "{carga}");
+    }
+    assert_eq!(leer_preferencias(dir.path()).freellmapi_url, None);
+    let fichero = std::fs::read_to_string(dir.path().join(ARCHIVO_PREFERENCIAS_LLM)).unwrap();
+    assert!(!fichero.contains(NUCLEO_PROXY), "{fichero}");
+
+    // 5. Nada de lo anterior dejó ninguna de las dos keys en los logs (sí la máscara)
     let texto_logs = String::from_utf8(logs.0.lock().unwrap().clone()).unwrap();
     assert!(!texto_logs.contains(NUCLEO), "{texto_logs}");
+    assert!(!texto_logs.contains(NUCLEO_PROXY), "{texto_logs}");
     assert!(
         texto_logs.contains("reintento"),
         "se registraron los reintentos"

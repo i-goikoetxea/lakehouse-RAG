@@ -38,13 +38,16 @@ impl ClaudeModel {
         &self.0
     }
 
+    /// `:` admite las rutas del router de un proxy (`auto:smart`): va como argumento de
+    /// `Command`, sin shell, así que no abre inyección
     fn es_identificador_seguro(candidato: &str) -> bool {
         !candidato.is_empty()
             && candidato.len() <= Self::MAX_LEN
             && !candidato.starts_with('-')
-            && candidato
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '[' | ']'))
+            && !candidato.starts_with(':')
+            && candidato.chars().all(|c| {
+                c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '[' | ']' | ':')
+            })
     }
 }
 
@@ -166,6 +169,9 @@ pub enum EtapaArnes {
     /// La intención exige consultar y el modelo respondió sin llamar a ninguna tool (Fase 5.2,
     /// solo en los transportes que no pueden forzar la llamada)
     OmisionDeHerramienta,
+    /// El turno agotó casi todas sus iteraciones: se pidió cerrar sin herramientas, solo con
+    /// lo ya consultado
+    AterrizajeForzoso,
 }
 
 /// Eventos emitidos durante la ejecución reactiva del agente (para TUI y streaming)
@@ -184,6 +190,9 @@ pub enum AgentExecutionEvent {
         name: String,
         result: serde_json::Value,
         is_error: bool,
+        /// La llamada no se ejecutó: la bloqueó el circuito o repetía una ya hecha en el turno
+        #[serde(default)]
+        redirigida: bool,
     },
     TextDelta(String),
     /// El texto ya emitido en vivo en este turno no vale (se rechazó o era una llamada): la
@@ -207,6 +216,9 @@ mod tests {
             "claude-opus-5-5",
             "claude-haiku-4-5-20251001",
             "sonnet[1m]",
+            "auto",
+            "auto:smart",
+            "gemini-3.5-flash",
         ] {
             let modelo = ClaudeModel::new(alias).expect("Alias válido rechazado");
             assert_eq!(modelo.cli_model_name(), alias);
@@ -231,6 +243,9 @@ mod tests {
             "op us",
             "opus\n--tools",
             "modelo$(whoami)",
+            ":auto",
+            "auto smart",
+            "auto:smart|calc",
             excesivo.as_str(),
         ] {
             let err = ClaudeModel::new(invalido).unwrap_err();

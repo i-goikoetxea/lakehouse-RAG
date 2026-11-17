@@ -24,22 +24,21 @@ use crate::application::dtos::centros::EXTENSIONES_INGERIBLES;
 use crate::application::dtos::ingestion::ObservadorIngesta;
 use crate::application::use_cases::lakehouse_app::LakehouseApp;
 use crate::infrastructure::llm::anthropic_api::AlmacenKeyring;
-use crate::infrastructure::llm::anthropic_api::secreto::VARIABLE_API_KEY;
-use crate::infrastructure::llm::modo_llm::VARIABLE_MODO_LLM;
+use crate::infrastructure::llm::anthropic_api::secreto::{
+    VARIABLE_API_KEY, VARIABLE_FREELLMAPI_KEY,
+};
+use crate::infrastructure::llm::modo_llm::{ModoLlm, VARIABLE_MODO_LLM};
 use chat_service::{ChatStreamEvento, GuiChatService, texto_a_html_seguro};
 use comandos::{
     ActivacionDto, CentroDto, DocumentoCatalogoDto, EVENTO_ARRASTRE, EVENTO_DOCUMENTOS_SOLTADOS,
     EVENTO_PROGRESO_INGESTA, IngestaDto, IntegridadDto, ProgresoIngestaDto,
 };
-use config_llm::{EstadoModoLlmDto, MotorLlmSesion};
+use config_llm::{EstadoModoLlmDto, KeysConfiguradas, MotorLlmSesion, MotorLlmVivo};
 pub use resultados_tools::{CitationDto, FuenteCitadaDto};
 
-/// Inicia la aplicación nativa Tauri 2.0 sobre la composición única (`LakehouseApp`) y el motor
-/// del LLM con que se compuso
-pub fn iniciar_app_tauri(
-    app: Arc<LakehouseApp>,
-    motor: MotorLlmSesion,
-) -> Result<(), tauri::Error> {
+/// Inicia la aplicación nativa Tauri 2.0 sobre la composición única (`LakehouseApp`) y su motor
+/// del LLM vivo (la ventana lo cambia sin reiniciar)
+pub fn iniciar_app_tauri(app: Arc<LakehouseApp>, motor: MotorLlmVivo) -> Result<(), tauri::Error> {
     let servicio_chat = GuiChatService::desde_asistente(app.clone());
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
@@ -66,7 +65,10 @@ pub fn iniciar_app_tauri(
             guardar_api_key,
             estado_api_key,
             estado_modo_llm,
-            guardar_modo_llm
+            guardar_modo_llm,
+            guardar_url_freellmapi,
+            guardar_freellmapi_key,
+            estado_freellmapi_key
         ])
         .run(tauri::generate_context!())
 }
@@ -219,7 +221,8 @@ async fn integridad_centro(
     comandos::integridad(&app, &centro_id).await
 }
 
-/// Comando IPC: catálogo dinámico de modelos de la instalación local de Claude Code
+/// Comando IPC: catálogo de modelos del motor en uso (la instalación de Claude Code o, con
+/// FreeLLMAPI, `GET /v1/models` del proxy)
 #[tauri::command]
 async fn listar_modelos_claude(
     servicio: tauri::State<'_, GuiChatService>,
@@ -258,24 +261,34 @@ fn detener_respuesta(servicio: tauri::State<'_, GuiChatService>, turno_id: Strin
 }
 
 /// Comando IPC: guarda la API key de Anthropic en el almacén del sistema. Solo escritura: devuelve
-/// el estado con máscara. El runner se compone al arrancar: la key nueva se usa al reiniciar
+/// el estado con máscara. Si la API es el motor pedido, se recompone con la key nueva al instante
 #[tauri::command]
 fn guardar_api_key(
-    motor: tauri::State<'_, MotorLlmSesion>,
+    motor: tauri::State<'_, MotorLlmVivo>,
     key: String,
 ) -> Result<api_key::EstadoApiKeyDto, String> {
     api_key::guardar_api_key_en(
         key,
         std::env::var(VARIABLE_API_KEY).ok(),
         &AlmacenKeyring::default(),
-        motor.en_uso,
-    )
+        motor.sesion().en_uso,
+    )?;
+    aplicar_motor(&motor, Some(ModoLlm::Api));
+    Ok(estado_api_key_de_sesion(&motor.sesion()))
+}
+
+/// Recompone el motor vivo con lo guardado (entorno > fichero > CLI)
+fn aplicar_motor(motor: &MotorLlmVivo, key_guardada: Option<ModoLlm>) {
+    motor.aplicar(
+        std::env::var(VARIABLE_MODO_LLM).ok().as_deref(),
+        key_guardada,
+    );
 }
 
 /// Comando IPC: si hay API key y su máscara `sk-ant-…`, nunca la key
 #[tauri::command]
-fn estado_api_key(motor: tauri::State<'_, MotorLlmSesion>) -> api_key::EstadoApiKeyDto {
-    estado_api_key_de_sesion(&motor)
+fn estado_api_key(motor: tauri::State<'_, MotorLlmVivo>) -> api_key::EstadoApiKeyDto {
+    estado_api_key_de_sesion(&motor.sesion())
 }
 
 fn estado_api_key_de_sesion(motor: &MotorLlmSesion) -> api_key::EstadoApiKeyDto {
@@ -286,28 +299,93 @@ fn estado_api_key_de_sesion(motor: &MotorLlmSesion) -> api_key::EstadoApiKeyDto 
     )
 }
 
-/// Comando IPC: motor del LLM en uso, el elegido y el del próximo arranque, con sus avisos
+/// Comando IPC: guarda la key de FreeLLMAPI en su propia entrada del almacén. Solo escritura:
+/// devuelve el estado con máscara. Si el proxy es el motor pedido, se recompone al instante
 #[tauri::command]
-fn estado_modo_llm(motor: tauri::State<'_, MotorLlmSesion>) -> EstadoModoLlmDto {
-    config_llm::estado_modo_llm_desde_disco(
-        &motor,
-        std::env::var(VARIABLE_MODO_LLM).ok().as_deref(),
-        estado_api_key_de_sesion(&motor).configurada,
+fn guardar_freellmapi_key(
+    motor: tauri::State<'_, MotorLlmVivo>,
+    key: String,
+) -> Result<api_key::EstadoApiKeyDto, String> {
+    api_key::guardar_api_key_en(
+        key,
+        std::env::var(VARIABLE_FREELLMAPI_KEY).ok(),
+        &AlmacenKeyring::freellmapi(),
+        motor.sesion().en_uso,
+    )?;
+    aplicar_motor(&motor, Some(ModoLlm::FreeLlmApi));
+    Ok(estado_freellmapi_key_de_sesion(&motor.sesion()))
+}
+
+/// Comando IPC: si hay key de FreeLLMAPI y su máscara `freellmapi-…`, nunca la key
+#[tauri::command]
+fn estado_freellmapi_key(motor: tauri::State<'_, MotorLlmVivo>) -> api_key::EstadoApiKeyDto {
+    estado_freellmapi_key_de_sesion(&motor.sesion())
+}
+
+fn estado_freellmapi_key_de_sesion(motor: &MotorLlmSesion) -> api_key::EstadoApiKeyDto {
+    api_key::estado_api_key_en(
+        std::env::var(VARIABLE_FREELLMAPI_KEY).ok(),
+        &AlmacenKeyring::freellmapi(),
+        motor.en_uso,
     )
 }
 
-/// Comando IPC: guarda `cli` o `api` en `llm_config.json`; se aplica al reiniciar
+fn keys_de_sesion(motor: &MotorLlmSesion) -> KeysConfiguradas {
+    KeysConfiguradas {
+        anthropic: estado_api_key_de_sesion(motor).configurada,
+        freellmapi: estado_freellmapi_key_de_sesion(motor).configurada,
+    }
+}
+
+/// Comando IPC: motor del LLM en uso y el elegido, con sus avisos
+#[tauri::command]
+fn estado_modo_llm(motor: tauri::State<'_, MotorLlmVivo>) -> EstadoModoLlmDto {
+    estado_modo_vivo(&motor)
+}
+
+fn estado_modo_vivo(motor: &MotorLlmVivo) -> EstadoModoLlmDto {
+    let sesion = motor.sesion();
+    config_llm::estado_modo_llm_desde_disco(
+        &sesion,
+        std::env::var(VARIABLE_MODO_LLM).ok().as_deref(),
+        keys_de_sesion(&sesion),
+    )
+}
+
+/// Comando IPC: guarda `cli`, `api` o `freellmapi` en `llm_config.json` y lo aplica al instante.
+/// Una consulta en curso termina con el motor con que empezó
 #[tauri::command]
 fn guardar_modo_llm(
-    motor: tauri::State<'_, MotorLlmSesion>,
+    motor: tauri::State<'_, MotorLlmVivo>,
     modo: String,
 ) -> Result<EstadoModoLlmDto, String> {
+    let sesion = motor.sesion();
     config_llm::guardar_modo_llm_en(
-        &motor,
+        &sesion,
         &modo,
         std::env::var(VARIABLE_MODO_LLM).ok().as_deref(),
-        estado_api_key_de_sesion(&motor).configurada,
-    )
+        keys_de_sesion(&sesion),
+    )?;
+    aplicar_motor(&motor, None);
+    Ok(estado_modo_vivo(&motor))
+}
+
+/// Comando IPC: guarda la URL de FreeLLMAPI (no es secreta) en `llm_config.json` y la aplica al
+/// instante si el proxy es el motor pedido
+#[tauri::command]
+fn guardar_url_freellmapi(
+    motor: tauri::State<'_, MotorLlmVivo>,
+    url: String,
+) -> Result<EstadoModoLlmDto, String> {
+    let sesion = motor.sesion();
+    config_llm::guardar_url_freellmapi_en(
+        &sesion,
+        &url,
+        std::env::var(VARIABLE_MODO_LLM).ok().as_deref(),
+        keys_de_sesion(&sesion),
+    )?;
+    aplicar_motor(&motor, None);
+    Ok(estado_modo_vivo(&motor))
 }
 
 /// Comando IPC: Markdown parcial → HTML seguro (render progresivo durante el streaming)
@@ -367,6 +445,9 @@ pub struct ToolCardDto {
     pub duration: String,
     /// Línea legible del resultado (p. ej. «resuelto · 125 (*) °C»)
     pub resumen: String,
+    /// No se ejecutó: la bloqueó el circuito o repetía una llamada del turno
+    #[serde(default)]
+    pub redirigida: bool,
 }
 
 /// Respuesta completa para el asistente del frontend

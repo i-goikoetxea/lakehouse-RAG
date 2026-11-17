@@ -604,6 +604,7 @@ fn registrador_de_herramientas(destino: &Arc<StdMutex<Vec<UsoHerramienta>>>) -> 
             name,
             result,
             is_error,
+            ..
         } => {
             let argumentos = pendientes
                 .lock()
@@ -713,11 +714,13 @@ mod tests {
             name: "execute_athena_sql".into(),
             result: json!([{"x": 1}]),
             is_error: false,
+            redirigida: false,
         });
         cb(AgentExecutionEvent::ToolResultReceived {
             name: "huerfana".into(),
             result: json!(null),
             is_error: true,
+            redirigida: false,
         });
         let usos = usos.lock().unwrap();
         assert_eq!(usos.len(), 2);
@@ -739,6 +742,7 @@ mod tests {
             name: "execute_athena_sql".into(),
             result: json!([]),
             is_error: false,
+            redirigida: false,
         });
         assert_eq!(usos.lock().unwrap().len(), 1);
         assert_eq!(

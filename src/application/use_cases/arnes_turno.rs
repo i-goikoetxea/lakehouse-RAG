@@ -5,6 +5,7 @@ mod cifras;
 mod fechas;
 mod intent_detector;
 pub mod llamada_en_crudo;
+mod llamadas_repetidas;
 mod post_inference_guard;
 mod pre_inference_interceptor;
 pub mod procedencia;
@@ -14,6 +15,7 @@ mod verificador_paginas;
 
 pub use intent_detector::{IntencionTurno, IntentDetector};
 pub use llamada_en_crudo::LlamadaEmbebida;
+pub use llamadas_repetidas::{LlamadasDelTurno, json_canonico};
 pub use post_inference_guard::{PostInferenceGuard, RegistroTurno, ViolacionArnes};
 pub use pre_inference_interceptor::{EleccionHerramienta, PlanTurno, PreInferenceInterceptor};
 pub use procedencia::CifraPendiente;
