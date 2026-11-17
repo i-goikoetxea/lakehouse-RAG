@@ -525,3 +525,4 @@ button { cursor: pointer; }
 .config-avisos li { font-size: 12px; line-height: 1.45; padding: 6px 8px; border-radius: var(--radius-sm); background: var(--color-warning-bg); color: var(--color-warning); }
 .config-avisos li.config-aviso-info { background: var(--color-cyan-bg); color: var(--color-cyan); }
 .config-key-form input { flex: 1; }
+.config-aviso-terceros { font-size: 12px; line-height: 1.45; padding: 6px 8px; border-radius: var(--radius-sm); background: var(--color-warning-bg); color: var(--color-warning); }

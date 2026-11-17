@@ -119,6 +119,9 @@ fn test_los_comandos_de_configuracion_estan_registrados() {
         "guardar_api_key",
         "estado_modo_llm",
         "guardar_modo_llm",
+        "guardar_url_freellmapi",
+        "estado_freellmapi_key",
+        "guardar_freellmapi_key",
     ] {
         assert!(
             registro.contains(comando),
@@ -129,4 +132,64 @@ fn test_los_comandos_de_configuracion_estan_registrados() {
             "falta el comando {comando}"
         );
     }
+}
+
+#[test]
+fn test_el_modal_ofrece_freellmapi_con_su_aviso_url_y_campo_password() {
+    let html = html();
+    let modal = bloque(&html, "id=\"dialogo-config\"", "</dialog>");
+    assert!(modal.contains("name=\"config-modo\" value=\"freellmapi\""));
+    assert!(modal.contains(
+        "Modelos gratuitos de terceros; los prompts y extractos se envían a esos proveedores; calidad no medida"
+    ));
+    assert!(modal.contains("id=\"config-freellmapi-url\""));
+    let campo = bloque(modal, "id=\"config-freellmapi-key-input\"", ">");
+    assert!(campo.contains("type=\"password\""), "{campo}");
+    assert!(campo.contains("autocomplete=\"off\""), "{campo}");
+    assert!(
+        !modal.contains("value=\"freellmapi-"),
+        "el HTML no trae ninguna key"
+    );
+}
+
+#[test]
+fn test_la_key_del_proxy_no_se_retiene_en_js_y_el_campo_se_vacia() {
+    let app_js = app_js();
+    let config = bloque(&app_js, "// 14b. Configuración", "// 15. Arranque");
+    assert!(
+        config.contains("invoke('guardar_freellmapi_key', { key: campoKeyProxy.value })"),
+        "la key va directa del campo al comando"
+    );
+    let envio = bloque(
+        config,
+        "$('form-freellmapi-key')",
+        "await cargarConfig();
+  });",
+    );
+    assert!(
+        envio.contains(
+            "finally {
+      campoKeyProxy.value = '';"
+        ),
+        "{envio}"
+    );
+    assert_eq!(
+        config.matches("campoKeyProxy.value").count(),
+        4,
+        "solo se lee para validar y enviar, y se vacía (al enviar y al cerrar)"
+    );
+}
+
+#[test]
+fn test_el_desplegable_de_modelos_pinta_con_textcontent_y_aguanta_un_proxy_caido() {
+    let app_js = app_js();
+    let modelos = bloque(
+        &app_js,
+        "async function cargarModelos()",
+        "function etiquetaModelo()",
+    );
+    assert!(!modelos.contains("innerHTML"), "{modelos}");
+    assert!(modelos.contains("el('option', null, m.displayName)"));
+    assert!(modelos.contains("Catálogo de modelos no disponible"));
+    assert!(modelos.contains("selectModelo.disabled = true"));
 }

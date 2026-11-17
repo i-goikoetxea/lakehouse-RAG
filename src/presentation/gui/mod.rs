@@ -24,14 +24,16 @@ use crate::application::dtos::centros::EXTENSIONES_INGERIBLES;
 use crate::application::dtos::ingestion::ObservadorIngesta;
 use crate::application::use_cases::lakehouse_app::LakehouseApp;
 use crate::infrastructure::llm::anthropic_api::AlmacenKeyring;
-use crate::infrastructure::llm::anthropic_api::secreto::VARIABLE_API_KEY;
+use crate::infrastructure::llm::anthropic_api::secreto::{
+    VARIABLE_API_KEY, VARIABLE_FREELLMAPI_KEY,
+};
 use crate::infrastructure::llm::modo_llm::VARIABLE_MODO_LLM;
 use chat_service::{ChatStreamEvento, GuiChatService, texto_a_html_seguro};
 use comandos::{
     ActivacionDto, CentroDto, DocumentoCatalogoDto, EVENTO_ARRASTRE, EVENTO_DOCUMENTOS_SOLTADOS,
     EVENTO_PROGRESO_INGESTA, IngestaDto, IntegridadDto, ProgresoIngestaDto,
 };
-use config_llm::{EstadoModoLlmDto, MotorLlmSesion};
+use config_llm::{EstadoModoLlmDto, KeysConfiguradas, MotorLlmSesion};
 pub use resultados_tools::{CitationDto, FuenteCitadaDto};
 
 /// Inicia la aplicación nativa Tauri 2.0 sobre la composición única (`LakehouseApp`) y el motor
@@ -66,7 +68,10 @@ pub fn iniciar_app_tauri(
             guardar_api_key,
             estado_api_key,
             estado_modo_llm,
-            guardar_modo_llm
+            guardar_modo_llm,
+            guardar_url_freellmapi,
+            guardar_freellmapi_key,
+            estado_freellmapi_key
         ])
         .run(tauri::generate_context!())
 }
@@ -219,7 +224,8 @@ async fn integridad_centro(
     comandos::integridad(&app, &centro_id).await
 }
 
-/// Comando IPC: catálogo dinámico de modelos de la instalación local de Claude Code
+/// Comando IPC: catálogo de modelos del motor en uso (la instalación de Claude Code o, con
+/// FreeLLMAPI, `GET /v1/models` del proxy)
 #[tauri::command]
 async fn listar_modelos_claude(
     servicio: tauri::State<'_, GuiChatService>,
@@ -286,17 +292,53 @@ fn estado_api_key_de_sesion(motor: &MotorLlmSesion) -> api_key::EstadoApiKeyDto 
     )
 }
 
+/// Comando IPC: guarda la key de FreeLLMAPI en su propia entrada del almacén. Solo escritura:
+/// devuelve el estado con máscara. Se usa al reiniciar
+#[tauri::command]
+fn guardar_freellmapi_key(
+    motor: tauri::State<'_, MotorLlmSesion>,
+    key: String,
+) -> Result<api_key::EstadoApiKeyDto, String> {
+    api_key::guardar_api_key_en(
+        key,
+        std::env::var(VARIABLE_FREELLMAPI_KEY).ok(),
+        &AlmacenKeyring::freellmapi(),
+        motor.en_uso,
+    )
+}
+
+/// Comando IPC: si hay key de FreeLLMAPI y su máscara `freellmapi-…`, nunca la key
+#[tauri::command]
+fn estado_freellmapi_key(motor: tauri::State<'_, MotorLlmSesion>) -> api_key::EstadoApiKeyDto {
+    estado_freellmapi_key_de_sesion(&motor)
+}
+
+fn estado_freellmapi_key_de_sesion(motor: &MotorLlmSesion) -> api_key::EstadoApiKeyDto {
+    api_key::estado_api_key_en(
+        std::env::var(VARIABLE_FREELLMAPI_KEY).ok(),
+        &AlmacenKeyring::freellmapi(),
+        motor.en_uso,
+    )
+}
+
+fn keys_de_sesion(motor: &MotorLlmSesion) -> KeysConfiguradas {
+    KeysConfiguradas {
+        anthropic: estado_api_key_de_sesion(motor).configurada,
+        freellmapi: estado_freellmapi_key_de_sesion(motor).configurada,
+    }
+}
+
 /// Comando IPC: motor del LLM en uso, el elegido y el del próximo arranque, con sus avisos
 #[tauri::command]
 fn estado_modo_llm(motor: tauri::State<'_, MotorLlmSesion>) -> EstadoModoLlmDto {
     config_llm::estado_modo_llm_desde_disco(
         &motor,
         std::env::var(VARIABLE_MODO_LLM).ok().as_deref(),
-        estado_api_key_de_sesion(&motor).configurada,
+        keys_de_sesion(&motor),
     )
 }
 
-/// Comando IPC: guarda `cli` o `api` en `llm_config.json`; se aplica al reiniciar
+/// Comando IPC: guarda `cli`, `api` o `freellmapi` en `llm_config.json`; se aplica al reiniciar
 #[tauri::command]
 fn guardar_modo_llm(
     motor: tauri::State<'_, MotorLlmSesion>,
@@ -306,7 +348,22 @@ fn guardar_modo_llm(
         &motor,
         &modo,
         std::env::var(VARIABLE_MODO_LLM).ok().as_deref(),
-        estado_api_key_de_sesion(&motor).configurada,
+        keys_de_sesion(&motor),
+    )
+}
+
+/// Comando IPC: guarda la URL de FreeLLMAPI (no es secreta) en `llm_config.json`; se aplica al
+/// reiniciar
+#[tauri::command]
+fn guardar_url_freellmapi(
+    motor: tauri::State<'_, MotorLlmSesion>,
+    url: String,
+) -> Result<EstadoModoLlmDto, String> {
+    config_llm::guardar_url_freellmapi_en(
+        &motor,
+        &url,
+        std::env::var(VARIABLE_MODO_LLM).ok().as_deref(),
+        keys_de_sesion(&motor),
     )
 }
 

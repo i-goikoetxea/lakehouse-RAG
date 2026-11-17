@@ -231,9 +231,9 @@
       selectModelo.title = selectModelo.selectedOptions[0] ? selectModelo.selectedOptions[0].title : '';
     } catch (err) {
       vaciar(selectModelo);
-      selectModelo.appendChild(el('option', null, 'Claude Code no disponible'));
+      selectModelo.appendChild(el('option', null, 'Catálogo de modelos no disponible'));
       selectModelo.disabled = true;
-      registrar(`No se pudo obtener el catálogo de modelos de Claude Code: ${mensajeError(err)}`, 'error');
+      registrar(`No se pudo obtener el catálogo de modelos: ${mensajeError(err)}`, 'error');
     }
   }
 
@@ -1107,13 +1107,15 @@
   // solo su máscara. El campo se vacía tras cada intento y la key no se guarda en ninguna variable.
   const dialogoConfig = $('dialogo-config');
   const campoKey = $('config-key-input');
-  const NOMBRE_MOTOR = { cli: 'CLI · claude -p', api: 'API de Messages' };
+  const campoKeyProxy = $('config-freellmapi-key-input');
+  const NOMBRE_MOTOR = { cli: 'CLI · claude -p', api: 'API de Messages', freellmapi: 'FreeLLMAPI · modelos gratuitos' };
   const ORIGEN_MODO = {
     entorno: 'lo fija la variable LAKEHOUSE_RAG_MODO_LLM',
     fichero: 'elegido aquí',
     por_defecto: 'valor por defecto',
   };
   const ORIGEN_KEY = { entorno: 'desde la variable ANTHROPIC_API_KEY', almacen: 'desde el almacén del sistema' };
+  const ORIGEN_KEY_PROXY = { entorno: 'desde la variable FREELLMAPI_API_KEY', almacen: 'desde el almacén del sistema' };
 
   function pintarModo(estado) {
     const enUso = $('config-en-uso');
@@ -1127,33 +1129,44 @@
     const avisos = $('config-avisos-modo');
     vaciar(avisos);
     estado.avisos.forEach((aviso) => avisos.appendChild(el('li', null, aviso)));
+    const campoUrl = $('config-freellmapi-url');
+    if (document.activeElement !== campoUrl) campoUrl.value = estado.freellmapiUrl || '';
   }
 
-  function pintarKey(estado) {
-    const chip = $('config-key-estado');
+  /** Pinta el estado de una key (Anthropic o FreeLLMAPI): solo la máscara, nunca la key */
+  function pintarEstadoKey(prefijo, origenes, estado) {
+    const chip = $(`${prefijo}-estado`);
     chip.textContent = estado.configurada ? 'Configurada' : 'Sin key';
     chip.className = `chip ${estado.configurada ? 'chip-ok' : 'chip-aviso'}`;
-    const mascara = $('config-key-mascara');
+    const mascara = $(`${prefijo}-mascara`);
     mascara.hidden = !estado.mascara;
     mascara.textContent = estado.mascara || '';
-    $('config-key-origen').textContent = estado.origen ? (ORIGEN_KEY[estado.origen] || estado.origen) : '';
+    $(`${prefijo}-origen`).textContent = estado.origen ? (origenes[estado.origen] || estado.origen) : '';
   }
+
+  function pintarKey(estado) { pintarEstadoKey('config-key', ORIGEN_KEY, estado); }
+  function pintarKeyProxy(estado) { pintarEstadoKey('config-freellmapi-key', ORIGEN_KEY_PROXY, estado); }
 
   async function cargarConfig() {
     try {
-      const [modo, key] = await Promise.all([invoke('estado_modo_llm'), invoke('estado_api_key')]);
+      const [modo, key, keyProxy] = await Promise.all([
+        invoke('estado_modo_llm'), invoke('estado_api_key'), invoke('estado_freellmapi_key'),
+      ]);
       pintarModo(modo);
       pintarKey(key);
+      pintarKeyProxy(keyProxy);
     } catch (err) {
       $('config-modo-error').textContent = `No se pudo leer la configuración: ${mensajeError(err)}`;
     }
   }
 
-  function vaciarCampoKey() { campoKey.value = ''; }
+  function vaciarCampoKey() { campoKey.value = ''; campoKeyProxy.value = ''; }
 
   $('btn-config').addEventListener('click', () => {
     $('config-modo-error').textContent = '';
     $('config-key-error').textContent = '';
+    $('config-freellmapi-key-error').textContent = '';
+    $('config-freellmapi-url-error').textContent = '';
     vaciarCampoKey();
     dialogoConfig.showModal();
     cargarConfig();
@@ -1195,6 +1208,47 @@
       boton.disabled = false;
     }
     await cargarConfig();
+  });
+
+  // La key del proxy sigue el mismo camino que la de Anthropic: del campo al comando, sin variable
+  $('form-freellmapi-key').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const error = $('config-freellmapi-key-error');
+    error.textContent = '';
+    if (!campoKeyProxy.value.trim()) {
+      error.textContent = 'Pega la key de FreeLLMAPI antes de guardar.';
+      return;
+    }
+    const boton = $('btn-guardar-freellmapi-key');
+    boton.disabled = true;
+    try {
+      pintarKeyProxy(await invoke('guardar_freellmapi_key', { key: campoKeyProxy.value }));
+      registrar('Key de FreeLLMAPI guardada en el almacén del sistema. Reinicia la app para usarla.', 'ok');
+    } catch (err) {
+      error.textContent = mensajeError(err);
+    } finally {
+      campoKeyProxy.value = '';
+      boton.disabled = false;
+    }
+    await cargarConfig();
+  });
+
+  $('form-freellmapi-url').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const error = $('config-freellmapi-url-error');
+    error.textContent = '';
+    const boton = $('btn-guardar-freellmapi-url');
+    boton.disabled = true;
+    try {
+      const estado = await invoke('guardar_url_freellmapi', { url: $('config-freellmapi-url').value });
+      $('config-freellmapi-url').blur();
+      pintarModo(estado);
+      registrar('URL de FreeLLMAPI guardada. Se aplica al reiniciar la app.', 'ok');
+    } catch (err) {
+      error.textContent = mensajeError(err);
+    } finally {
+      boton.disabled = false;
+    }
   });
 
   // 15. Arranque

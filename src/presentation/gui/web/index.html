@@ -235,7 +235,9 @@
         <div class="config-modos" role="radiogroup" aria-label="Motor elegido">
           <label class="config-opcion"><input type="radio" name="config-modo" value="cli"> <span><strong>CLI</strong> · <code>claude -p</code> (por defecto)</span></label>
           <label class="config-opcion"><input type="radio" name="config-modo" value="api"> <span><strong>API</strong> · API de Messages, con el modelo elegido en el chat</span></label>
+          <label class="config-opcion"><input type="radio" name="config-modo" value="freellmapi"> <span><strong>FreeLLMAPI</strong> · proxy local con modelos gratuitos</span></label>
         </div>
+        <p id="config-aviso-freellmapi" class="config-linea config-aviso-terceros">Modelos gratuitos de terceros; los prompts y extractos se envían a esos proveedores; calidad no medida.</p>
         <p id="config-al-reiniciar" class="config-linea texto-sutil"></p>
         <ul id="config-avisos-modo" class="config-avisos" aria-live="polite"></ul>
         <p id="config-modo-error" class="form-error"></p>
@@ -250,6 +252,23 @@
           </label>
         </form>
         <p id="config-key-error" class="form-error"></p>
+      </section>
+
+      <section class="config-seccion" aria-labelledby="config-freellmapi-titulo">
+        <h4 id="config-freellmapi-titulo">FreeLLMAPI</h4>
+        <form id="form-freellmapi-url" class="config-key-form" autocomplete="off">
+          <label>URL del proxy (la app de escritorio usa http://127.0.0.1:31415)
+            <span class="fila-ruta"><input id="config-freellmapi-url" type="url" autocomplete="off" spellcheck="false" placeholder="http://127.0.0.1:31415"><button type="submit" id="btn-guardar-freellmapi-url" class="btn btn-primario">Guardar</button></span>
+          </label>
+        </form>
+        <p id="config-freellmapi-url-error" class="form-error"></p>
+        <p class="config-linea">Key: <span id="config-freellmapi-key-estado" class="chip">—</span> <span id="config-freellmapi-key-mascara" class="chip chip-mono" hidden></span> <span id="config-freellmapi-key-origen" class="texto-sutil"></span></p>
+        <form id="form-freellmapi-key" class="config-key-form" autocomplete="off">
+          <label>Guardar o actualizar la key unificada (página Keys del panel de FreeLLMAPI)
+            <span class="fila-ruta"><input id="config-freellmapi-key-input" type="password" autocomplete="off" spellcheck="false" placeholder="freellmapi-…"><button type="submit" id="btn-guardar-freellmapi-key" class="btn btn-primario">Guardar</button></span>
+          </label>
+        </form>
+        <p id="config-freellmapi-key-error" class="form-error"></p>
       </section>
 
       <div class="form-acciones">
