@@ -7,6 +7,7 @@ use super::{ContextoConsulta, LakehouseToolService, lotes_a_filas, predicado_ven
 use crate::application::dtos::tools::{
     ExecuteAthenaSqlParams, LakehouseToolName, parsear_argumentos,
 };
+use crate::application::ports::analytical_engine::EsquemaTabla;
 use crate::application::ports::lakehouse_projection::nombre_vista;
 use crate::application::ports::lakehouse_store::{TABLA_DOCUMENTOS_CATALOGO, TODAS_LAS_TABLAS};
 use crate::domain::errors::DomainError;
@@ -111,11 +112,25 @@ impl LakehouseToolService {
             .await?;
         let sql = preparar_sql(&params.sql_query, &contexto)?;
         let politica = self.politica(&contexto, self.config.limite_filas_sql);
-        let resultado = self
-            .motor
-            .ejecutar_consulta_lectura(&sql, &politica)
-            .await
-            .map_err(|e| DomainError::QueryError(format!("{e} | SQL ejecutada: {sql}")))?;
+        let resultado = match self.motor.ejecutar_consulta_lectura(&sql, &politica).await {
+            Ok(resultado) => resultado,
+            Err(e @ DomainError::SqlNoInterpretable(_)) => {
+                let esquemas = self
+                    .motor
+                    .esquemas_de_tablas(&politica.tablas_permitidas)
+                    .await;
+                let diagnostico =
+                    diagnostico_de_esquema(&params.sql_query, &contexto.centro, esquemas);
+                return Err(DomainError::QueryError(format!(
+                    "{e} | SQL ejecutada: {sql}{diagnostico}"
+                )));
+            }
+            Err(e) => {
+                return Err(DomainError::QueryError(format!(
+                    "{e} | SQL ejecutada: {sql}"
+                )));
+            }
+        };
         let filas = lotes_a_filas(&resultado.lotes)?;
         let mut salida = json!({
             "centro_id": contexto.centro.as_str(),
@@ -134,6 +149,87 @@ impl LakehouseToolService {
         }
         Ok(salida)
     }
+}
+
+/// Tablas y columnas por tabla como máximo en el diagnóstico de esquema
+const MAX_TABLAS_DIAGNOSTICO: usize = 8;
+const MAX_COLUMNAS_DIAGNOSTICO: usize = 40;
+/// Fragmentos de un nombre de tabla más cortos que esto no cuentan como parecido con el SQL
+const MIN_FRAGMENTO_PARECIDO: usize = 4;
+
+/// Parecido de una tabla con el SQL del modelo: nombre completo citado (2), algún fragmento
+/// significativo del nombre citado (1) o ninguno (0). Sin listas de términos: solo el nombre
+fn parecido_con_sql(tabla: &str, sql: &str) -> u8 {
+    let tabla = tabla.to_lowercase();
+    if sql.contains(&tabla) {
+        return 2;
+    }
+    let cita_fragmento = tabla
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|f| {
+            f.chars().count() >= MIN_FRAGMENTO_PARECIDO && !f.chars().all(|c| c.is_ascii_digit())
+        })
+        .any(|f| sql.contains(f));
+    u8::from(cita_fragmento)
+}
+
+/// Bloque que se añade a un error de parseo o planificación: las tablas que el agente puede
+/// leer con sus columnas y tipos reales, leídos del motor. Primero las que se parecen a las del
+/// SQL; con tope de tablas y de columnas
+fn diagnostico_de_esquema(sql: &str, centro: &CenterId, esquemas: Vec<EsquemaTabla>) -> String {
+    if esquemas.is_empty() {
+        return String::new();
+    }
+    let sql = sql.to_lowercase();
+    let prefijo = nombre_vista(centro, "");
+    let mut tablas: Vec<(u8, EsquemaTabla)> = esquemas
+        .into_iter()
+        .map(|esquema| {
+            let nombre = esquema
+                .nombre
+                .strip_prefix(&prefijo)
+                .unwrap_or(&esquema.nombre)
+                .to_string();
+            let parecido = parecido_con_sql(&nombre, &sql);
+            (
+                parecido,
+                EsquemaTabla {
+                    nombre,
+                    columnas: esquema.columnas,
+                },
+            )
+        })
+        .collect();
+    tablas.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.nombre.cmp(&b.1.nombre)));
+    let total = tablas.len();
+    let descritas: Vec<String> = tablas
+        .into_iter()
+        .take(MAX_TABLAS_DIAGNOSTICO)
+        .map(|(_, EsquemaTabla { nombre, columnas })| {
+            let mut lista: Vec<String> = columnas
+                .iter()
+                .take(MAX_COLUMNAS_DIAGNOSTICO)
+                .map(|(columna, tipo)| format!("{columna} {tipo}"))
+                .collect();
+            if columnas.len() > MAX_COLUMNAS_DIAGNOSTICO {
+                lista.push(format!(
+                    "… y {} columnas más",
+                    columnas.len() - MAX_COLUMNAS_DIAGNOSTICO
+                ));
+            }
+            format!("{nombre}({})", lista.join(", "))
+        })
+        .collect();
+    let omitidas = total.saturating_sub(MAX_TABLAS_DIAGNOSTICO);
+    let resto = if omitidas > 0 {
+        format!("; … y {omitidas} tablas más")
+    } else {
+        String::new()
+    };
+    format!(
+        " | Esquema disponible (tablas que puede leer la consulta, con sus columnas y tipos): {}{resto}",
+        descritas.join("; ")
+    )
 }
 
 fn preparar_sql(sql: &str, contexto: &ContextoConsulta) -> Result<String, DomainError> {
@@ -157,6 +253,70 @@ fn preparar_sql(sql: &str, contexto: &ContextoConsulta) -> Result<String, Domain
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn esquema(nombre: &str, columnas: usize) -> EsquemaTabla {
+        EsquemaTabla {
+            nombre: nombre.to_string(),
+            columnas: (0..columnas)
+                .map(|i| (format!("col_{i}"), "Utf8".to_string()))
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn test_diagnostico_de_esquema_quita_el_prefijo_del_centro_y_lista_tipos() {
+        let centro = CenterId::new("obra-a").unwrap();
+        let texto = diagnostico_de_esquema(
+            "SELECT * FROM inexistente",
+            &centro,
+            vec![EsquemaTabla {
+                nombre: "obra-a_alfa".to_string(),
+                columnas: vec![
+                    ("id".to_string(), "Utf8".to_string()),
+                    ("valor".to_string(), "Int32".to_string()),
+                ],
+            }],
+        );
+        assert!(texto.contains("alfa(id Utf8, valor Int32)"), "{texto}");
+        assert!(!texto.contains("obra-a_alfa"), "{texto}");
+    }
+
+    #[test]
+    fn test_diagnostico_de_esquema_prioriza_las_tablas_parecidas_al_sql() {
+        let centro = CenterId::new("c").unwrap();
+        let esquemas = vec![
+            esquema("c_aaa_primera", 1),
+            esquema("c_bbb_registros_turno", 1),
+            esquema("c_ccc_medidas", 1),
+        ];
+        // «medidas» citada entera; «registros» como fragmento de otra tabla
+        let texto = diagnostico_de_esquema(
+            "SELECT * FROM ccc_medidas JOIN registros ON 1=1",
+            &centro,
+            esquemas,
+        );
+        let pos = |t: &str| texto.find(t).unwrap();
+        assert!(pos("ccc_medidas(") < pos("bbb_registros_turno("), "{texto}");
+        assert!(pos("bbb_registros_turno(") < pos("aaa_primera("), "{texto}");
+    }
+
+    #[test]
+    fn test_diagnostico_de_esquema_acota_tablas_y_columnas() {
+        let centro = CenterId::new("c").unwrap();
+        let esquemas: Vec<EsquemaTabla> = (0..MAX_TABLAS_DIAGNOSTICO + 3)
+            .map(|i| esquema(&format!("c_t{i:02}"), MAX_COLUMNAS_DIAGNOSTICO + 5))
+            .collect();
+        let texto = diagnostico_de_esquema("SELECT 1", &centro, esquemas);
+        assert_eq!(texto.matches("(col_0 ").count(), MAX_TABLAS_DIAGNOSTICO);
+        assert!(texto.contains("… y 3 tablas más"), "{texto}");
+        assert!(texto.contains("… y 5 columnas más"), "{texto}");
+    }
+
+    #[test]
+    fn test_diagnostico_de_esquema_vacio_sin_esquemas() {
+        let centro = CenterId::new("c").unwrap();
+        assert_eq!(diagnostico_de_esquema("SELECT 1", &centro, vec![]), "");
+    }
 
     #[test]
     fn test_reescritura_traduce_tablas_canonicas_a_vistas_del_centro() {
