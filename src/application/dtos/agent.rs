@@ -38,13 +38,16 @@ impl ClaudeModel {
         &self.0
     }
 
+    /// `:` admite las rutas del router de un proxy (`auto:smart`): va como argumento de
+    /// `Command`, sin shell, así que no abre inyección
     fn es_identificador_seguro(candidato: &str) -> bool {
         !candidato.is_empty()
             && candidato.len() <= Self::MAX_LEN
             && !candidato.starts_with('-')
-            && candidato
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '[' | ']'))
+            && !candidato.starts_with(':')
+            && candidato.chars().all(|c| {
+                c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '[' | ']' | ':')
+            })
     }
 }
 
@@ -207,6 +210,9 @@ mod tests {
             "claude-opus-5-5",
             "claude-haiku-4-5-20251001",
             "sonnet[1m]",
+            "auto",
+            "auto:smart",
+            "gemini-3.5-flash",
         ] {
             let modelo = ClaudeModel::new(alias).expect("Alias válido rechazado");
             assert_eq!(modelo.cli_model_name(), alias);
@@ -231,6 +237,9 @@ mod tests {
             "op us",
             "opus\n--tools",
             "modelo$(whoami)",
+            ":auto",
+            "auto smart",
+            "auto:smart|calc",
             excesivo.as_str(),
         ] {
             let err = ClaudeModel::new(invalido).unwrap_err();
