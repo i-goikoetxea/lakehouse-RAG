@@ -4,8 +4,12 @@
 //! `ANTHROPIC_API_KEY`.
 //!
 //! ```text
-//! cargo run --example humo_agente_api -- [salida.jsonl]
+//! cargo run --example humo_agente_api -- [salida.jsonl] [--motor freellmapi] [--url <origen>]
 //! ```
+//!
+//! Con `--motor freellmapi`, el mismo runner con el perfil del proxy (`FREELLMAPI_API_KEY`), el
+//! modelo `auto` y la procedencia con `auto:smart`, y solo las 3 primeras preguntas: así son
+//! menos de 10 llamadas. El coste queda desconocido (`None`).
 
 use std::io::Write;
 use std::sync::{Arc, Mutex};
@@ -20,10 +24,13 @@ use lakehouse_rag::application::ports::tool_server::ToolServerPort;
 use lakehouse_rag::application::use_cases::agent_orchestrator::AgentOrchestrator;
 use lakehouse_rag::domain::errors::DomainError;
 use lakehouse_rag::domain::models::center::CenterId;
+use lakehouse_rag::infrastructure::llm::anthropic_api::secreto::VARIABLE_FREELLMAPI_KEY;
 use lakehouse_rag::infrastructure::llm::anthropic_api::{
     AnthropicHttpClient, AnthropicMessagesRunner, AnthropicProcedenciaVerifier,
-    ConfigClienteAnthropic, SecretApiKey,
+    ConfigClienteAnthropic, PerfilApi, SecretApiKey,
 };
+use lakehouse_rag::infrastructure::llm::modo_llm::MODELO_PROCEDENCIA_FREELLMAPI;
+use lakehouse_rag::infrastructure::llm::preferencia_modo::URL_FREELLMAPI_POR_DEFECTO;
 use serde_json::{Value, json};
 
 /// Documento inventado: ningún texto de documentos reales
@@ -98,32 +105,70 @@ const PREGUNTAS: &[(&str, &[&str])] = &[
 
 #[tokio::main]
 async fn main() -> Result<(), String> {
-    let salida = std::env::args()
-        .nth(1)
+    let argumentos: Vec<String> = std::env::args().skip(1).collect();
+    let opcion = |nombre: &str| {
+        argumentos
+            .iter()
+            .position(|a| a == nombre)
+            .and_then(|i| argumentos.get(i + 1).cloned())
+    };
+    let proxy = opcion("--motor").as_deref() == Some("freellmapi");
+    let url = opcion("--url").unwrap_or_else(|| URL_FREELLMAPI_POR_DEFECTO.into());
+    let salida = argumentos
+        .first()
+        .filter(|a| !a.starts_with("--"))
+        .cloned()
         .unwrap_or_else(|| "humo_agente_api.jsonl".into());
-    let key = || SecretApiKey::desde_entorno().map_err(|e| e.to_string());
+    let key = || {
+        if proxy {
+            SecretApiKey::desde_valor_de_entorno(std::env::var(VARIABLE_FREELLMAPI_KEY).ok())
+        } else {
+            SecretApiKey::desde_entorno()
+        }
+        .map_err(|e| e.to_string())
+    };
+    let con_perfil = |config: ConfigClienteAnthropic| {
+        if proxy {
+            config.con_perfil(PerfilApi::FREELLMAPI).con_base_url(&url)
+        } else {
+            config
+        }
+    };
     let runner = Arc::new(AnthropicMessagesRunner::new(
-        AnthropicHttpClient::new(key()?, ConfigClienteAnthropic::agente())
+        AnthropicHttpClient::new(key()?, con_perfil(ConfigClienteAnthropic::agente()))
             .map_err(|e| e.to_string())?,
     ));
-    let verificador = Arc::new(AnthropicProcedenciaVerifier::new(
-        AnthropicHttpClient::new(key()?, ConfigClienteAnthropic::procedencia())
+    let verificador = AnthropicProcedenciaVerifier::new(
+        AnthropicHttpClient::new(key()?, con_perfil(ConfigClienteAnthropic::procedencia()))
             .map_err(|e| e.to_string())?,
-    ));
+    );
+    let verificador = Arc::new(if proxy {
+        verificador.con_modelo(MODELO_PROCEDENCIA_FREELLMAPI)
+    } else {
+        verificador
+    });
+    let (modelo, preguntas) = if proxy {
+        (
+            ClaudeModel::new("auto").map_err(|e| e.to_string())?,
+            &PREGUNTAS[..3],
+        )
+    } else {
+        (ClaudeModel::sonnet(), PREGUNTAS)
+    };
     let orquestador = AgentOrchestrator::new(runner.clone(), Arc::new(ToolsSinteticas))
         .with_verificador_procedencia(verificador);
     let centro = CenterId::new("centro_sintetico").map_err(|e| e.to_string())?;
     let mut archivo = std::fs::File::create(&salida).map_err(|e| e.to_string())?;
-    let (mut correctas, mut coste_total) = (0, 0.0);
+    let (mut correctas, mut coste_total) = (0, Some(0.0));
 
-    for (pregunta, esperados) in PREGUNTAS {
+    for (pregunta, esperados) in preguntas {
         let eventos = Arc::new(Mutex::new(Vec::new()));
         let destino = Arc::clone(&eventos);
         let mut historial = vec![AgentMessage::user(*pregunta)];
         let inicio = Instant::now();
         let resultado = orquestador
             .procesar_turno(
-                &ClaudeModel::sonnet(),
+                &modelo,
                 &centro,
                 &mut historial,
                 Some(Arc::new(move |e| destino.lock().unwrap().push(e))),
@@ -149,8 +194,9 @@ async fn main() -> Result<(), String> {
         let respuesta = resultado.as_ref().map(String::as_str).unwrap_or_default();
         let correcta = resultado.is_ok() && esperados.iter().all(|f| respuesta.contains(f));
         correctas += usize::from(correcta);
-        let coste: f64 = pasos.iter().filter_map(|p| p.coste_usd).sum();
-        coste_total += coste;
+        // Un paso sin coste conocido deja el de la pregunta desconocido, nunca 0
+        let coste: Option<f64> = pasos.iter().map(|p| p.coste_usd).sum();
+        coste_total = coste_total.zip(coste).map(|(a, b)| a + b);
         let linea = json!({
             "pregunta": pregunta,
             "entregada": resultado.is_ok(),
@@ -165,15 +211,17 @@ async fn main() -> Result<(), String> {
         });
         writeln!(archivo, "{linea}").map_err(|e| e.to_string())?;
         println!(
-            "{} | {} | {latencia_ms} ms | {} pasos | {coste:.4} USD | tools {herramientas:?} | arnés {etapas:?}",
+            "{} | {} | {latencia_ms} ms | {} pasos | {} | tools {herramientas:?} | arnés {etapas:?}",
             if correcta { "OK " } else { "MAL" },
             pregunta,
             pasos.len(),
+            coste.map_or("coste desconocido".into(), |c| format!("{c:.4} USD")),
         );
     }
     println!(
-        "{correctas}/{} correctas por fragmentos; coste del agente {coste_total:.4} USD (sin la procedencia)",
-        PREGUNTAS.len()
+        "{correctas}/{} correctas por fragmentos; coste del agente {} (sin la procedencia)",
+        preguntas.len(),
+        coste_total.map_or("desconocido".into(), |c| format!("{c:.4} USD"))
     );
     Ok(())
 }

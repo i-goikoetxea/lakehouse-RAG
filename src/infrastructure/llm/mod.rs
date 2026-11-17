@@ -3,6 +3,7 @@ pub mod claude_agent_runner;
 pub mod claude_headless_distiller;
 pub mod claude_headless_procedencia;
 pub mod claude_model_catalog;
+pub mod freellmapi_catalogo;
 pub mod mock_agent_runner;
 pub mod mock_distiller;
 pub mod modo_llm;

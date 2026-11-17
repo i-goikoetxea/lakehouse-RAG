@@ -68,6 +68,7 @@ fn main() -> anyhow::Result<()> {
                 directorio_config: configuracion.directorio_config,
                 pedido_al_arrancar: compuesta.modo_pedido,
                 en_uso: compuesta.modo_en_uso,
+                freellmapi_url: compuesta.freellmapi_url,
             };
             println!(
                 "  • Motor del LLM: {:?} (pedido {:?}, origen {})",
