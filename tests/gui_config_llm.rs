@@ -85,7 +85,7 @@ fn test_la_key_no_se_retiene_en_js_y_el_campo_se_vacia() {
         config.contains("invoke('guardar_api_key', { key: campoKey.value })"),
         "la key va directa del campo al comando, sin variable intermedia"
     );
-    let envio = bloque(config, "$('form-api-key')", "await cargarConfig();\n  });");
+    let envio = bloque(config, "$('form-api-key')", "await Promise.all([cargarConfig(), cargarModelos()]);\n  });");
     assert!(
         envio.contains("finally {\n      vaciarCampoKey();"),
         "{envio}"
@@ -163,7 +163,7 @@ fn test_la_key_del_proxy_no_se_retiene_en_js_y_el_campo_se_vacia() {
     let envio = bloque(
         config,
         "$('form-freellmapi-key')",
-        "await cargarConfig();
+        "await Promise.all([cargarConfig(), cargarModelos()]);
   });",
     );
     assert!(
