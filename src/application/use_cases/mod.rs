@@ -1,5 +1,6 @@
 pub mod agent_orchestrator;
 pub mod arnes_turno;
+pub mod circuito_herramientas;
 pub mod document_ingestion_service;
 pub mod lakehouse_app;
 pub mod lakehouse_tool_service;

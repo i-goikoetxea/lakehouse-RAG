@@ -21,6 +21,7 @@ use crate::application::use_cases::arnes_turno::{
     CitaRevisada, EleccionHerramienta, IntencionTurno, IntentDetector, PostInferenceGuard,
     PreInferenceInterceptor, RegistroTurno, VerificadorPaginas, ViolacionArnes,
 };
+use crate::application::use_cases::circuito_herramientas::CircuitoHerramientas;
 use crate::domain::errors::DomainError;
 use crate::domain::models::center::CenterId;
 
@@ -146,6 +147,8 @@ impl AgentOrchestrator {
         };
         let mut correccion: Option<RecordatorioReintento> = None;
         let mut consulto = false;
+        // Errores consecutivos por herramienta: solo de este turno
+        let mut circuito = CircuitoHerramientas::default();
 
         let mut paso = 0;
         while paso < self.max_steps {
@@ -293,7 +296,13 @@ impl AgentOrchestrator {
                             });
                         }
 
-                        let result = self.tools.ejecutar_herramienta(call).await?;
+                        let result = if circuito.abierto(&call.name) {
+                            circuito.resultado_bloqueado(call, &herramientas_disponibles)
+                        } else {
+                            let result = self.tools.ejecutar_herramienta(call).await?;
+                            circuito.anotar(&call.name, result.is_error);
+                            result
+                        };
 
                         if let Some(cb) = &on_event {
                             cb(AgentExecutionEvent::ToolResultReceived {
@@ -2039,5 +2048,267 @@ mod tests {
             assert_eq!(respuesta.unwrap(), "Como te dije, son 125 bar.", "{modo}");
             assert_eq!(omisiones(&eventos), 0, "{modo}");
         }
+    }
+
+    // --- Circuit breaker por herramienta ---
+
+    /// Falla las herramientas cuyo nombre esté en `fallan` y anota cada ejecución real
+    struct ToolsQueFallan {
+        fallan: Vec<&'static str>,
+        ejecuciones: Mutex<Vec<String>>,
+    }
+
+    impl ToolsQueFallan {
+        fn nuevas(fallan: Vec<&'static str>) -> Arc<Self> {
+            Arc::new(Self {
+                fallan,
+                ejecuciones: Mutex::default(),
+            })
+        }
+
+        fn ejecuciones_de(&self, nombre: &str) -> usize {
+            self.ejecuciones
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|n| *n == nombre)
+                .count()
+        }
+    }
+
+    #[async_trait]
+    impl ToolServerPort for ToolsQueFallan {
+        fn listar_herramientas(&self) -> Vec<ToolDefinition> {
+            ToolDefinition::lakehouse_tools()
+        }
+
+        async fn ejecutar_herramienta(&self, call: &ToolCall) -> Result<ToolResult, DomainError> {
+            self.ejecuciones.lock().unwrap().push(call.name.clone());
+            let falla = self.fallan.contains(&call.name.as_str());
+            Ok(ToolResult {
+                call_id: call.id.clone(),
+                tool_name: call.name.clone(),
+                output: if falla {
+                    json!({ "error": "fallo simulado" })
+                } else {
+                    json!({ "ok": true })
+                },
+                is_error: falla,
+            })
+        }
+    }
+
+    fn llamada_a(nombre: &str, id: &str) -> AgentTurnOutput {
+        AgentTurnOutput::ToolCalls(vec![ToolCall {
+            id: id.to_string(),
+            name: nombre.to_string(),
+            arguments: json!({ "centro_id": "planta_1" }),
+        }])
+    }
+
+    async fn turno_con_circuito(
+        guion: Vec<AgentTurnOutput>,
+        tools: Arc<ToolsQueFallan>,
+        historial: &mut Vec<AgentMessage>,
+    ) -> Vec<AgentExecutionEvent> {
+        let runner = Arc::new(MockRunnerScripted {
+            respuestas: Mutex::new(guion),
+        });
+        let eventos: Arc<Mutex<Vec<AgentExecutionEvent>>> = Arc::default();
+        let destino = eventos.clone();
+        AgentOrchestrator::new(runner, tools)
+            .procesar_turno(
+                &ClaudeModel::sonnet(),
+                &CenterId::new("planta_1").unwrap(),
+                historial,
+                Some(Arc::new(move |e| destino.lock().unwrap().push(e))),
+            )
+            .await
+            .unwrap();
+        eventos.lock().unwrap().clone()
+    }
+
+    fn resultados_de_tools(
+        eventos: &[AgentExecutionEvent],
+    ) -> Vec<(String, bool, serde_json::Value)> {
+        eventos
+            .iter()
+            .filter_map(|e| match e {
+                AgentExecutionEvent::ToolResultReceived {
+                    name,
+                    result,
+                    is_error,
+                } => Some((name.clone(), *is_error, result.clone())),
+                _ => None,
+            })
+            .collect()
+    }
+
+    const SQL: &str = "execute_athena_sql";
+    const CATALOGO: &str = "inspect_lakehouse_catalog";
+
+    #[tokio::test]
+    async fn test_circuito_tras_dos_errores_la_tercera_llamada_se_bloquea_sin_ejecutarse() {
+        let tools = ToolsQueFallan::nuevas(vec![SQL]);
+        let mut historial = vec![AgentMessage::user("Hola")];
+        let eventos = turno_con_circuito(
+            vec![
+                llamada_a(SQL, "c1"),
+                llamada_a(SQL, "c2"),
+                llamada_a(SQL, "c3"),
+                AgentTurnOutput::FinalMessage("No consta.".to_string()),
+            ],
+            tools.clone(),
+            &mut historial,
+        )
+        .await;
+        assert_eq!(tools.ejecuciones_de(SQL), 2);
+        let resultados = resultados_de_tools(&eventos);
+        assert_eq!(
+            resultados.len(),
+            3,
+            "la llamada bloqueada también se ve en la GUI"
+        );
+        let (nombre, es_error, salida) = &resultados[2];
+        assert_eq!(nombre, SQL);
+        assert!(*es_error);
+        let texto = salida["error"].as_str().unwrap();
+        assert!(texto.contains("deshabilitada"));
+        assert!(texto.contains(&format!("`{CATALOGO}`")));
+        assert!(!texto.contains(&format!("`{SQL}`,")));
+        // El modelo recibe el bloqueo como tool_result de su llamada
+        let ultimo_resultado = historial
+            .iter()
+            .rev()
+            .find(|m| m.role == AgentRole::Tool)
+            .unwrap();
+        assert_eq!(ultimo_resultado.tool_call_id.as_deref(), Some("c3"));
+        assert!(ultimo_resultado.content.contains("deshabilitada"));
+    }
+
+    #[tokio::test]
+    async fn test_circuito_tambien_bloquea_llamadas_paralelas_del_mismo_paso() {
+        let tools = ToolsQueFallan::nuevas(vec![SQL]);
+        let mut historial = vec![AgentMessage::user("Hola")];
+        let paralelas = AgentTurnOutput::ToolCalls(
+            ["p1", "p2", "p3"]
+                .iter()
+                .map(|id| ToolCall {
+                    id: id.to_string(),
+                    name: SQL.to_string(),
+                    arguments: json!({}),
+                })
+                .collect(),
+        );
+        let eventos = turno_con_circuito(
+            vec![
+                paralelas,
+                AgentTurnOutput::FinalMessage("No consta.".to_string()),
+            ],
+            tools.clone(),
+            &mut historial,
+        )
+        .await;
+        assert_eq!(tools.ejecuciones_de(SQL), 2);
+        assert!(resultados_de_tools(&eventos)[2].1);
+    }
+
+    #[tokio::test]
+    async fn test_circuito_un_exito_intermedio_reinicia_el_contador_en_el_bucle() {
+        // La herramienta falla, acierta (otra herramienta no reinicia), y vuelve a fallar
+        struct Alterna(Mutex<Vec<bool>>);
+        #[async_trait]
+        impl ToolServerPort for Alterna {
+            fn listar_herramientas(&self) -> Vec<ToolDefinition> {
+                ToolDefinition::lakehouse_tools()
+            }
+            async fn ejecutar_herramienta(
+                &self,
+                call: &ToolCall,
+            ) -> Result<ToolResult, DomainError> {
+                let falla = self.0.lock().unwrap().remove(0);
+                Ok(ToolResult {
+                    call_id: call.id.clone(),
+                    tool_name: call.name.clone(),
+                    output: json!({}),
+                    is_error: falla,
+                })
+            }
+        }
+        let tools = Arc::new(Alterna(Mutex::new(vec![true, false, true, true])));
+        let runner = Arc::new(MockRunnerScripted {
+            respuestas: Mutex::new(vec![
+                llamada_a(SQL, "c1"),
+                llamada_a(SQL, "c2"),
+                llamada_a(SQL, "c3"),
+                llamada_a(SQL, "c4"),
+                AgentTurnOutput::FinalMessage("No consta.".to_string()),
+            ]),
+        });
+        let mut historial = vec![AgentMessage::user("Hola")];
+        AgentOrchestrator::new(runner, tools.clone())
+            .procesar_turno(
+                &ClaudeModel::sonnet(),
+                &CenterId::new("planta_1").unwrap(),
+                &mut historial,
+                None,
+            )
+            .await
+            .unwrap();
+        // Las cuatro se ejecutaron: el éxito de c2 reinició el contador
+        assert!(tools.0.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_circuito_el_contador_va_por_herramienta_en_el_bucle() {
+        let tools = ToolsQueFallan::nuevas(vec![SQL, CATALOGO]);
+        let mut historial = vec![AgentMessage::user("Hola")];
+        turno_con_circuito(
+            vec![
+                llamada_a(SQL, "c1"),
+                llamada_a(CATALOGO, "c2"),
+                llamada_a(SQL, "c3"),
+                llamada_a(CATALOGO, "c4"),
+                llamada_a(SQL, "c5"),
+                AgentTurnOutput::FinalMessage("No consta.".to_string()),
+            ],
+            tools.clone(),
+            &mut historial,
+        )
+        .await;
+        // Errores intercalados de otra herramienta no reinician: SQL se bloquea en c5
+        assert_eq!(tools.ejecuciones_de(SQL), 2);
+        assert_eq!(tools.ejecuciones_de(CATALOGO), 2);
+    }
+
+    #[tokio::test]
+    async fn test_circuito_el_estado_no_pasa_de_un_turno_a_otro() {
+        let tools = ToolsQueFallan::nuevas(vec![SQL]);
+        let mut historial = vec![AgentMessage::user("Hola")];
+        turno_con_circuito(
+            vec![
+                llamada_a(SQL, "c1"),
+                llamada_a(SQL, "c2"),
+                AgentTurnOutput::FinalMessage("No consta.".to_string()),
+            ],
+            tools.clone(),
+            &mut historial,
+        )
+        .await;
+        historial.push(AgentMessage::user("Otra vez"));
+        let eventos = turno_con_circuito(
+            vec![
+                llamada_a(SQL, "c3"),
+                AgentTurnOutput::FinalMessage("No consta.".to_string()),
+            ],
+            tools.clone(),
+            &mut historial,
+        )
+        .await;
+        assert_eq!(tools.ejecuciones_de(SQL), 3);
+        assert_eq!(
+            resultados_de_tools(&eventos)[0].2,
+            json!({ "error": "fallo simulado" })
+        );
     }
 }
