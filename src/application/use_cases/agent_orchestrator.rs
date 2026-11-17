@@ -172,6 +172,8 @@ impl AgentOrchestrator {
         while paso < self.max_steps {
             paso += 1;
 
+            // Sin las herramientas con el circuito abierto: el modelo no las ve en este turno
+            let visibles = herramientas_visibles(&herramientas_disponibles, &circuito);
             let emitido_en_vivo = Arc::new(AtomicBool::new(false));
             let turn_output = match std::mem::replace(&mut eleccion, EleccionHerramienta::Libre) {
                 EleccionHerramienta::Dirigida(dirigida) => {
@@ -180,7 +182,7 @@ impl AgentOrchestrator {
                         modelo,
                         &system_prompt,
                         historial,
-                        &herramientas_disponibles,
+                        &visibles,
                         dirigida,
                         &on_event,
                     )
@@ -194,7 +196,7 @@ impl AgentOrchestrator {
                         modelo,
                         &system_prompt,
                         &vista,
-                        &herramientas_disponibles,
+                        &visibles,
                         &on_event,
                         plan.retener_texto,
                         &emitido_en_vivo,
@@ -504,6 +506,25 @@ impl AgentOrchestrator {
                     .await
             }
         }
+    }
+}
+
+/// El catálogo sin las herramientas con el circuito abierto. Sin ninguna abierta es el mismo
+/// catálogo, sin copiarlo: el array `tools` no cambia y la caché de prompt de la API se conserva
+fn herramientas_visibles<'a>(
+    disponibles: &'a [ToolDefinition],
+    circuito: &CircuitoHerramientas,
+) -> Cow<'a, [ToolDefinition]> {
+    if disponibles.iter().any(|h| circuito.abierto(&h.name)) {
+        Cow::Owned(
+            disponibles
+                .iter()
+                .filter(|h| !circuito.abierto(&h.name))
+                .cloned()
+                .collect(),
+        )
+    } else {
+        Cow::Borrowed(disponibles)
     }
 }
 
@@ -2684,5 +2705,175 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(segunda, "motor B");
+    }
+
+    // --- Herramientas retiradas del array `tools` ---
+
+    /// Guion fijo que anota los nombres del catálogo que recibe en cada paso
+    #[derive(Default)]
+    struct RunnerQueAnotaTools {
+        respuestas: Mutex<Vec<AgentTurnOutput>>,
+        catalogos: Mutex<Vec<Vec<String>>>,
+    }
+
+    impl RunnerQueAnotaTools {
+        fn con_guion(respuestas: Vec<AgentTurnOutput>) -> Arc<Self> {
+            Arc::new(Self {
+                respuestas: Mutex::new(respuestas),
+                ..Self::default()
+            })
+        }
+
+        fn catalogos(&self) -> Vec<Vec<String>> {
+            self.catalogos.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait]
+    impl AgentRunnerPort for RunnerQueAnotaTools {
+        async fn ejecutar_turno(
+            &self,
+            _modelo: &ClaudeModel,
+            _system_prompt: &str,
+            _historial: &[AgentMessage],
+            herramientas: &[ToolDefinition],
+        ) -> Result<AgentTurnOutput, DomainError> {
+            self.catalogos
+                .lock()
+                .unwrap()
+                .push(herramientas.iter().map(|h| h.name.clone()).collect());
+            Ok(self.respuestas.lock().unwrap().remove(0))
+        }
+    }
+
+    async fn turno_que_anota(
+        runner: Arc<RunnerQueAnotaTools>,
+        tools: Arc<ToolsQueFallan>,
+        historial: &mut Vec<AgentMessage>,
+    ) -> Result<String, DomainError> {
+        AgentOrchestrator::new(runner, tools)
+            .procesar_turno(
+                &ClaudeModel::sonnet(),
+                &CenterId::new("planta_1").unwrap(),
+                historial,
+                None,
+            )
+            .await
+    }
+
+    fn todas_las_tools() -> Vec<String> {
+        ToolDefinition::lakehouse_tools()
+            .into_iter()
+            .map(|h| h.name)
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn test_retirada_la_herramienta_bloqueada_sale_del_catalogo_del_resto_del_turno() {
+        let runner = RunnerQueAnotaTools::con_guion(vec![
+            llamada_a(SQL, "c1"),
+            llamada_a(SQL, "c2"),
+            llamada_a(CATALOGO, "c3"),
+            AgentTurnOutput::FinalMessage("No consta.".to_string()),
+        ]);
+        let mut historial = vec![AgentMessage::user("Hola")];
+        turno_que_anota(
+            runner.clone(),
+            ToolsQueFallan::nuevas(vec![SQL]),
+            &mut historial,
+        )
+        .await
+        .unwrap();
+        let catalogos = runner.catalogos();
+        assert_eq!(catalogos.len(), 4);
+        assert_eq!(catalogos[0], todas_las_tools());
+        assert_eq!(catalogos[1], todas_las_tools());
+        let sin_sql: Vec<String> = todas_las_tools().into_iter().filter(|n| n != SQL).collect();
+        assert_eq!(
+            catalogos[2], sin_sql,
+            "abierto el circuito, el modelo deja de verla"
+        );
+        assert_eq!(catalogos[3], sin_sql);
+    }
+
+    #[tokio::test]
+    async fn test_retirada_sin_fallos_el_catalogo_no_cambia_entre_pasos() {
+        let runner = RunnerQueAnotaTools::con_guion(vec![
+            llamada_a(SQL, "c1"),
+            llamada_a(CATALOGO, "c2"),
+            AgentTurnOutput::FinalMessage("Hecho.".to_string()),
+        ]);
+        let mut historial = vec![AgentMessage::user("Hola")];
+        turno_que_anota(
+            runner.clone(),
+            ToolsQueFallan::nuevas(vec![]),
+            &mut historial,
+        )
+        .await
+        .unwrap();
+        // El mismo array en cada paso: la caché de prompt de la API no se invalida
+        assert!(runner.catalogos().iter().all(|c| *c == todas_las_tools()));
+    }
+
+    #[tokio::test]
+    async fn test_retirada_un_solo_error_no_retira_la_herramienta() {
+        let runner = RunnerQueAnotaTools::con_guion(vec![
+            llamada_a(SQL, "c1"),
+            AgentTurnOutput::FinalMessage("No consta.".to_string()),
+        ]);
+        let mut historial = vec![AgentMessage::user("Hola")];
+        turno_que_anota(
+            runner.clone(),
+            ToolsQueFallan::nuevas(vec![SQL]),
+            &mut historial,
+        )
+        .await
+        .unwrap();
+        assert_eq!(runner.catalogos()[1], todas_las_tools());
+    }
+
+    #[tokio::test]
+    async fn test_retirada_la_herramienta_vuelve_en_el_turno_siguiente() {
+        let tools = ToolsQueFallan::nuevas(vec![SQL]);
+        let runner = RunnerQueAnotaTools::con_guion(vec![
+            llamada_a(SQL, "c1"),
+            llamada_a(SQL, "c2"),
+            AgentTurnOutput::FinalMessage("No consta.".to_string()),
+            AgentTurnOutput::FinalMessage("Hola.".to_string()),
+        ]);
+        let mut historial = vec![AgentMessage::user("Hola")];
+        turno_que_anota(runner.clone(), tools.clone(), &mut historial)
+            .await
+            .unwrap();
+        historial.push(AgentMessage::user("Otra"));
+        turno_que_anota(runner.clone(), tools, &mut historial)
+            .await
+            .unwrap();
+        let catalogos = runner.catalogos();
+        assert!(!catalogos[2].contains(&SQL.to_string()));
+        assert_eq!(catalogos[3], todas_las_tools());
+    }
+
+    #[tokio::test]
+    async fn test_retirada_si_el_modelo_la_llama_igualmente_sigue_bloqueada() {
+        let tools = ToolsQueFallan::nuevas(vec![SQL]);
+        let runner = RunnerQueAnotaTools::con_guion(vec![
+            llamada_a(SQL, "c1"),
+            llamada_a(SQL, "c2"),
+            llamada_a(SQL, "c3"),
+            AgentTurnOutput::FinalMessage("No consta.".to_string()),
+        ]);
+        let mut historial = vec![AgentMessage::user("Hola")];
+        turno_que_anota(runner, tools.clone(), &mut historial)
+            .await
+            .unwrap();
+        // El bloqueo queda de respaldo (p. ej. un modelo que alucina la herramienta retirada)
+        assert_eq!(tools.ejecuciones_de(SQL), 2);
+        let ultimo = historial
+            .iter()
+            .rev()
+            .find(|m| m.role == AgentRole::Tool)
+            .unwrap();
+        assert!(ultimo.content.contains("deshabilitada"));
     }
 }
