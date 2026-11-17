@@ -56,6 +56,16 @@ impl AnthropicProcedenciaVerifier {
         }
     }
 
+    /// Otro modelo para el Nivel 2 (p. ej. `auto:smart` en FreeLLMAPI)
+    pub fn con_modelo(mut self, modelo: impl Into<String>) -> Self {
+        self.modelo = modelo.into();
+        self
+    }
+
+    pub fn modelo(&self) -> &str {
+        &self.modelo
+    }
+
     /// `tool_choice` forzado a la tool de trazas: más rápido y barato, sin pensamiento previo
     pub fn con_tool_forzada(mut self) -> Self {
         self.razonamiento_previo = false;
@@ -159,15 +169,20 @@ impl VerificadorProcedenciaPort for AnthropicProcedenciaVerifier {
         let peticion = self.construir_peticion(solicitud)?;
         let resultado = self.cliente.crear_mensaje(&peticion).await?;
         let uso = resultado.respuesta.usage;
+        // Sin tarifa publicada (un proxy u otro modelo), el coste es desconocido, no 0
+        let coste_estimado_usd = (self.cliente.perfil().tarifas
+            && self.modelo == MODELO_PROCEDENCIA_API)
+            .then(|| uso.coste_estimado_usd(&TARIFA_HAIKU_5_5));
         tracing::info!(
+            modelo = %self.modelo,
             latencia_ms = resultado.latencia.as_millis() as u64,
             intentos = resultado.intentos,
             input_tokens = uso.input_tokens,
             cache_creation_input_tokens = uso.cache_creation_input_tokens,
             cache_read_input_tokens = uso.cache_read_input_tokens,
             output_tokens = uso.output_tokens,
-            coste_estimado_usd = uso.coste_estimado_usd(&TARIFA_HAIKU_5_5),
-            "procedencia por la API de Anthropic"
+            coste_estimado_usd,
+            "procedencia por la API de Messages"
         );
         if let Some(observador) = &self.observador {
             observador(&resultado);

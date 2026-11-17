@@ -99,6 +99,26 @@ impl AnthropicMessagesRunner {
         }
     }
 
+    /// El id que se envía: con el perfil de Anthropic se traducen los alias de la CLI; con un
+    /// proxy, el id del desplegable va tal cual
+    pub fn modelo_para(&self, modelo: &ClaudeModel) -> String {
+        if self.cliente.perfil().alias_claude {
+            Self::modelo_api(modelo)
+        } else {
+            modelo.cli_model_name().to_string()
+        }
+    }
+
+    /// Coste del paso: desconocido (`None`) si el destino no tiene tarifas (un proxy) o si el
+    /// modelo no tiene tarifa registrada. Nunca 0 por falta de datos. Con el perfil de Anthropic,
+    /// igual que antes
+    fn coste_de(&self, modelo: &str, mensaje: &super::flujo::MensajeEnFlujo) -> Option<f64> {
+        if !self.cliente.perfil().tarifas {
+            return None;
+        }
+        Self::tarifa(modelo).map(|t| mensaje.uso.coste_estimado_usd(&t))
+    }
+
     fn tarifa(modelo: &str) -> Option<TarifaModelo> {
         match modelo {
             "claude-sonnet-5-5" => Some(TARIFA_SONNET_5_5),
@@ -131,7 +151,7 @@ impl AnthropicMessagesRunner {
         }
         let ultima = herramientas.len().saturating_sub(1);
         PeticionMensajes {
-            model: Self::modelo_api(modelo),
+            model: self.modelo_para(modelo),
             max_tokens: self.max_tokens,
             system: vec![BloqueSistema::texto(
                 system_prompt,
@@ -251,7 +271,7 @@ impl AnthropicMessagesRunner {
             cache_creation_input_tokens: mensaje.uso.cache_creation_input_tokens,
             cache_read_input_tokens: mensaje.uso.cache_read_input_tokens,
             output_tokens: mensaje.uso.output_tokens,
-            coste_usd: Self::tarifa(modelo).map(|t| mensaje.uso.coste_estimado_usd(&t)),
+            coste_usd: self.coste_de(modelo, mensaje),
             bloques_thinking_descartados: mensaje.bloques_thinking_descartados,
             dirigido,
         };

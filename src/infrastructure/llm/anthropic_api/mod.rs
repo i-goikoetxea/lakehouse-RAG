@@ -12,7 +12,8 @@ pub mod secreto;
 
 pub use agente::{AnthropicMessagesRunner, MODELO_AGENTE_API, MetricaPasoApi};
 pub use cliente::{
-    AnthropicHttpClient, ConfigClienteAnthropic, PoliticaReintentos, RespuestaConMetricas,
+    AnthropicHttpClient, ConfigClienteAnthropic, ModeloListado, PerfilApi, PoliticaReintentos,
+    RespuestaConMetricas,
 };
 pub use error::ErrorApiAnthropic;
 pub use procedencia::{AnthropicProcedenciaVerifier, MODELO_PROCEDENCIA_API};
