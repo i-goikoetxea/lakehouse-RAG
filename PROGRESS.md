@@ -1698,3 +1698,38 @@
 - [x] Ejecutable de producción con `cargo tauri build` en la rama.
 
 **Medido:** suite **1249/0/36** (base 1218/0/36), sumando los binarios repetidos a la primera pasada sin repetir la suite entera. `fmt` y `clippy`: limpios.
+
+### Sesión Motor FreeLLMAPI (2026-11-17): tercer motor del LLM
+
+**Estado: `[COMPLETADO]`, pendiente de la prueba manual del usuario. Sin merge, sin push y sin tag.** Rama `claude/motor-freellmapi-4d79f4`, desde `main` `d3986f3`. Contrato: `docs/arquitectura/ssd_motor_freellmapi.md`. Informe: `benchmarks/informes/motor_freellmapi_20261117.md`. No se ha leído el set oculto.
+
+**Errores y límites (primero):**
+- **Calidad sin medir.** El humo real dio 3/3 en 3 preguntas sintéticas propias: solo prueba el circuito.
+- **Tope del humo superado en 1:** 10 llamadas del agente. Una pregunta abierta encadenó 6 pasos.
+- **Sin comprobar en real:** el Nivel 2 con `auto:smart`, el modal, el desplegable en la ventana y `keyring`.
+- **Suite completa no pasada,** por decisión del usuario. Solo los tests dirigidos.
+- **TDD sin fase roja observada.** Los tests se escribieron antes, pero se ejecutaron ya en verde.
+- **Incidente:** un `cargo build --all-targets` saturó el disco D:. A partir de ahí, solo targets concretos con `-j 2`.
+
+**Cambios:**
+- [x] `ClaudeModel` admite `:` (`auto:smart`).
+- [x] `PerfilApi` en `ConfigClienteAnthropic`:
+  - el perfil FreeLLMAPI quita `thinking`, `cache_control`, `strict` y `anthropic-beta`;
+  - envía `anthropic-version: 2023-06-01` y los ids tal cual;
+  - el coste queda desconocido y `stop_reason` ausente falla cerrado.
+  - **El perfil Anthropic no cambia nada.**
+- [x] `ModoLlm::FreeLlmApi`:
+  - `llm_config.json` guarda también la URL, validada, con `http://127.0.0.1:31415` por defecto;
+  - la key va en `FREELLMAPI_API_KEY` o en la entrada `keyring` `freellmapi_api_key`, y cada motor lee solo la suya;
+  - el catálogo sale de `GET /v1/models?available=true`, con `auto` arriba;
+  - la procedencia usa `auto:smart`.
+- [x] GUI:
+  - opción FreeLLMAPI con el aviso de terceros;
+  - URL editable y key con máscara `freellmapi-…`;
+  - el desplegable avisa si el proxy no responde.
+- [x] Humo: `humo_agente_api --motor freellmapi`. `ab_agente --modo freellmapi`.
+
+**Medido:**
+- `--lib` filtrado: 83/0/1. `integration_agente_api`: 12/12. `adversarial_api_key_gui`: 1/1. `gui_config_llm`: 8/8.
+- `clippy --all-targets -D warnings`: limpio. `fmt`: aplicado.
+- Ejecutable de producción (`cargo tauri build`, 24 min con 2 jobs): `D:\Proyectos\lakehouse RAG\.claude\worktrees\motor-freellmapi-4d79f4	argetelease\lakehouse_rag.exe`, con `pdfium.dll` al lado.
