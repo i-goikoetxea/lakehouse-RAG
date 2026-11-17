@@ -13,9 +13,8 @@ use crate::application::use_cases::lakehouse_tool_service::{
 use crate::infrastructure::embeddings::fastembed_engine::MODELO_POR_DEFECTO;
 use crate::infrastructure::embeddings::lazy_engine::LazyFastEmbedEngine;
 use crate::infrastructure::llm::anthropic_api::AnthropicMessagesRunner;
-use crate::infrastructure::llm::modo_llm::{
-    ModoLlm, agente_para, catalogo_modelos_para, verificador_procedencia_para,
-};
+use crate::infrastructure::llm::modo_llm::ModoLlm;
+use crate::infrastructure::llm::motor_conmutable::{MotorConmutable, compositor_real};
 use crate::infrastructure::llm::preferencia_modo::{
     ModoResuelto, leer_preferencias, resolver_modo_al_arrancar,
 };
@@ -97,6 +96,9 @@ pub struct ComposicionReal {
     pub modo_en_uso: ModoLlm,
     /// URL de FreeLLMAPI con que se compuso (guardada o la de la app de escritorio)
     pub freellmapi_url: String,
+    /// Motor activo: la ventana lo cambia sin reiniciar. El agente, el verificador y el catálogo
+    /// de `dependencias` delegan en él
+    pub motor: Arc<MotorConmutable>,
 }
 
 /// Registro JSON, centros en disco, LanceDB, FastEmbed diferido y Claude Code
@@ -113,8 +115,13 @@ pub fn composicion_real(config: &ConfiguracionComposicion) -> ComposicionReal {
     let url_freellmapi = leer_preferencias(&config.directorio_config)
         .url_freellmapi()
         .to_string();
-    let agente = agente_para(modo, &url_freellmapi, ClaudeAgentConfig::default());
-    let modo_en_uso = agente.en_uso;
+    let motor = MotorConmutable::new(
+        compositor_real(ClaudeAgentConfig::default()),
+        modo_pedido,
+        &url_freellmapi,
+    );
+    let compuesto = motor.actual();
+    let modo_en_uso = compuesto.en_uso;
     tracing::info!(
         pedido = ?modo,
         origen = modo_pedido.origen.nombre(),
@@ -130,21 +137,18 @@ pub fn composicion_real(config: &ConfiguracionComposicion) -> ComposicionReal {
             destilador: Arc::new(ClaudeHeadlessDistiller::new(ClaudeHeadlessConfig::default())),
             modelo_embeddings: embeddings.modelo_activo(),
             embeddings,
-            agente: agente.runner,
+            agente: motor.runner(),
             herramientas: motores.herramientas,
-            catalogo_modelos: catalogo_modelos_para(modo_en_uso, &url_freellmapi),
+            catalogo_modelos: motor.catalogo(),
             reloj: Arc::new(RelojDelSistema),
-            verificador_procedencia: Some(verificador_procedencia_para(
-                modo_en_uso,
-                &url_freellmapi,
-                ClaudeAgentConfig::default().binary_path,
-            )),
+            verificador_procedencia: Some(motor.verificador()),
         },
         indice: motores.indice,
-        agente_api: agente.api,
+        agente_api: compuesto.api.clone(),
         modo_pedido,
         modo_en_uso,
         freellmapi_url: url_freellmapi,
+        motor,
     }
 }
 
@@ -159,6 +163,8 @@ pub struct LakehouseCompuesta {
     pub modo_pedido: ModoResuelto,
     pub modo_en_uso: ModoLlm,
     pub freellmapi_url: String,
+    /// Motor activo, conmutable desde la ventana
+    pub motor: Arc<MotorConmutable>,
 }
 
 pub fn componer_lakehouse_con_modo(config: &ConfiguracionComposicion) -> LakehouseCompuesta {
@@ -168,5 +174,6 @@ pub fn componer_lakehouse_con_modo(config: &ConfiguracionComposicion) -> Lakehou
         modo_pedido: composicion.modo_pedido,
         modo_en_uso: composicion.modo_en_uso,
         freellmapi_url: composicion.freellmapi_url,
+        motor: composicion.motor,
     }
 }

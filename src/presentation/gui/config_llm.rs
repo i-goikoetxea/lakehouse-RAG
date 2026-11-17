@@ -1,26 +1,57 @@
 //! Configuración del motor del LLM desde la ventana: qué motor está en uso, cuál se ha elegido
-//! y cuál se usará al reiniciar, y la URL del proxy FreeLLMAPI. El runner se compone al arrancar
-//! y no se cambia en caliente (`docs/arquitectura/ssd_gui_config_llm.md`): la elección se
-//! persiste y se aplica al reiniciar.
+//! y la URL del proxy FreeLLMAPI. Lo que se guarda se persiste y se aplica al instante, sin
+//! reiniciar la app (`MotorLlmVivo`); una consulta en curso termina con el motor con que empezó.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use serde::Serialize;
 
 use crate::infrastructure::llm::modo_llm::{ModoLlm, VARIABLE_MODO_LLM};
+use crate::infrastructure::llm::motor_conmutable::MotorConmutable;
 use crate::infrastructure::llm::preferencia_modo::{
     ModoResuelto, OrigenModo, PreferenciasLlm, es_url_local, guardar_modo, guardar_url_freellmapi,
     leer_preferencias, modo_estricto, nombre_de_modo, resolver_modo,
 };
 
-/// Motor con que se compuso esta sesión de la app; se registra como estado de Tauri
+/// Instantánea del motor compuesto ahora mismo (lo que leen las funciones puras del modal)
 #[derive(Debug, Clone)]
 pub struct MotorLlmSesion {
     pub directorio_config: PathBuf,
+    /// Motor pedido en la composición vigente (al arrancar o al último guardado) y su origen
     pub pedido_al_arrancar: ModoResuelto,
     pub en_uso: ModoLlm,
-    /// URL de FreeLLMAPI con que se compuso la sesión (la use o no)
+    /// URL de FreeLLMAPI con que se compuso el motor vigente (la use o no)
     pub freellmapi_url: String,
+}
+
+/// Motor vivo de la ventana; se registra como estado de Tauri. Guardar un motor, una URL o una
+/// key lo recompone al instante con la misma prelación que al arrancar (entorno > fichero > CLI)
+pub struct MotorLlmVivo {
+    pub directorio_config: PathBuf,
+    pub motor: Arc<MotorConmutable>,
+}
+
+impl MotorLlmVivo {
+    pub fn sesion(&self) -> MotorLlmSesion {
+        let actual = self.motor.actual();
+        MotorLlmSesion {
+            directorio_config: self.directorio_config.clone(),
+            pedido_al_arrancar: actual.pedido,
+            en_uso: actual.en_uso,
+            freellmapi_url: actual.freellmapi_url.clone(),
+        }
+    }
+
+    /// Aplica las preferencias guardadas. `forzar`: se guardó la key de `modo_de_la_key`; si es
+    /// el motor pedido, se recompone aunque no cambie nada más
+    pub fn aplicar(&self, valor_entorno: Option<&str>, key_guardada: Option<ModoLlm>) {
+        let guardadas = leer_preferencias(&self.directorio_config);
+        let pedido = resolver_modo(valor_entorno, guardadas.modo);
+        let forzar = key_guardada == Some(pedido.modo);
+        self.motor
+            .aplicar(pedido, guardadas.url_freellmapi(), forzar);
+    }
 }
 
 /// Qué keys hay disponibles para cada motor (variable de entorno o almacén)
@@ -48,7 +79,8 @@ pub struct EstadoModoLlmDto {
     pub en_uso: String,
     /// Lo guardado en `llm_config.json`, si hay algo válido
     pub elegido: Option<String>,
-    /// Motor que se pedirá en el próximo arranque, con la prelación entorno > fichero > `cli`
+    /// Motor pedido según lo guardado, con la prelación entorno > fichero > `cli`. Se aplica al
+    /// guardar; el nombre del campo se conserva por compatibilidad
     pub al_reiniciar: String,
     /// `entorno`, `fichero` o `por_defecto`
     pub origen_al_reiniciar: String,
@@ -56,9 +88,10 @@ pub struct EstadoModoLlmDto {
     pub entorno_manda: bool,
     /// Se pidió un motor con API al arrancar, pero no había cliente: esta sesión usa `cli`
     pub respaldo_cli: bool,
-    /// El motor (o la URL del proxy) del próximo arranque no es el que está en uso
+    /// Lo guardado aún no es el motor (o la URL del proxy) en uso: el motor vivo lo aplica al
+    /// guardar, así que en la ventana solo dura hasta la respuesta del comando
     pub pendiente_de_reinicio: bool,
-    /// URL de FreeLLMAPI que se usará al reiniciar (la guardada o la de la app de escritorio)
+    /// URL de FreeLLMAPI guardada (o la de la app de escritorio)
     pub freellmapi_url: String,
     /// La URL apunta a este equipo
     pub freellmapi_url_local: bool,
@@ -106,7 +139,7 @@ pub fn estado_modo_llm_en(
     }
     if respaldo_cli {
         avisos.push(format!(
-            "Se pidió el modo {} al arrancar, pero no había una key válida: esta sesión usa CLI.",
+            "Se pidió el modo {}, pero no hay una key válida: se usa CLI.",
             nombre_visible(sesion.pedido_al_arrancar.modo)
         ));
     }
@@ -125,9 +158,6 @@ pub fn estado_modo_llm_en(
         avisos.push(format!(
             "La URL de FreeLLMAPI no es de este equipo: la key y los prompts viajan por la red hasta {url}."
         ));
-    }
-    if pendiente_de_reinicio {
-        avisos.push("El cambio de motor se aplica al reiniciar la app.".to_string());
     }
     EstadoModoLlmDto {
         en_uso: nombre_de_modo(sesion.en_uso).to_string(),
@@ -156,10 +186,7 @@ pub fn guardar_modo_llm_en(
     guardar_modo(&sesion.directorio_config, elegido).map_err(|_| {
         "No se pudo guardar el modo en el directorio de configuración de la app.".to_string()
     })?;
-    tracing::info!(
-        modo = nombre_de_modo(elegido),
-        "modo del LLM guardado; se aplica al reiniciar"
-    );
+    tracing::info!(modo = nombre_de_modo(elegido), "modo del LLM guardado");
     Ok(estado_modo_llm_desde_disco(sesion, valor_entorno, keys))
 }
 
@@ -179,7 +206,7 @@ pub fn guardar_url_freellmapi_en(
                 .to_string(),
         );
     }
-    tracing::info!("URL de FreeLLMAPI guardada; se aplica al reiniciar");
+    tracing::info!("URL de FreeLLMAPI guardada");
     Ok(estado_modo_llm_desde_disco(sesion, valor_entorno, keys))
 }
 
@@ -252,7 +279,7 @@ mod tests {
         assert_eq!(estado.al_reiniciar, "api");
         assert_eq!(estado.origen_al_reiniciar, "fichero");
         assert!(estado.pendiente_de_reinicio);
-        assert!(estado.avisos.iter().any(|a| a.contains("reiniciar")));
+        assert!(!estado.avisos.iter().any(|a| a.contains("reinici")));
     }
 
     #[test]
@@ -406,7 +433,127 @@ mod tests {
             estado
                 .avisos
                 .iter()
-                .any(|a| a.contains("FreeLLMAPI al arrancar"))
+                .any(|a| a.contains("Se pidió el modo FreeLLMAPI"))
         );
+    }
+
+    // --- Motor vivo: cambio sin reiniciar ---
+
+    mod vivo {
+        use super::*;
+        use crate::application::dtos::agent::{
+            AgentMessage, AgentTurnOutput, ClaudeModel, ModelDescriptor,
+        };
+        use crate::application::dtos::procedencia::{SolicitudProcedencia, TrazasPropuestas};
+        use crate::application::dtos::tools::ToolDefinition;
+        use crate::application::ports::agent_runner::AgentRunnerPort;
+        use crate::application::ports::model_catalog::ModelCatalogPort;
+        use crate::application::ports::verificador_procedencia::VerificadorProcedenciaPort;
+        use crate::domain::errors::DomainError;
+        use crate::infrastructure::llm::motor_conmutable::{Compositor, MotorCompuesto};
+        use async_trait::async_trait;
+        use std::sync::Mutex;
+
+        struct Nulo;
+
+        #[async_trait]
+        impl AgentRunnerPort for Nulo {
+            async fn ejecutar_turno(
+                &self,
+                _: &ClaudeModel,
+                _: &str,
+                _: &[AgentMessage],
+                _: &[ToolDefinition],
+            ) -> Result<AgentTurnOutput, DomainError> {
+                Ok(AgentTurnOutput::FinalMessage(String::new()))
+            }
+        }
+
+        #[async_trait]
+        impl VerificadorProcedenciaPort for Nulo {
+            async fn proponer_trazas(
+                &self,
+                _: &SolicitudProcedencia,
+            ) -> Result<TrazasPropuestas, DomainError> {
+                Err(DomainError::AgentError(String::new()))
+            }
+        }
+
+        #[async_trait]
+        impl ModelCatalogPort for Nulo {
+            async fn listar_modelos(&self) -> Result<Vec<ModelDescriptor>, DomainError> {
+                Ok(vec![])
+            }
+        }
+
+        /// Compone siempre el motor pedido (como si hubiera key) y cuenta las composiciones
+        fn compositor(composiciones: Arc<Mutex<usize>>) -> Compositor {
+            Arc::new(move |pedido: ModoResuelto, url: &str| {
+                *composiciones.lock().unwrap() += 1;
+                MotorCompuesto {
+                    pedido,
+                    en_uso: pedido.modo,
+                    freellmapi_url: url.to_string(),
+                    runner: Arc::new(Nulo),
+                    api: None,
+                    verificador: Arc::new(Nulo),
+                    catalogo: Arc::new(Nulo),
+                }
+            })
+        }
+
+        fn vivo(dir: &Path, composiciones: Arc<Mutex<usize>>) -> MotorLlmVivo {
+            MotorLlmVivo {
+                directorio_config: dir.to_path_buf(),
+                motor: MotorConmutable::new(
+                    compositor(composiciones),
+                    ModoResuelto {
+                        modo: ModoLlm::Cli,
+                        origen: OrigenModo::PorDefecto,
+                    },
+                    "http://127.0.0.1:31415",
+                ),
+            }
+        }
+
+        #[test]
+        fn test_guardar_otro_motor_lo_pone_en_uso_al_instante_sin_aviso_de_reinicio() {
+            let dir = tempfile::tempdir().unwrap();
+            let vivo = vivo(dir.path(), Arc::default());
+            guardar_modo_llm_en(&vivo.sesion(), "freellmapi", None, CON_KEYS).unwrap();
+            vivo.aplicar(None, None);
+            let estado = estado_modo_llm_desde_disco(&vivo.sesion(), None, CON_KEYS);
+            assert_eq!(estado.en_uso, "freellmapi");
+            assert!(!estado.pendiente_de_reinicio);
+            assert!(
+                !estado.avisos.iter().any(|a| a.contains("reinici")),
+                "{:?}",
+                estado.avisos
+            );
+        }
+
+        #[test]
+        fn test_con_la_variable_de_entorno_guardar_no_cambia_el_motor() {
+            let dir = tempfile::tempdir().unwrap();
+            let vivo = vivo(dir.path(), Arc::default());
+            guardar_modo_llm_en(&vivo.sesion(), "api", Some("cli"), CON_KEYS).unwrap();
+            vivo.aplicar(Some("cli"), None);
+            assert_eq!(vivo.sesion().en_uso, ModoLlm::Cli);
+            assert_eq!(vivo.sesion().pedido_al_arrancar.origen, OrigenModo::Entorno);
+        }
+
+        #[test]
+        fn test_guardar_la_key_del_motor_pedido_lo_recompone_y_la_de_otro_no() {
+            let dir = tempfile::tempdir().unwrap();
+            let composiciones: Arc<Mutex<usize>> = Arc::default();
+            let vivo = vivo(dir.path(), Arc::clone(&composiciones));
+            guardar_modo(dir.path(), ModoLlm::Api).unwrap();
+            vivo.aplicar(None, None);
+            assert_eq!(*composiciones.lock().unwrap(), 2);
+            vivo.aplicar(None, Some(ModoLlm::FreeLlmApi));
+            assert_eq!(*composiciones.lock().unwrap(), 2, "key de otro motor");
+            vivo.aplicar(None, Some(ModoLlm::Api));
+            assert_eq!(*composiciones.lock().unwrap(), 3, "key del motor pedido");
+        }
     }
 }

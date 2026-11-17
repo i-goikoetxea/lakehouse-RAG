@@ -1123,9 +1123,8 @@
     enUso.className = `chip chip-mono ${estado.respaldoCli ? 'chip-aviso' : 'chip-ok'}`;
     const elegido = estado.elegido || 'cli';
     document.querySelectorAll('input[name="config-modo"]').forEach((radio) => { radio.checked = radio.value === elegido; });
-    const pendiente = estado.pendienteDeReinicio ? ' · pendiente de reinicio' : '';
     $('config-al-reiniciar').textContent =
-      `Al reiniciar: ${NOMBRE_MOTOR[estado.alReiniciar] || estado.alReiniciar} (${ORIGEN_MODO[estado.origenAlReiniciar] || estado.origenAlReiniciar})${pendiente}.`;
+      `Pedido: ${NOMBRE_MOTOR[estado.alReiniciar] || estado.alReiniciar} (${ORIGEN_MODO[estado.origenAlReiniciar] || estado.origenAlReiniciar}). Se aplica al guardar; una pregunta en curso termina con el motor con que empezó.`;
     const avisos = $('config-avisos-modo');
     vaciar(avisos);
     estado.avisos.forEach((aviso) => avisos.appendChild(el('li', null, aviso)));
@@ -1181,7 +1180,8 @@
       try {
         const estado = await invoke('guardar_modo_llm', { modo: radio.value });
         pintarModo(estado);
-        registrar(`Motor elegido: ${NOMBRE_MOTOR[radio.value]}. Se aplica al reiniciar la app.`, 'ok');
+        registrar(`Motor en uso: ${NOMBRE_MOTOR[estado.enUso] || estado.enUso} (desde la próxima pregunta).`, 'ok');
+        await cargarModelos();
       } catch (err) {
         $('config-modo-error').textContent = mensajeError(err);
         await cargarConfig();
@@ -1200,14 +1200,14 @@
     boton.disabled = true;
     try {
       pintarKey(await invoke('guardar_api_key', { key: campoKey.value }));
-      registrar('API key guardada en el almacén del sistema. El motor se compone al arrancar: reinicia la app para usarla.', 'ok');
+      registrar('API key guardada en el almacén del sistema.', 'ok');
     } catch (err) {
       $('config-key-error').textContent = mensajeError(err);
     } finally {
       vaciarCampoKey();
       boton.disabled = false;
     }
-    await cargarConfig();
+    await Promise.all([cargarConfig(), cargarModelos()]);
   });
 
   // La key del proxy sigue el mismo camino que la de Anthropic: del campo al comando, sin variable
@@ -1223,14 +1223,14 @@
     boton.disabled = true;
     try {
       pintarKeyProxy(await invoke('guardar_freellmapi_key', { key: campoKeyProxy.value }));
-      registrar('Key de FreeLLMAPI guardada en el almacén del sistema. Reinicia la app para usarla.', 'ok');
+      registrar('Key de FreeLLMAPI guardada en el almacén del sistema.', 'ok');
     } catch (err) {
       error.textContent = mensajeError(err);
     } finally {
       campoKeyProxy.value = '';
       boton.disabled = false;
     }
-    await cargarConfig();
+    await Promise.all([cargarConfig(), cargarModelos()]);
   });
 
   $('form-freellmapi-url').addEventListener('submit', async (e) => {
@@ -1243,7 +1243,8 @@
       const estado = await invoke('guardar_url_freellmapi', { url: $('config-freellmapi-url').value });
       $('config-freellmapi-url').blur();
       pintarModo(estado);
-      registrar('URL de FreeLLMAPI guardada. Se aplica al reiniciar la app.', 'ok');
+      registrar('URL de FreeLLMAPI guardada.', 'ok');
+      await cargarModelos();
     } catch (err) {
       error.textContent = mensajeError(err);
     } finally {

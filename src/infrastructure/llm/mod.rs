@@ -7,6 +7,7 @@ pub mod freellmapi_catalogo;
 pub mod mock_agent_runner;
 pub mod mock_distiller;
 pub mod modo_llm;
+pub mod motor_conmutable;
 pub mod preferencia_modo;
 pub mod sesion_claude;
 pub mod stream_json;

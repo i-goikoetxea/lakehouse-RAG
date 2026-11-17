@@ -59,6 +59,13 @@ pub trait AgentRunnerPort: Send + Sync {
     fn necesita_correccion_de_omision(&self) -> bool {
         false
     }
+
+    /// El ejecutor concreto que atenderá una consulta entera. Un ejecutor conmutable (el motor
+    /// se cambia desde la ventana) devuelve el activo al empezar la consulta, para que no cambie
+    /// a mitad. Por defecto `None`: el propio ejecutor
+    fn motor_de_la_consulta(&self) -> Option<Arc<dyn AgentRunnerPort>> {
+        None
+    }
 }
 
 /// Recibe cada fragmento de texto visible de la respuesta mientras llega

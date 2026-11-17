@@ -116,7 +116,7 @@ pub struct CatalogoSinKey;
 impl ModelCatalogPort for CatalogoSinKey {
     async fn listar_modelos(&self) -> Result<Vec<ModelDescriptor>, DomainError> {
         Err(DomainError::AgentError(
-            "FreeLLMAPI no tiene key: guárdala en el engranaje y reinicia la app.".into(),
+            "FreeLLMAPI no tiene key: guárdala en el engranaje.".into(),
         ))
     }
 }

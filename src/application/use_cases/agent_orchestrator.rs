@@ -119,6 +119,20 @@ impl AgentOrchestrator {
         )
     }
 
+    /// Ejecutor y verificador que atenderán una consulta entera (los activos al empezarla)
+    fn motor_de_la_consulta(&self) -> MotorDeLaConsulta {
+        MotorDeLaConsulta {
+            runner: self
+                .runner
+                .motor_de_la_consulta()
+                .unwrap_or_else(|| Arc::clone(&self.runner)),
+            verificador: self
+                .verificador
+                .as_ref()
+                .map(|v| v.motor_de_la_consulta().unwrap_or_else(|| Arc::clone(v))),
+        }
+    }
+
     /// Ejecuta el bucle de turnos hasta obtener una respuesta final o agotar max_steps
     pub async fn procesar_turno(
         &self,
@@ -129,6 +143,8 @@ impl AgentOrchestrator {
     ) -> Result<String, DomainError> {
         let system_prompt = Self::build_system_prompt(centro_id);
         let herramientas_disponibles = self.tools.listar_herramientas();
+        // El motor se resuelve una vez: un cambio desde la ventana no afecta a esta consulta
+        let motor = self.motor_de_la_consulta();
         let pregunta = ultima_pregunta_del_operador(historial);
         let intencion = IntentDetector::clasificar(&pregunta);
         let plan = PreInferenceInterceptor::plan(&intencion);
@@ -140,7 +156,7 @@ impl AgentOrchestrator {
         let mut recordatorio: Option<RecordatorioReintento> = None;
         // Red de seguridad de los transportes sin `tool_choice` forzado (Fase 5.2)
         let corrige_omisiones =
-            self.runner.necesita_correccion_de_omision() && intencion != IntencionTurno::Ninguna;
+            motor.runner.necesita_correccion_de_omision() && intencion != IntencionTurno::Ninguna;
         let dirigida_del_plan = match plan.primer_paso {
             EleccionHerramienta::Dirigida(dirigida) => Some(dirigida),
             EleccionHerramienta::Libre => None,
@@ -160,6 +176,7 @@ impl AgentOrchestrator {
             let turn_output = match std::mem::replace(&mut eleccion, EleccionHerramienta::Libre) {
                 EleccionHerramienta::Dirigida(dirigida) => {
                     self.paso_dirigido(
+                        &motor,
                         modelo,
                         &system_prompt,
                         historial,
@@ -173,6 +190,7 @@ impl AgentOrchestrator {
                     let vista =
                         vista_del_modelo(historial, &[correccion.as_ref(), recordatorio.as_ref()]);
                     self.paso_libre(
+                        &motor,
                         modelo,
                         &system_prompt,
                         &vista,
@@ -237,7 +255,7 @@ impl AgentOrchestrator {
                 AgentTurnOutput::FinalMessage(candidata) => {
                     let veredicto = self
                         .validar_con_procedencia(
-                            &candidata, &pregunta, &intencion, &registro, &on_event,
+                            &motor, &candidata, &pregunta, &intencion, &registro, &on_event,
                         )
                         .await;
                     let (respuesta, reemplazada) = match veredicto {
@@ -352,6 +370,7 @@ impl AgentOrchestrator {
     /// violación de hoy (falla cerrada).
     async fn validar_con_procedencia(
         &self,
+        motor: &MotorDeLaConsulta,
         candidata: &str,
         pregunta: &str,
         intencion: &IntencionTurno,
@@ -367,7 +386,7 @@ impl AgentOrchestrator {
             violacion,
             ViolacionArnes::CifraSinAnclar { .. } | ViolacionArnes::CifraEnAbstencion { .. }
         );
-        let Some(verificador) = self.verificador.as_ref().filter(|_| es_de_cifras) else {
+        let Some(verificador) = motor.verificador.as_ref().filter(|_| es_de_cifras) else {
             return Err(violacion);
         };
         let pendientes =
@@ -419,8 +438,10 @@ impl AgentOrchestrator {
 
     /// Sin llamada, el texto del modelo se descarta: el mensaje vacío lo juzga el guard
     /// (`CapaDosNoIntentada`), que aplica el mismo reintento único que a cualquier respuesta.
+    #[allow(clippy::too_many_arguments)]
     async fn paso_dirigido(
         &self,
+        motor: &MotorDeLaConsulta,
         modelo: &ClaudeModel,
         system_prompt: &str,
         historial: &[AgentMessage],
@@ -433,7 +454,7 @@ impl AgentOrchestrator {
             EtapaArnes::Directiva,
             format!("se solicita {}", dirigida.as_str()),
         );
-        let salida = self
+        let salida = motor
             .runner
             .ejecutar_turno_dirigido(modelo, system_prompt, historial, herramientas, dirigida)
             .await?;
@@ -454,6 +475,7 @@ impl AgentOrchestrator {
     #[allow(clippy::too_many_arguments)]
     async fn paso_libre(
         &self,
+        motor: &MotorDeLaConsulta,
         modelo: &ClaudeModel,
         system_prompt: &str,
         vista: &[AgentMessage],
@@ -470,17 +492,25 @@ impl AgentOrchestrator {
                     emitido.store(true, Ordering::SeqCst);
                     cb(AgentExecutionEvent::TextDelta(fragmento.to_string()))
                 });
-                self.runner
+                motor
+                    .runner
                     .ejecutar_turno_en_vivo(modelo, system_prompt, vista, herramientas, observador)
                     .await
             }
             _ => {
-                self.runner
+                motor
+                    .runner
                     .ejecutar_turno(modelo, system_prompt, vista, herramientas)
                     .await
             }
         }
     }
+}
+
+/// Motor fijado al empezar una consulta
+struct MotorDeLaConsulta {
+    runner: Arc<dyn AgentRunnerPort>,
+    verificador: Option<Arc<dyn VerificadorProcedenciaPort>>,
 }
 
 /// Aviso al modelo que solo existe en su vista del reintento, nunca en el historial del operador
@@ -2560,5 +2590,99 @@ mod tests {
         )
         .await;
         assert_eq!(tools.ejecuciones_de(CATALOGO), 2);
+    }
+
+    // --- Motor fijado al empezar la consulta ---
+
+    /// Como el runner conmutable de infraestructura: delega en el activo y lo da al empezar
+    struct RunnerQueCambia {
+        activo: Mutex<Arc<dyn AgentRunnerPort>>,
+    }
+
+    impl RunnerQueCambia {
+        fn activo(&self) -> Arc<dyn AgentRunnerPort> {
+            Arc::clone(&self.activo.lock().unwrap())
+        }
+    }
+
+    #[async_trait]
+    impl AgentRunnerPort for RunnerQueCambia {
+        async fn ejecutar_turno(
+            &self,
+            modelo: &ClaudeModel,
+            system_prompt: &str,
+            historial: &[AgentMessage],
+            herramientas: &[ToolDefinition],
+        ) -> Result<AgentTurnOutput, DomainError> {
+            self.activo()
+                .ejecutar_turno(modelo, system_prompt, historial, herramientas)
+                .await
+        }
+
+        fn motor_de_la_consulta(&self) -> Option<Arc<dyn AgentRunnerPort>> {
+            Some(self.activo())
+        }
+    }
+
+    /// Al ejecutar una herramienta, cambia el motor activo (el operador guarda otro a mitad)
+    struct ToolsQueCambianElMotor {
+        runner: Arc<RunnerQueCambia>,
+        siguiente: Mutex<Option<Arc<dyn AgentRunnerPort>>>,
+    }
+
+    #[async_trait]
+    impl ToolServerPort for ToolsQueCambianElMotor {
+        fn listar_herramientas(&self) -> Vec<ToolDefinition> {
+            ToolDefinition::lakehouse_tools()
+        }
+
+        async fn ejecutar_herramienta(&self, call: &ToolCall) -> Result<ToolResult, DomainError> {
+            if let Some(siguiente) = self.siguiente.lock().unwrap().take() {
+                *self.runner.activo.lock().unwrap() = siguiente;
+            }
+            Ok(ToolResult {
+                call_id: call.id.clone(),
+                tool_name: call.name.clone(),
+                output: json!({}),
+                is_error: false,
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn test_una_consulta_en_curso_no_cambia_de_motor_y_la_siguiente_si() {
+        let motor_a: Arc<dyn AgentRunnerPort> = Arc::new(MockRunnerScripted {
+            respuestas: Mutex::new(vec![
+                llamada_a(CATALOGO, "c1"),
+                AgentTurnOutput::FinalMessage("motor A".to_string()),
+            ]),
+        });
+        let motor_b: Arc<dyn AgentRunnerPort> = Arc::new(MockRunnerScripted {
+            respuestas: Mutex::new(vec![AgentTurnOutput::FinalMessage("motor B".to_string())]),
+        });
+        let runner = Arc::new(RunnerQueCambia {
+            activo: Mutex::new(motor_a),
+        });
+        let tools = Arc::new(ToolsQueCambianElMotor {
+            runner: Arc::clone(&runner),
+            siguiente: Mutex::new(Some(motor_b)),
+        });
+        let orquestador = AgentOrchestrator::new(runner, tools);
+        let centro = CenterId::new("planta_1").unwrap();
+        let mut historial = vec![AgentMessage::user("Hola")];
+        let primera = orquestador
+            .procesar_turno(&ClaudeModel::sonnet(), &centro, &mut historial, None)
+            .await
+            .unwrap();
+        assert_eq!(
+            primera, "motor A",
+            "el cambio a mitad no afecta a la consulta"
+        );
+        historial.push(AgentMessage::user("Otra"));
+        let segunda = orquestador
+            .procesar_turno(&ClaudeModel::sonnet(), &centro, &mut historial, None)
+            .await
+            .unwrap();
+        assert_eq!(segunda, "motor B");
     }
 }
