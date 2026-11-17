@@ -1732,7 +1732,7 @@
 **Medido:**
 - `--lib` filtrado: 83/0/1. `integration_agente_api`: 12/12. `adversarial_api_key_gui`: 1/1. `gui_config_llm`: 8/8.
 - `clippy --all-targets -D warnings`: limpio. `fmt`: aplicado.
-- Ejecutable de producción (`cargo tauri build`, 24 min con 2 jobs): `D:\Proyectos\lakehouse RAG\.claude\worktrees\motor-freellmapi-4d79f4	argetelease\lakehouse_rag.exe`, con `pdfium.dll` al lado.
+- Ejecutable de producción (`cargo tauri build`, 24 min con 2 jobs): `D:\Proyectos\lakehouse RAG\.claude\worktrees\motor-freellmapi-4d79f4\target\release\lakehouse_rag.exe`, con `pdfium.dll` al lado.
 
 ### Sesión Blindaje para modelos ligeros (2026-11-17)
 
