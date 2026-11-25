@@ -1754,3 +1754,30 @@
 **Medido:**
 - Suite completa: **1.323 en verde, 0 fallos y 36 ignorados.** Antes del arreglo hubo 3 fallos: uno de entorno (`pdfium.dll`) y el texto de anclaje de un test de `gui_config_llm`.
 - Replay ciego: **0 cambios en 278 filas** frente a `main` `d3986f3`.
+
+### Sesión F-1a: anclas solo desde evidencia documental (2026-11-25)
+
+**Estado: `[INTEGRADO]` en `main`** (merge `4295d00`, sin push). Rama `claude/f1a-anclas-evidencia-eac35d`. Origen: auditoría adversarial de la v1.1.0 (`benchmarks/informes/auditoria_adversarial_v110_20261119.md`, en la rama `claude/auditoria-adversarial-v110-2a0284`, sin fusionar). Las sesiones no han leído el set oculto: las respuestas guardadas se procesaron a ciegas.
+
+**Errores y límites (primero):**
+- **Efecto medible pequeño.** Hoy el guard solo comprueba anclas en las intenciones de Capa 2 y en las abstenciones (F-3, pendiente). En el replay cambia 1 respuesta de 278.
+- **No se sabe si ese rechazo nuevo es un acierto o un falso bloqueo:** las respuestas guardadas no tienen puntuación.
+- **El replay solo ejercita 4 herramientas** (búsqueda, catálogo, SQL y tabla de doble entrada). Las demás solo las cubren los tests nuevos.
+- **Pendiente 1b:** una columna SQL calculada o literal (`SELECT 437`) sigue anclando.
+- **Riesgo razonado, no observado:** una cifra de entrada de un cruce de tabla que viene de un turno anterior ya no ancla por su eco. El usuario lo probó en vivo en conversaciones de 2 y 4 turnos sin falsos bloqueos; son sus casos, no el caso general.
+- **Corpus propio y con preguntas repetidas entre pasadas.** «Sin regresión» significa «en los casos conocidos».
+
+**Cambios:**
+- [x] `arnes_turno/evidencia_herramientas.rs`: lista de permitidos por herramienta y ruta de clave. Lo no declarado no ancla; una herramienta no reconocida no aporta anclas.
+- [x] El guard y los niveles 1 y 2 de procedencia leen solo esa evidencia. Los ecos de argumentos (`consulta`, `query_ejecutada`, `filtros`, `entrada`), los metadatos y los nombres de clave dejan de anclar.
+- [x] Test de exhaustividad: falla si la salida de una herramienta trae una clave sin clasificar.
+- [x] `tests/medicion_f1_f3.rs`: herramienta de evaluación `#[ignore]` para medir F-1 y F-3 por replay.
+- [x] La forma del JSON que ve el modelo no cambia. Sin llamadas extra al LLM.
+
+**Medido:**
+- Línea base en `main` `2b0e4ba`: suite 1.323 en verde, 0 fallos y 36 ignorados.
+- Suite completa en la rama: **1.351 en verde, 0 fallos y 38 ignorados.** El árbol fusionado es idéntico al de la rama.
+- Replay ciego frente a `main`: **1 fila distinta de 278**, la que predijo la medición previa (una cifra respaldada solo por `query_ejecutada` pasa de aceptada a rechazo en abstención). Rechazos del guard: de 6 a 7.
+- Medición previa de F-3 (sin arreglar): validar cifras con cualquier intención daría 76 rechazos nuevos en 278 respuestas. La clasificación a ciegas solo explica por encima del azar 47 de sus 295 cifras, así que no se sabe cuántos serían falsos bloqueos.
+- Validación en vivo del usuario con Haiku y FreeLLMAPI: tabla de doble entrada en 2 y 4 turnos, cifras trampa y abstención, sin regresión frente a la v1.1.0 en sus pruebas.
+- Ejecutable de prueba: `D:\Proyectos\lakehouse RAG\dist\f1a\lakehouse_rag.exe`, con `pdfium.dll` al lado.
