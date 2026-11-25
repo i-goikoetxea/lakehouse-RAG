@@ -1801,3 +1801,27 @@
 - [ ] F-1b: columnas SQL calculadas o literales.
 - [ ] En paralelo, diseño del set de errores plantados, de varios dominios e idiomas, para una sesión aislada.
 - [ ] F-3: en suspenso hasta tener ese set. Decisiones ya cerradas para cuando se retome: no ampliar el léxico; disparar la validación con «la respuesta tiene cifras y el turno tiene salidas de herramienta»; no aceptar cifras derivadas por aritmética automática.
+
+### Sesión F-2: historial recortado por turnos completos (2026-11-25)
+
+**Estado: `[INTEGRADO]` en `main`** (merge `efddd06`, sin push). Rama `claude/f2-historial-turnos-9bcb49`. Fases 0 y 1 del plan; las fases 2 y 3 quedan pendientes.
+
+**Errores y límites (primero):**
+- **Un turno largo solo sobrevive un turno de seguimiento.** Con un turno de 50 mensajes, el siguiente lo recibe entero; al cerrarse ese, los dos suman más de 40 y el largo cae completo. Es la regla acordada, pero afecta a F-4. Siguiente paso: compactar los turnos antiguos (conservar pregunta y respuesta y soltar los resultados intermedios).
+- **Fase 0 incompleta:** los caracteres por turno no se midieron. El clasificador de permisos bloqueó el script sobre las respuestas guardadas y no se rodeó.
+- **El defecto no aparece en la muestra:** 0 de 278 respuestas guardadas superan 39 mensajes (máximo estimado, 16). Son de un solo modelo y de preguntas nuestras; no hay modelos ligeros.
+- El replay no pasa por este código (es de un solo turno). La protección son los tests de propiedad y la prueba en vivo, que está pendiente.
+- El tope sigue siendo por número de mensajes, no por tamaño.
+- Aparte: `cargo fmt --check` falla en `main` por `tests/gui_config_llm.rs`, ajeno a esta tarea. Sin tocar.
+
+**Cambios:**
+- [x] `application/use_cases/historial_turnos.rs`: `recortar_por_turnos`, función pura. Un turno va de un mensaje del operador al siguiente. Se descartan turnos enteros, los más antiguos; el más reciente se conserva aunque supere el tope. Solo mira los roles, nunca el contenido.
+- [x] `chat_service.rs` llama a esa función en lugar del recorte antiguo. No cambian el orquestador, el guard ni las herramientas.
+- [ ] Fase 2: tope por tamaño además de por número.
+- [ ] Fase 3: compactación de turnos antiguos. Pasa de opcional a necesaria antes de F-4.
+
+**Medido:**
+- Suite completa en la rama: **1.369 en verde, 0 fallos y 38 ignorados** (línea base 1.351 más 18 tests nuevos). El árbol fusionado es idéntico al de la rama.
+- 18 tests nuevos: 11 unitarios (fronteras 39, 40 y 41, entradas mal formadas, idempotencia y una propiedad con 2.000 listas de semilla fija) y 7 de integración de varios turnos, incluida la prueba de concepto de la auditoría con la aserción invertida.
+- Herramientas por turno en las 278 respuestas guardadas: mediana 2, percentil 90 de 5 y máximo 7.
+- Otros historiales: ninguno de varios turnos. El CLI y `ab_agente` crean un historial de un solo mensaje por pregunta.
