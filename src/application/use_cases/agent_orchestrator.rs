@@ -1571,8 +1571,7 @@ mod tests {
         respuestas: Vec<AgentTurnOutput>,
         verificador: Arc<VerificadorFalso>,
     ) -> (Result<String, DomainError>, Vec<AgentExecutionEvent>) {
-        let salida =
-            json!({ "estado": "resuelto", "texto": EQUIPOS, "valor_resultado_texto": "125" });
+        let salida = json!({ "estado": "resuelto", "nota_pie_condicion": EQUIPOS, "valor_resultado_texto": "125" });
         turno_con_verificador_y_salida(respuestas, verificador, salida).await
     }
 

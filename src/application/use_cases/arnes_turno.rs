@@ -2,6 +2,7 @@
 //! pura: clasifica el mensaje del operador, planifica el primer paso y valida la respuesta final.
 
 mod cifras;
+pub mod evidencia_herramientas;
 mod fechas;
 mod intent_detector;
 pub mod llamada_en_crudo;

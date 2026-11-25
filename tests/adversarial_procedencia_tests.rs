@@ -22,7 +22,7 @@ fn salida(herramienta: &str, output: Value) -> ToolResult {
 fn busqueda(doc: &str, textos: &[&str]) -> ToolResult {
     let resultados: Vec<Value> = textos
         .iter()
-        .map(|texto| json!({ "doc_id": doc, "texto": texto }))
+        .map(|texto| json!({ "texto": texto, "cita": { "doc_id": doc } }))
         .collect();
     salida(
         "search_normative_context",
@@ -123,7 +123,7 @@ fn test_abstencion_total_con_cifras_de_referencia_o_de_memoria_se_rechaza() {
     let r = registro(vec![
         salida(
             "lookup_double_entry_table",
-            json!({ "estado": "sin_coincidencia", "valor_x": 80, "valor_y": 50 }),
+            json!({ "estado": "sin_coincidencia", "entrada": { "valor_x": 80, "valor_y": 50 } }),
         ),
         salida(
             "search_normative_context",
@@ -134,9 +134,11 @@ fn test_abstencion_total_con_cifras_de_referencia_o_de_memoria_se_rechaza() {
         dato("No consta. Suele estar entre 7,5 y 9 bar.", &r),
         en_abstencion("7,5")
     );
+    // F-1a: 80 y 50 solo están en el eco de la entrada del cruce, que ya no ancla. Antes se
+    // rechazaba por la derivada (30); ahora, por la primera cifra sin evidencia documental
     assert_eq!(
         dato("No consta; entre 80 y 50 hay 30.", &r),
-        en_abstencion("30")
+        en_abstencion("80")
     );
 }
 
@@ -655,7 +657,7 @@ fn test_cotas_mega_de_cifras_sin_anclar_en_abstencion_termina_pronto() {
         let respuesta = format!("No consta. {}", "relleno 7 ".repeat(100_000));
         let r = registro(vec![salida(
             "search_normative_context",
-            json!({ "texto": "a1".repeat(500_000) }),
+            json!({ "grupos": [{ "resultados": [{ "texto": "a1".repeat(500_000) }] }] }),
         )]);
         dato(&respuesta, &r)
     });

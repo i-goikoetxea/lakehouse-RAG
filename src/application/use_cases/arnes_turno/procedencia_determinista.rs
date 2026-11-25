@@ -14,6 +14,7 @@ use std::collections::HashSet;
 use serde_json::Value;
 
 use super::cifras::{CifraHallada, extraer_cifras};
+use super::evidencia_herramientas::{Escalar, escalares_de, evidencia_de};
 use super::texto_normalizado::plegar_texto;
 use crate::application::dtos::tools::ToolResult;
 use crate::domain::services::marcas_pagina::quitar_marcas;
@@ -143,18 +144,25 @@ impl ContextoProcedencia {
         let salidas: Vec<&ToolResult> = salidas.into_iter().collect();
         let abstencion_total = !salidas.is_empty() && salidas.iter().all(|s| salida_vacia(s));
         for salida in salidas.iter().filter(|s| !s.is_error) {
-            recorrer_textos_planos(&salida.output, |texto| {
+            // Referencias y operandos salen solo de la evidencia documental: un eco de los
+            // argumentos o un contador no respalda una referencia ni una derivación
+            let evidencia = evidencia_de(salida);
+            // Del último texto al primero, como siempre: decide cuáles entran en el tope de bytes
+            for escalar in escalares_de(&evidencia).iter().rev() {
+                let Escalar::Texto(texto) = escalar else {
+                    continue;
+                };
                 let restante = MAXIMO_BYTES_DE_REFERENCIA.saturating_sub(contexto.bytes_de_texto);
                 if restante > 0 {
-                    let prefijo = prefijo_de_bytes(texto, restante);
+                    let prefijo = prefijo_de_bytes(&quitar_marcas(texto), restante);
                     contexto.estructuras.push(EstructuraDeLineas::de(&prefijo));
                     let texto = espacios_simples(&plegar_texto(&prefijo));
                     contexto.bytes_de_texto += texto.len();
                     contexto.textos.push(texto);
                 }
-            });
+            }
             if !abstencion_total {
-                contexto.recoger_operandos(&salida.output, &mut siguiente_unidad);
+                contexto.recoger_operandos(&evidencia, &mut siguiente_unidad);
             }
         }
         contexto.operandos.truncate(MAXIMO_OPERANDOS);
@@ -301,18 +309,6 @@ fn es_codigo_de_seccion(letras: &[char], cifra: &CifraHallada) -> bool {
         .is_some_and(|l| l.is_uppercase())
         && letras.get(fin).is_some_and(|l| l.is_whitespace());
     tras_marcador || (abre_linea && cifra.literal.contains(['.', ',']) && titulo_detras)
-}
-
-fn recorrer_textos_planos(raiz: &Value, mut visitar: impl FnMut(&str)) {
-    let mut pendientes = vec![raiz];
-    while let Some(valor) = pendientes.pop() {
-        match valor {
-            Value::String(texto) => visitar(&quitar_marcas(texto)),
-            Value::Array(elementos) => pendientes.extend(elementos),
-            Value::Object(campos) => pendientes.extend(campos.values()),
-            _ => {}
-        }
-    }
 }
 
 /// Los primeros `maximo` bytes del texto, sin cortar un carácter
@@ -945,7 +941,7 @@ mod tests {
     fn busqueda(textos: &[(&str, &str)]) -> ToolResult {
         let resultados: Vec<Value> = textos
             .iter()
-            .map(|(doc, texto)| json!({ "doc_id": doc, "texto": texto }))
+            .map(|(doc, texto)| json!({ "texto": texto, "cita": { "doc_id": doc } }))
             .collect();
         salida(
             "search_normative_context",
@@ -1361,5 +1357,52 @@ mod tests {
         let contexto = ContextoProcedencia::desde(&[busqueda(&[("D", &enorme)])]);
         let analizada = RespuestaAnalizada::nueva("Con 7 y 9 resulta 123456789.");
         assert!(!es_derivada(&analizada, 2, &contexto, |_| false));
+    }
+
+    /// Búsqueda con la forma real: `consulta` es el eco del argumento del modelo
+    fn busqueda_con_eco(consulta: &str, texto: &str) -> ToolResult {
+        salida(
+            "search_normative_context",
+            json!({
+                "consulta": consulta,
+                "total": 1,
+                "grupos": [{ "resultados": [{ "texto": texto, "score": 0.5, "cita": { "doc_id": "DOC-1" } }] }],
+                "nota": "Nota de la app",
+            }),
+        )
+    }
+
+    #[test]
+    fn test_referencia_estructural_no_se_respalda_con_el_eco_de_la_consulta() {
+        let solo_eco = busqueda_con_eco("Artículo 437 plazos", "El plazo es de 30 días.");
+        assert!(estructurales("Lo regula el artículo 437.", &[solo_eco]).is_empty());
+        let en_el_texto = busqueda_con_eco("plazos", "Artículo 437. Plazos.");
+        assert_eq!(
+            estructurales("Lo regula el artículo 437.", &[en_el_texto]),
+            vec!["437"]
+        );
+    }
+
+    #[test]
+    fn test_los_ecos_y_contadores_no_son_operandos() {
+        // 500 y 63 solo están en la consulta; `total` y `score` son metadatos
+        let solo_eco = busqueda_con_eco("entre 500 y 63", "Sin cifras.");
+        assert!(ContextoProcedencia::desde(std::slice::from_ref(&solo_eco)).sin_operandos());
+        assert!(derivadas("De 63 a 500 hay 437.", &[solo_eco]).is_empty());
+        let en_el_texto = busqueda_con_eco("caudales", "Caudal máximo 500 y mínimo 63.");
+        assert_eq!(
+            derivadas("De 63 a 500 hay 437.", &[en_el_texto]),
+            vec!["437"]
+        );
+    }
+
+    #[test]
+    fn test_herramienta_desconocida_no_da_textos_ni_operandos() {
+        let ajena = salida(
+            "tool_inventada",
+            json!({ "texto": "Artículo 21. Caudal 80 y 50" }),
+        );
+        assert!(ContextoProcedencia::desde(std::slice::from_ref(&ajena)).sin_operandos());
+        assert!(estructurales("Lo regula el artículo 21.", &[ajena]).is_empty());
     }
 }

@@ -3,9 +3,8 @@
 
 use std::collections::HashSet;
 
-use serde_json::Value;
-
 use super::cifras::{CifraHallada, extraer_cifras, lecturas_de_fuente};
+use super::evidencia_herramientas::{Escalar, escalares_de, evidencia_de};
 use super::procedencia_determinista::{exige_lectura_literal, mismo_precedente};
 use super::texto_normalizado::plegar_texto;
 use crate::application::dtos::procedencia::{
@@ -41,8 +40,15 @@ pub fn salidas_del_turno<'a>(
         .filter(|r| !r.is_error)
         .enumerate()
         .map(|(indice, resultado)| {
-            let mut textos = Vec::new();
-            recorrer(&resultado.output, &mut textos);
+            // Una traza cita subcadenas de este texto: solo lleva evidencia documental, sin ecos
+            // de argumentos, metadatos ni nombres de clave
+            let textos: Vec<String> = escalares_de(&evidencia_de(resultado))
+                .into_iter()
+                .map(|escalar| match escalar {
+                    Escalar::Texto(texto) => quitar_marcas(&texto),
+                    Escalar::Numero(numero) => numero,
+                })
+                .collect();
             SalidaTurno {
                 id: format!("t{indice}"),
                 herramienta: resultado.tool_name.clone(),
@@ -50,24 +56,6 @@ pub fn salidas_del_turno<'a>(
             }
         })
         .collect()
-}
-
-fn recorrer(raiz: &Value, textos: &mut Vec<String>) {
-    let mut pendientes = vec![raiz];
-    while let Some(valor) = pendientes.pop() {
-        match valor {
-            Value::String(texto) => textos.push(quitar_marcas(texto)),
-            Value::Number(numero) => textos.push(numero.to_string()),
-            Value::Array(elementos) => pendientes.extend(elementos.iter().rev()),
-            Value::Object(campos) => {
-                for (clave, contenido) in campos {
-                    textos.push(clave.clone());
-                    pendientes.push(contenido);
-                }
-            }
-            Value::Null | Value::Bool(_) => {}
-        }
-    }
 }
 
 /// Literales de las cifras pendientes cuya traza valida. Una cifra sin traza, con varias que no
@@ -665,7 +653,7 @@ mod tests {
             ToolResult {
                 call_id: "a".into(),
                 tool_name: "search_normative_context".into(),
-                output: serde_json::json!({ "texto": "⟦p. 4⟧ Art. 21" }),
+                output: serde_json::json!({ "grupos": [{ "resultados": [{ "texto": "⟦p. 4⟧ Art. 21" }] }] }),
                 is_error: false,
             },
             ToolResult {
@@ -678,5 +666,51 @@ mod tests {
         let salidas = salidas_del_turno(&resultados);
         assert_eq!(salidas.len(), 1);
         assert!(salidas[0].texto.contains("Art. 21") && !salidas[0].texto.contains("⟦"));
+    }
+
+    #[test]
+    fn test_el_texto_del_nivel_2_no_lleva_ecos_metadatos_ni_claves() {
+        let resultados = [ToolResult {
+            call_id: "a".into(),
+            tool_name: "search_normative_context".into(),
+            output: serde_json::json!({
+                "consulta": "plazo 437",
+                "total": 437,
+                "grupos": [{ "resultados": [{ "texto": "Plazo de 30 días", "score": 0.437, "tiene_capa_2": true }] }],
+                "nota": "Nota 437",
+            }),
+            is_error: false,
+        }];
+        let salidas = salidas_del_turno(&resultados);
+        assert_eq!(salidas[0].texto, "Plazo de 30 días");
+        // Una traza que cita el eco o una clave ya no encuentra su literal
+        let s = SolicitudProcedencia {
+            pregunta: String::new(),
+            salidas,
+            borrador: String::new(),
+            cifras: Vec::new(),
+        };
+        for subcadena in ["plazo 437", "tiene_capa_2", "437"] {
+            assert!(!valida(
+                &s,
+                "437",
+                TipoTraza::ReferenciaEstructural {
+                    subcadena: lit("t0", subcadena)
+                }
+            ));
+        }
+    }
+
+    #[test]
+    fn test_salida_de_herramienta_desconocida_no_da_texto_al_nivel_2() {
+        let resultados = [ToolResult {
+            call_id: "a".into(),
+            tool_name: "tool_inventada".into(),
+            output: serde_json::json!({ "texto": "Art. 21" }),
+            is_error: false,
+        }];
+        let salidas = salidas_del_turno(&resultados);
+        assert_eq!(salidas.len(), 1);
+        assert_eq!(salidas[0].texto, "");
     }
 }
