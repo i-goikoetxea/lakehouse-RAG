@@ -9,11 +9,12 @@ use serde::Serialize;
 use tokio::sync::{Mutex, Notify};
 
 use crate::application::dtos::agent::{
-    AgentExecutionEvent, AgentMessage, AgentRole, ClaudeModel, EtapaArnes, ModelDescriptor,
+    AgentExecutionEvent, AgentMessage, ClaudeModel, EtapaArnes, ModelDescriptor,
 };
 use crate::application::ports::model_catalog::ModelCatalogPort;
 use crate::application::use_cases::agent_orchestrator::{AgentOrchestrator, EventCallback};
 use crate::application::use_cases::arnes_turno::{IntentDetector, PreInferenceInterceptor};
+use crate::application::use_cases::historial_turnos::recortar_por_turnos;
 use crate::application::use_cases::lakehouse_app::{AsistenteDirecto, AsistenteLakehousePort};
 use crate::domain::models::center::CenterId;
 use crate::presentation::gui::intervenciones_arnes::{IntervencionArnesDto, explicar_intervencion};
@@ -74,7 +75,8 @@ pub struct GuiChatService {
 impl GuiChatService {
     /// Longitud máxima (en caracteres) de un mensaje del operador
     pub const MAX_MENSAJE_LEN: usize = 8_000;
-    /// Número máximo de mensajes conservados por centro
+    /// Número máximo de mensajes conservados por centro. Se recorta por turnos completos: el
+    /// más reciente se conserva aunque él solo lo supere
     pub const MAX_HISTORIAL: usize = 40;
 
     /// Chat directo sobre un orquestador, sin gestión de centros (tests y usos embebidos)
@@ -181,7 +183,7 @@ impl GuiChatService {
 
         match resultado {
             Ok(respuesta) => {
-                Self::acotar_historial(historial);
+                recortar_por_turnos(historial, Self::MAX_HISTORIAL);
                 let eventos = eventos.lock().map(|e| e.clone()).unwrap_or_default();
                 let tarjetas = Self::tarjetas_de_herramientas(&eventos);
                 let intervenciones = Self::intervenciones_del_turno(&eventos);
@@ -274,18 +276,6 @@ impl GuiChatService {
             }
             _ => None,
         }
-    }
-
-    /// Descarta los mensajes más antiguos manteniendo que el historial empiece por el operador
-    fn acotar_historial(historial: &mut Vec<AgentMessage>) {
-        if historial.len() <= Self::MAX_HISTORIAL {
-            return;
-        }
-        let mut inicio = historial.len() - Self::MAX_HISTORIAL;
-        while inicio < historial.len() && historial[inicio].role != AgentRole::User {
-            inicio += 1;
-        }
-        historial.drain(..inicio);
     }
 
     fn intervenciones_del_turno(
