@@ -1781,3 +1781,23 @@
 - Medición previa de F-3 (sin arreglar): validar cifras con cualquier intención daría 76 rechazos nuevos en 278 respuestas. La clasificación a ciegas solo explica por encima del azar 47 de sus 295 cifras, así que no se sabe cuántos serían falsos bloqueos.
 - Validación en vivo del usuario con Haiku y FreeLLMAPI: tabla de doble entrada en 2 y 4 turnos, cifras trampa y abstención, sin regresión frente a la v1.1.0 en sus pruebas.
 - Ejecutable de prueba: `D:\Proyectos\lakehouse RAG\dist\f1a\lakehouse_rag.exe`, con `pdfium.dll` al lado.
+
+### Hoja de ruta tras la Fase 0 de F-3 (2026-11-25)
+
+**Decisión del usuario: F-3 queda en suspenso.** No se activa ni el bloqueo ni el aviso visible hasta tener un set de errores plantados que mida cuántas respuestas incorrectas atraparía.
+
+**Errores y límites (primero):**
+- **Validar cifras con cualquier intención daría 76 rechazos nuevos en 278 respuestas guardadas, y los 76 caen sobre respuestas correctas** (21 preguntas distintas, las 21 correctas). Puntuado por la sesión del set oculto con su puntuador determinista; hacia fuera solo salieron agregados.
+- **Los 6 rechazos del guard actual también caen sobre respuestas correctas** (4 por cifra en abstención y 2 por Capa 2 no intentada).
+- **El corpus no mide el beneficio:** solo tiene 1 respuesta incorrecta de 278, que además ya estaba bloqueada. Es de un solo turno, casi todo en español y repite preguntas (61 distintas).
+- **Causa de los falsos bloqueos** (295 cifras): 237 derivadas, 23 fechas redactadas, 10 redondeos, 2 de formato y 23 sin respaldo, de las que 20 son números de artículo o apartado.
+- La medición es anterior a F-1a (`main` `2b0e4ba`). Agregados en `docs/validacion/medicion_f1_f3/fase0_agregados.md` (carpeta ignorada).
+
+**Principio de diseño obligatorio:** toda adecuación del motor, del historial y del guard es agnóstica del dominio y del idioma. Sin listas cerradas por lengua ni reglas atadas a un corpus o a un documento. Una regla nueva solo puede apoyarse en invariantes de flujo o de estructura general.
+
+**Orden de trabajo:**
+- [ ] F-2: historial que se vacía en un turno largo.
+- [ ] F-4: procedencia en sesiones de varios turnos.
+- [ ] F-1b: columnas SQL calculadas o literales.
+- [ ] En paralelo, diseño del set de errores plantados, de varios dominios e idiomas, para una sesión aislada.
+- [ ] F-3: en suspenso hasta tener ese set. Decisiones ya cerradas para cuando se retome: no ampliar el léxico; disparar la validación con «la respuesta tiene cifras y el turno tiene salidas de herramienta»; no aceptar cifras derivadas por aritmética automática.
