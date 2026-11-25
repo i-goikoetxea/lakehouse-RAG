@@ -1036,4 +1036,40 @@ mod tests {
         assert_eq!(describir_eje(&celdas[2], "x"), "x > 40");
         assert_eq!(describir_eje(&celdas[1], "y"), "0.4 <= y <= 0.45");
     }
+
+    /// Las variantes que el centro de prueba de integración no alcanza: el arnés solo lee como
+    /// evidencia los campos clasificados, así que cada clave nueva debe decidirse (F-1a)
+    #[test]
+    fn test_las_claves_de_candidatas_y_de_los_avisos_de_ejes_estan_clasificadas_para_el_arnes() {
+        use crate::application::use_cases::arnes_turno::evidencia_herramientas::claves_sin_clasificar;
+        let solapada = tabla_solapada();
+        let disjunta = tabla_4a();
+        let mut con_nota =
+            celda_cruzada("N", (0.0, true, 9.0, true), (0.0, true, 9.0, true), "7 (*)");
+        con_nota.insert("nivel_prelacion".to_string(), json!(2));
+        con_nota.insert("pagina".to_string(), json!(4));
+        let candidatas: Vec<&Map<String, Value>> = solapada.iter().chain([&con_nota]).collect();
+        for salida in [
+            numeros(&solapada, 10.0, 30.0),
+            numeros(&disjunta, 0.42, 30.0),
+            json!({ "estado": "ambiguo", "mensaje": "x", "candidatas": marcar_prelacion(&candidatas) }),
+            celda_salida(&con_nota),
+        ] {
+            assert_eq!(
+                claves_sin_clasificar(LakehouseToolName::LookupDoubleEntryTable, &salida),
+                Vec::<String>::new(),
+                "{salida}"
+            );
+        }
+        assert!(
+            numeros(&solapada, 10.0, 30.0)
+                .get("ejes_ambiguos")
+                .is_some()
+        );
+        assert!(
+            numeros(&disjunta, 0.42, 30.0)
+                .get("orden_invertido_resolveria")
+                .is_some()
+        );
+    }
 }

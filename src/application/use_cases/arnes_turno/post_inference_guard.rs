@@ -7,6 +7,7 @@ use chrono::NaiveDate;
 use serde_json::Value;
 
 use super::cifras::{extraer_cifras, lecturas_de_fuente};
+use super::evidencia_herramientas::{escalares_de, evidencia_de};
 use super::intent_detector::IntencionTurno;
 use super::llamada_en_crudo;
 use super::procedencia::{CifraPendiente, MAXIMO_CIFRAS_PENDIENTES};
@@ -451,31 +452,13 @@ fn lecturas_ancladas(pregunta: &str, registro: &RegistroTurno) -> HashSet<String
             .fecha_de_hoy
             .map(|hoy| hoy.format("%Y-%m-%d").to_string()),
     );
+    // Solo la evidencia documental de cada salida: ni ecos de argumentos, ni metadatos, ni claves
     for resultado in registro.salidas_validas() {
-        recorrer_textos(&resultado.output, |texto| {
-            anclas.extend(lecturas_de_fuente(texto));
-        });
-    }
-    anclas
-}
-
-/// Recorrido con pila propia: una salida muy anidada no agota la pila del hilo.
-fn recorrer_textos(raiz: &Value, mut visitar: impl FnMut(&str)) {
-    let mut pendientes = vec![raiz];
-    while let Some(valor) = pendientes.pop() {
-        match valor {
-            Value::String(texto) => visitar(texto),
-            Value::Number(numero) => visitar(&numero.to_string()),
-            Value::Array(elementos) => pendientes.extend(elementos),
-            Value::Object(campos) => {
-                for (clave, contenido) in campos {
-                    visitar(clave);
-                    pendientes.push(contenido);
-                }
-            }
-            Value::Null | Value::Bool(_) => {}
+        for escalar in escalares_de(&evidencia_de(resultado)) {
+            anclas.extend(lecturas_de_fuente(escalar.como_texto()));
         }
     }
+    anclas
 }
 
 fn comprobar_respaldo_de_rol(
@@ -506,10 +489,13 @@ fn cita_una_tool(respuesta_plegada: &str, registro: &RegistroTurno) -> bool {
         .filter(|r| !es_matriz_sin_responsable(r))
     {
         // Una cita que cruza un salto de página no contiene la marca `⟦p. N⟧` de la salida ni el
-        // salto de línea que la precede
-        recorrer_textos(&resultado.output, |texto| {
-            fuentes.push(con_espacios_simples(&plegar_texto(&quitar_marcas(texto))))
-        });
+        // salto de línea que la precede. Solo respalda la evidencia documental: citar la consulta
+        // que escribió el modelo o un texto de la app no es citar el documento
+        for escalar in escalares_de(&evidencia_de(resultado)) {
+            fuentes.push(con_espacios_simples(&plegar_texto(&quitar_marcas(
+                escalar.como_texto(),
+            ))));
+        }
     }
     citas.iter().any(|cita| {
         let cita = con_espacios_simples(cita);
@@ -698,7 +684,7 @@ mod tests {
     fn lookup_resuelto() -> RegistroTurno {
         registro_con(vec![resultado(
             "lookup_double_entry_table",
-            json!({ "estado": "resuelto", "valor_salida": 150, "condicion": "≥ 0.35" }),
+            json!({ "estado": "resuelto", "valor_resultado_texto": "150", "nota_pie_condicion": "≥ 0.35" }),
             false,
         )])
     }
@@ -796,7 +782,7 @@ mod tests {
     fn test_sql_cuenta_como_capa_dos_intentada() {
         let registro = registro_con(vec![resultado(
             "execute_athena_sql",
-            json!({ "filas": [{ "total": 3 }] }),
+            json!({ "resultado": [{ "total": 3 }] }),
             false,
         )]);
         assert_eq!(validar_cruzable("Hay 3", &registro), Ok(()));
@@ -841,7 +827,7 @@ mod tests {
             ),
             resultado(
                 "search_normative_context",
-                json!({ "fragmentos": [{ "texto": "Precalentar a 120 °C" }] }),
+                json!({ "grupos": [{ "resultados": [{ "texto": "Precalentar a 120 °C" }] }] }),
                 false,
             ),
         ]);
@@ -877,7 +863,7 @@ mod tests {
     fn test_cifra_anclada_dentro_de_estructuras_anidadas() {
         let registro = registro_con(vec![resultado(
             "lookup_double_entry_table",
-            json!({ "celdas": [{ "rango": ["10 a 20", { "valor": 2.5 }] }] }),
+            json!({ "ejes_ambiguos": { "orden_recibido": { "celdas": [[{ "rango_x": "10 a 20", "valor_resultado_num": 2.5 }]] } } }),
             false,
         )]);
         assert_eq!(validar_cruzable("Valen 10, 20 y 2,50", &registro), Ok(()));
@@ -887,7 +873,7 @@ mod tests {
     fn test_signo_contrario_no_ancla() {
         let registro = registro_con(vec![resultado(
             "lookup_double_entry_table",
-            json!({ "valor": -10 }),
+            json!({ "valor_resultado_num": -10 }),
             false,
         )]);
         assert_eq!(
@@ -990,7 +976,10 @@ mod tests {
         );
         let solo_rango = registro_con(vec![resultado(
             "search_normative_context",
-            json!({ "texto": "El acta la firma el inspector.", "cita": { "paginas": "52-54" } }),
+            json!({ "grupos": [{ "resultados": [{
+                "texto": "El acta la firma el inspector.",
+                "cita": { "paginas": "52-54" }
+            }] }] }),
             false,
         )]);
         assert_eq!(
@@ -1029,7 +1018,9 @@ mod tests {
             matriz_sin_responsable(),
             resultado(
                 "search_normative_context",
-                json!({ "texto": "El registro lo cumplimenta el inspector de turno." }),
+                json!({ "grupos": [{ "resultados": [{
+                    "texto": "El registro lo cumplimenta el inspector de turno."
+                }] }] }),
                 false,
             ),
         ]);
@@ -1064,7 +1055,7 @@ mod tests {
             matriz_sin_responsable(),
             resultado(
                 "search_normative_context",
-                json!({ "texto": "el jefe de obra" }),
+                json!({ "grupos": [{ "resultados": [{ "texto": "el jefe de obra" }] }] }),
                 false,
             ),
         ]);
@@ -1240,7 +1231,7 @@ mod tests {
     fn busqueda(texto: &str) -> RegistroTurno {
         registro_con(vec![resultado(
             "search_normative_context",
-            json!({ "fragmentos": [{ "texto": texto }] }),
+            json!({ "grupos": [{ "resultados": [{ "texto": texto }] }] }),
             false,
         )])
     }
@@ -1424,14 +1415,14 @@ mod tests {
         );
     }
 
-    /// Salida con la forma real de `celda_salida` en `lookup.rs`, con datos sintéticos
+    /// Salida con la forma real de `cruzar_tabla` en `lookup.rs` (una celda: sus campos van en el
+    /// primer nivel), con datos sintéticos
     fn lookup_con_forma_real(revision: &str, valor: &str) -> RegistroTurno {
         registro_con(vec![resultado(
             "lookup_double_entry_table",
             json!({
                 "estado": "resuelto",
-                "valor_x": 30,
-                "valor_y": 0.42,
+                "entrada": { "valor_x": 30, "valor_y": 0.42, "eje_z": null },
                 "tabla": {
                     "tabla_id": "4-A",
                     "titulo_tabla": "Precalentamiento sintético",
@@ -1439,20 +1430,18 @@ mod tests {
                     "eje_y": { "nombre": "carbono_equivalente_pct", "unidad": "%" },
                     "valor_salida_nombre": "temperatura_c",
                 },
-                "resultado": {
-                    "valor_resultado_texto": valor,
-                    "valor_resultado_num": 125.0,
-                    "unidad_medida": "°C",
-                    "nota_pie_condicion": "Solo con acopio de más de 7 días",
-                    "rango_x": "20 < x <= 40",
-                    "rango_y": "0.40 < y <= 0.45",
-                    "cita": {
-                        "doc_id": "DOC-SINT-007",
-                        "revision": revision,
-                        "version_num": 3,
-                        "tabla_id": "4-A",
-                        "celda_id": "8f3a12c4",
-                    },
+                "valor_resultado_texto": valor,
+                "valor_resultado_num": 125.0,
+                "unidad_medida": "°C",
+                "nota_pie_condicion": "Solo con acopio de más de 7 días",
+                "rango_x": "20 < x <= 40",
+                "rango_y": "0.40 < y <= 0.45",
+                "cita": {
+                    "doc_id": "DOC-SINT-007",
+                    "revision": revision,
+                    "version_num": 3,
+                    "tabla_id": "4-A",
+                    "celda_id": "8f3a12c4",
                 },
             }),
             false,
@@ -1514,7 +1503,7 @@ mod tests {
     fn test_apartado_padre_de_una_numeracion_de_la_fuente_se_acepta() {
         let registro = registro_con(vec![resultado(
             "lookup_double_entry_table",
-            json!({ "valor_resultado_texto": "125", "breadcrumb": "5.2.1 Precalentamiento" }),
+            json!({ "valor_resultado_texto": "125", "nota_pie_condicion": "Ver 5.2.1 Precalentamiento" }),
             false,
         )]);
         assert_eq!(
@@ -1599,7 +1588,7 @@ mod tests {
     fn test_fecha_iso_de_la_respuesta_se_ancla_entera() {
         let registro = registro_con(vec![resultado(
             "lookup_double_entry_table",
-            json!({ "valor_resultado_texto": "125", "fecha_vigor": "2026-06-01", "pagina": 11 }),
+            json!({ "valor_resultado_texto": "125", "cita": { "fecha_vigor": "2026-06-01", "paginas": "11" } }),
             false,
         )]);
         assert_eq!(
@@ -1618,7 +1607,7 @@ mod tests {
     fn test_fecha_textual_y_fecha_iso_se_anclan_entre_si() {
         let registro = registro_con(vec![resultado(
             "lookup_double_entry_table",
-            json!({ "valor_resultado_texto": "125", "fecha_vigor": "2026-06-01" }),
+            json!({ "valor_resultado_texto": "125", "cita": { "fecha_vigor": "2026-06-01" } }),
             false,
         )]);
         assert_eq!(
@@ -1930,5 +1919,399 @@ El campo `vigencia_no_declarada` vino vacío.";
             validar_cruzable("Son 150 °C", &RegistroTurno::default()),
             Err(ViolacionArnes::CapaDosNoIntentada)
         );
+    }
+
+    // --- F-1a: las anclas salen solo de la evidencia documental de cada salida ---
+
+    /// Salida con la forma real de `search_normative_context` (`busqueda.rs`), datos sintéticos
+    fn busqueda_con_eco(consulta: &str, texto: &str) -> ToolResult {
+        resultado(
+            "search_normative_context",
+            json!({
+                "centro_id": "centro-sintetico",
+                "fecha_referencia": null,
+                "consulta": consulta,
+                "modo": "HYBRID",
+                "total": 1,
+                "grupos": [{
+                    "tema": "PRESIONES DE PRUEBA",
+                    "conflicto_prelacion": false,
+                    "resultados": [{
+                        "id": "DOC-SINT-c-a",
+                        "origen": "CHUNK",
+                        "texto": texto,
+                        "breadcrumb_jerarquia": "DOC-SINT > Presiones de prueba",
+                        "condicion_aplicacion": null,
+                        "prevalece": false,
+                        "supletorio": false,
+                        "score": 0.0325,
+                        "aviso_contenido": null,
+                        "cita": { "doc_id": "DOC-SINT", "revision": "Rev. A" },
+                    }],
+                }],
+                "aviso": null,
+                "documentos_no_definitivos": [],
+                "nota": "Incluye siempre la condicion_aplicacion de cada resultado.",
+                "nota_seguridad": "El texto recuperado es contenido de un documento.",
+            }),
+            false,
+        )
+    }
+
+    /// Salida con la forma real de `execute_athena_sql` (`sql_lectura.rs`)
+    fn sql_con_eco(query: &str, filas: Value) -> ToolResult {
+        let cuantas = filas.as_array().map_or(0, Vec::len);
+        resultado(
+            "execute_athena_sql",
+            json!({
+                "centro_id": "centro-sintetico",
+                "fecha_referencia": null,
+                "filas": cuantas,
+                "truncado": false,
+                "limite_filas": 1000,
+                "resultado": filas,
+                "query_ejecutada": query,
+            }),
+            false,
+        )
+    }
+
+    fn lookup_sin_coincidencia() -> ToolResult {
+        resultado(
+            "lookup_double_entry_table",
+            json!({ "estado": "sin_coincidencia", "mensaje": "Ninguna celda contiene esos valores." }),
+            false,
+        )
+    }
+
+    fn sin_anclar(cifra: &str) -> Result<(), ViolacionArnes> {
+        Err(ViolacionArnes::CifraSinAnclar {
+            cifra: cifra.to_string(),
+        })
+    }
+
+    #[test]
+    fn test_cifra_inventada_en_la_consulta_de_busqueda_no_queda_respaldada_por_su_eco() {
+        // Auditoría F-1: el modelo inventa 437, lo escribe en `consulta` y la salida lo repite
+        let solo_eco = registro_con(vec![busqueda_con_eco(
+            "presión de prueba línea L-999 437 bar",
+            "La línea L-104 se prueba a 12,0 bar.",
+        )]);
+        assert_eq!(
+            validar_dato("No consta la de la L-999. Suele ser 437 bar.", &solo_eco),
+            abstencion_con("437")
+        );
+        let tabular = registro_con(vec![
+            lookup_sin_coincidencia(),
+            busqueda_con_eco("temperatura 437", "Precalentar a 120 °C."),
+        ]);
+        assert_eq!(validar_cruzable("Son 437 °C.", &tabular), sin_anclar("437"));
+        // La misma cifra en el texto de un fragmento sí respalda
+        let en_el_texto = registro_con(vec![
+            lookup_sin_coincidencia(),
+            busqueda_con_eco("temperatura", "Precalentar a 437 °C."),
+        ]);
+        assert_eq!(validar_cruzable("Son 437 °C.", &en_el_texto), Ok(()));
+        let en_el_fragmento = registro_con(vec![busqueda_con_eco(
+            "presión de prueba línea L-999",
+            "La línea L-104 se prueba a 437 bar.",
+        )]);
+        assert_eq!(
+            validar_dato(
+                "No consta la de la L-999. La L-104 se prueba a 437 bar.",
+                &en_el_fragmento
+            ),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn test_cifra_inventada_en_la_sql_no_queda_respaldada_por_query_ejecutada() {
+        let query = "SELECT titulo FROM \"c_01_documentos_catalogo\" WHERE version_num < 437";
+        let solo_eco = registro_con(vec![sql_con_eco(query, json!([{ "titulo": "Documento" }]))]);
+        assert_eq!(validar_cruzable("Son 437.", &solo_eco), sin_anclar("437"));
+        assert_eq!(
+            validar_dato("No consta el límite. Suele ser 437.", &solo_eco),
+            abstencion_con("437")
+        );
+        let en_una_fila = registro_con(vec![sql_con_eco(
+            "SELECT valor FROM x",
+            json!([{ "valor": 437 }]),
+        )]);
+        assert_eq!(validar_cruzable("Son 437.", &en_una_fila), Ok(()));
+    }
+
+    #[test]
+    fn test_contadores_y_parametros_de_la_salida_no_anclan() {
+        // `filas` y `limite_filas` de la SQL; `total` y `score` de la búsqueda
+        let registro = registro_con(vec![
+            sql_con_eco("SELECT a FROM x", json!([{ "a": "uno" }, { "a": "dos" }])),
+            busqueda_con_eco("texto", "Sin cifras."),
+        ]);
+        for (respuesta, cifra) in [
+            ("Son 1000.", "1000"),
+            ("Hay 2 filas.", "2"),
+            ("La puntuación es 0,0325.", "0,0325"),
+        ] {
+            assert_eq!(
+                validar_cruzable(respuesta, &registro),
+                sin_anclar(cifra),
+                "{respuesta}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_los_nombres_de_clave_no_anclan() {
+        // El alias de la columna lo escribe el modelo; `tiene_capa_2` es una clave del esquema
+        let registro = registro_con(vec![
+            sql_con_eco("SELECT a FROM x", json!([{ "total_437": "sin cifras" }])),
+            resultado(
+                "search_normative_context",
+                json!({ "grupos": [{ "resultados": [{ "texto": "Sin cifras.", "tiene_capa_2": true }] }] }),
+                false,
+            ),
+        ]);
+        assert_eq!(validar_cruzable("Son 437.", &registro), sin_anclar("437"));
+        assert_eq!(validar_cruzable("Son 2 capas.", &registro), sin_anclar("2"));
+    }
+
+    #[test]
+    fn test_el_eco_de_la_entrada_del_lookup_no_da_operandos_para_derivar() {
+        // 500 y 63 vienen en la pregunta; el modelo los pasa al cruce y la salida los repite en
+        // `entrada`. Sin evidencia documental que los contenga, 437 no es una derivación
+        let registro = registro_con(vec![resultado(
+            "lookup_double_entry_table",
+            json!({
+                "entrada": { "valor_x": 500, "valor_y": 63, "eje_z": null },
+                "tabla": { "tabla_id": "T-A", "titulo_tabla": "Tabla sintética" },
+                "estado": "sin_coincidencia",
+                "mensaje": "Ninguna celda contiene esos valores.",
+                "rangos_disponibles": ["x <= 20 | y < 0.4"],
+            }),
+            false,
+        )]);
+        assert_eq!(
+            PostInferenceGuard::validar(
+                "De 63 a 500 hay 437.",
+                "Tabla T-A, ¿qué corresponde a 500 y 63?",
+                &cruzable(),
+                &registro
+            ),
+            sin_anclar("437")
+        );
+    }
+
+    #[test]
+    fn test_citar_la_propia_consulta_o_un_texto_de_la_app_no_respalda_el_rol() {
+        let frase = "la firma el inspector de guardia nocturna";
+        let solo_eco = registro_con(vec![
+            matriz_sin_responsable(),
+            busqueda_con_eco(frase, "El acta se archiva en la oficina técnica."),
+        ]);
+        assert_eq!(
+            validar_responsable(&format!("El documento dice «{frase}»."), &solo_eco),
+            Err(ViolacionArnes::RolSinRespaldo)
+        );
+        assert_eq!(
+            validar_responsable(
+                "El documento dice «Incluye siempre la condicion_aplicacion».",
+                &solo_eco
+            ),
+            Err(ViolacionArnes::RolSinRespaldo)
+        );
+        let en_el_texto = registro_con(vec![
+            matriz_sin_responsable(),
+            busqueda_con_eco("quién firma", &format!("El acta {frase}.")),
+        ]);
+        assert_eq!(
+            validar_responsable(&format!("El documento dice «{frase}»."), &en_el_texto),
+            Ok(())
+        );
+    }
+
+    /// Una salida por herramienta, con la forma real, en la que 437 está solo en campos de eco,
+    /// de metadatos o de texto de la app
+    fn salidas_con_437_solo_en_ecos() -> Vec<ToolResult> {
+        vec![
+            resultado(
+                "inspect_lakehouse_catalog",
+                json!({
+                    "centro_id": "centro-437",
+                    "fecha_referencia": "0437-01-01",
+                    "documentos": [{ "doc_id": "DOC-SINT", "aviso_contenido": "Páginas 437", "fecha_vigor_texto": "437" }],
+                    "tablas_doble_entrada": [],
+                    "vistas_sql": ["437_vista"],
+                    "nota": "Nota 437",
+                }),
+                false,
+            ),
+            resultado(
+                "query_operational_matrix",
+                json!({
+                    "centro_id": "centro-437",
+                    "filtros": { "fase": null, "rol": "rol 437", "registro": "REG-437", "doc_id": "437", "objeto": "437" },
+                    "total": 437,
+                    "filas": [{ "rol_responsable": "Jefe", "origen_responsable": "DECLARADO" }],
+                    "nota": "Nota 437",
+                    "solo_declarados": true,
+                    "excluidos_no_declarados": 437,
+                    "sin_responsable_declarado": false,
+                    "accion_sugerida": "437 hito(s) quedan fuera",
+                }),
+                false,
+            ),
+            resultado(
+                "lookup_double_entry_table",
+                json!({
+                    "centro_id": "centro-437",
+                    "entrada": { "valor_x": 437, "valor_y": "437", "eje_z": "437" },
+                    "estado": "ambiguo",
+                    "mensaje": "437 celdas candidatas",
+                    "candidatas": [{ "valor_resultado_texto": "A", "aviso_nota": "437", "nota_obligatoria": false }],
+                    "orden_invertido_resolveria": { "valor_x": 437, "valor_y": 437, "mensaje": "437" },
+                }),
+                false,
+            ),
+            sql_con_eco(
+                "SELECT 'a' AS a FROM x WHERE n = 437 LIMIT 437",
+                json!([{ "a": "a" }]),
+            ),
+            resultado(
+                "traverse_normative_graph",
+                json!({
+                    "centro_id": "centro-437",
+                    "nodo_origen": "DOC-437",
+                    "limites": { "max_saltos": 2, "max_vecinos": 437, "umbral_hub": 437, "max_nodos": 437 },
+                    "estado": "ok",
+                    "mensaje": "437",
+                    "truncado": false,
+                    "nodos": [{
+                        "id": "DOC-SINT", "salto": 437, "grado": 437, "vecinos_omitidos": 437,
+                        "resumen_hub": { "grado": 437, "top_relaciones": [{ "tipo_relacion": "REFERENCIA_A", "aristas": 437 }] },
+                    }],
+                    "aristas": [],
+                }),
+                false,
+            ),
+            busqueda_con_eco("dato 437", "Sin cifras."),
+            resultado(
+                "stair_navigate_toc",
+                json!({
+                    "centro_id": "centro-437",
+                    "doc_id": "DOC-SINT",
+                    "alias_resuelto_de": "ALIAS-437",
+                    "aviso_contenido": "Páginas 437",
+                    "nodo_padre_id": "DOC-SINT#437",
+                    "total": 437,
+                    "total_nodos_documento": 437,
+                    "nodos": [{ "nodo_id": "DOC-SINT#a", "titulo_seccion": "Objeto", "total_hijos": 437 }],
+                    "truncado": true,
+                    "siguiente_desplazamiento": 437,
+                    "nota": "Nota 437",
+                }),
+                false,
+            ),
+            resultado(
+                "stair_get_subtree_context",
+                json!({
+                    "centro_id": "centro-437",
+                    "doc_id": "DOC-SINT",
+                    "alias_resuelto_de": "ALIAS-437",
+                    "total_secciones": 437,
+                    "caracteres_totales": 437,
+                    "caracteres_entregados": 437,
+                    "secciones": [{ "nodo_id": "DOC-SINT#a", "texto": "Sin cifras.", "texto_recortado": false }],
+                    "truncado": true,
+                    "secciones_omitidas": 437,
+                    "como_continuar": { "indicacion": "437", "siguientes_nodos": ["DOC-SINT#437"], "siguiente_desde_caracter": 437 },
+                    "nota": "Nota 437",
+                }),
+                false,
+            ),
+        ]
+    }
+
+    #[test]
+    fn test_anadir_una_cifra_solo_a_campos_de_eco_nunca_convierte_un_rechazo_en_aceptacion() {
+        let ecos = salidas_con_437_solo_en_ecos();
+        assert_eq!(ecos.len(), LakehouseToolName::TODAS.len());
+        // (respuesta, pregunta, intención, salidas base del turno)
+        let responsable = vec![resultado(
+            "query_operational_matrix",
+            json!({ "sin_responsable_declarado": false, "filas": [{ "rol_responsable": "Jefe" }] }),
+            false,
+        )];
+        let rechazadas: Vec<(&str, &str, IntencionTurno, Vec<ToolResult>)> = vec![
+            (
+                "Son 437 °C.",
+                PREGUNTA,
+                cruzable(),
+                vec![lookup_sin_coincidencia()],
+            ),
+            (
+                "No consta; suele ser 437 bar.",
+                PREGUNTA_DATO,
+                IntencionTurno::DatoConcreto,
+                vec![busqueda_con_eco("presión", "La L-104 trabaja a 14,5 bar.")],
+            ),
+            (
+                "Entre 30 y 467 hay 437.",
+                "Tabla 4-A, ¿qué hay entre 30 y 467?",
+                cruzable(),
+                vec![lookup_sin_coincidencia()],
+            ),
+            (
+                "Lo firma el Jefe en 437 horas.",
+                "¿Quién firma el registro?",
+                IntencionTurno::Responsable,
+                responsable,
+            ),
+            (
+                "Falta el otro eje; el artículo 437 lo fija.",
+                "¿Qué tolerancia corresponde a 30 mm?",
+                IntencionTurno::TabularIncompleta,
+                vec![lookup_sin_coincidencia()],
+            ),
+        ];
+        for (respuesta, pregunta, intencion, base) in rechazadas {
+            let sin_ecos = registro_con(base.clone());
+            let antes = PostInferenceGuard::validar(respuesta, pregunta, &intencion, &sin_ecos);
+            assert!(antes.is_err(), "caso mal planteado: {respuesta}");
+            let pendientes_antes =
+                PostInferenceGuard::cifras_pendientes(respuesta, pregunta, &intencion, &sin_ecos);
+            // Cada eco por separado y todos a la vez
+            let mut variantes: Vec<Vec<ToolResult>> =
+                ecos.iter().map(|eco| vec![eco.clone()]).collect();
+            variantes.push(ecos.clone());
+            for anadidas in variantes {
+                let herramientas: Vec<&str> =
+                    anadidas.iter().map(|a| a.tool_name.as_str()).collect();
+                let con_ecos = registro_con(
+                    base.iter()
+                        .cloned()
+                        .chain(anadidas.iter().cloned())
+                        .collect(),
+                );
+                assert_eq!(
+                    PostInferenceGuard::validar(respuesta, pregunta, &intencion, &con_ecos),
+                    antes,
+                    "{respuesta} + {herramientas:?}"
+                );
+                assert_eq!(
+                    PostInferenceGuard::cifras_pendientes(
+                        respuesta, pregunta, &intencion, &con_ecos
+                    )
+                    .iter()
+                    .map(|p| p.literal.as_str())
+                    .collect::<Vec<_>>(),
+                    pendientes_antes
+                        .iter()
+                        .map(|p| p.literal.as_str())
+                        .collect::<Vec<_>>(),
+                    "{respuesta} + {herramientas:?}"
+                );
+            }
+        }
     }
 }
