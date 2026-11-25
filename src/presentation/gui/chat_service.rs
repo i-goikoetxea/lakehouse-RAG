@@ -14,7 +14,7 @@ use crate::application::dtos::agent::{
 use crate::application::ports::model_catalog::ModelCatalogPort;
 use crate::application::use_cases::agent_orchestrator::{AgentOrchestrator, EventCallback};
 use crate::application::use_cases::arnes_turno::{IntentDetector, PreInferenceInterceptor};
-use crate::application::use_cases::historial_turnos::recortar_por_turnos;
+use crate::application::use_cases::historial_turnos::acotar_historial_por_turnos;
 use crate::application::use_cases::lakehouse_app::{AsistenteDirecto, AsistenteLakehousePort};
 use crate::domain::models::center::CenterId;
 use crate::presentation::gui::intervenciones_arnes::{IntervencionArnesDto, explicar_intervencion};
@@ -75,8 +75,9 @@ pub struct GuiChatService {
 impl GuiChatService {
     /// Longitud máxima (en caracteres) de un mensaje del operador
     pub const MAX_MENSAJE_LEN: usize = 8_000;
-    /// Número máximo de mensajes conservados por centro. Se recorta por turnos completos: el
-    /// más reciente se conserva aunque él solo lo supere
+    /// Número máximo de mensajes conservados por centro. Si no caben, los turnos antiguos se
+    /// compactan a pregunta y respuesta y, si no basta, se descartan enteros: el más reciente
+    /// se conserva intacto aunque él solo lo supere
     pub const MAX_HISTORIAL: usize = 40;
 
     /// Chat directo sobre un orquestador, sin gestión de centros (tests y usos embebidos)
@@ -183,7 +184,7 @@ impl GuiChatService {
 
         match resultado {
             Ok(respuesta) => {
-                recortar_por_turnos(historial, Self::MAX_HISTORIAL);
+                acotar_historial_por_turnos(historial, Self::MAX_HISTORIAL);
                 let eventos = eventos.lock().map(|e| e.clone()).unwrap_or_default();
                 let tarjetas = Self::tarjetas_de_herramientas(&eventos);
                 let intervenciones = Self::intervenciones_del_turno(&eventos);
