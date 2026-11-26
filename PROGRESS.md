@@ -1825,3 +1825,28 @@
 - 18 tests nuevos: 11 unitarios (fronteras 39, 40 y 41, entradas mal formadas, idempotencia y una propiedad con 2.000 listas de semilla fija) y 7 de integración de varios turnos, incluida la prueba de concepto de la auditoría con la aserción invertida.
 - Herramientas por turno en las 278 respuestas guardadas: mediana 2, percentil 90 de 5 y máximo 7.
 - Otros historiales: ninguno de varios turnos. El CLI y `ab_agente` crean un historial de un solo mensaje por pregunta.
+
+### Sesión F-2 fase 3: compactación perezosa de turnos antiguos (2026-11-26)
+
+**Estado: `[INTEGRADO]` en `main`** (merge `51cb37a`, sin push). Rama `claude/f2-compactacion-turnos-dc4bb0`, commit `f71abc2`. Paso previo a F-4.
+
+**Errores y límites (primero):**
+- **El efecto en la calidad de los seguimientos no está medido.** La prueba en vivo es del usuario; el replay es de un solo turno y no pasa por este código.
+- **El modelo ve respuestas antiguas con cifras sin los resultados que las respaldaban.** Puede repetirlas sin volver a consultar. Lo cubrirá F-4.
+- **El tope sigue contando mensajes, no tamaño.** Un turno mediano ocupa unos 55.000 caracteres, así que en 40 mensajes caben entre 330.000 y 440.000 caracteres de historial que se reenvían en cada paso. La compactación perezosa no reduce ese coste hasta que se superan los 40 mensajes. El tope por tamaño (fase 2) gana prioridad.
+- **Dos tests existentes cambiaron de expectativa**, porque describían la pérdida del turno antiguo: el del seguimiento tras un turno largo y el de aislamiento entre centros (renombrado a `test_acotar_un_centro_no_toca_el_otro`). No relajan ninguna comprobación.
+- Dos decisiones de la sesión fuera del diseño: los mensajes anteriores a la primera pregunta se eliminan siempre, y una respuesta en blanco no cuenta como respuesta final.
+- Caso límite sin resolver: un turno antiguo que no acaba en respuesta de texto no se compacta. El chat no lo produce, porque revierte los turnos fallidos.
+
+**Cambios:**
+- [x] `historial_turnos.rs`: `acotar_historial_por_turnos`, único punto de entrada. Si el historial cabe, no cambia. Si no, compacta turnos del más antiguo al más nuevo hasta que quepa; el más reciente nunca se compacta. Si no basta, `recortar_por_turnos` descarta turnos enteros.
+- [x] Compactar un turno es dejarlo en su pregunta y su respuesta final de texto. Regla solo estructural (roles y `tool_calls`), sin idioma ni dominio. Sin marcadores de texto ni cambios en el system prompt.
+- [x] Contrato de orden documentado en el módulo para F-4: evidencias verificadas, compactación y recorte.
+- [x] Sin cambios en el orquestador, el guard, las herramientas ni los adaptadores.
+- [ ] Fase 2: tope por tamaño.
+
+**Medido:**
+- Suite completa en la rama: **1.388 en verde, 0 fallos y 38 ignorados** (línea base 1.369 más 19 tests nuevos). El árbol fusionado es idéntico al de la rama.
+- 19 tests nuevos: 13 unitarios (con una propiedad sobre 3.000 listas de semilla fija), 3 de integración del chat y 3 del adaptador de la API y de la entrada del CLI. Con el adaptador real, la firma de razonamiento del ciclo retirado no viaja y la del turno no compactado sí.
+- Tamaños sobre 278 respuestas guardadas, solo agregados: turno completo, mediana de 54.697 caracteres y máximo de 158.028; turno compactado, mediana de 1.842 y máximo de 3.138. Reducción mediana del 96,4 %.
+- Paquetes de prueba: `dist\f2-compactacion\` (de `f71abc2`) y `dist\main\`, cada uno con `lakehouse_rag.exe`, `lakehouse_rag_cli.exe` y `pdfium.dll`. El extractor de PDF `lakehouse_rag_cli.exe` debe ir junto al exe: sin él la ingesta de PDF falla.
