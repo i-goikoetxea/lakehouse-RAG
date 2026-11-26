@@ -1,6 +1,7 @@
-//! El historial del chat se recorta por turnos completos (F-2 de la auditoría de la v1.1.0):
-//! un turno largo no vacía el historial, el turno siguiente recibe el anterior entero y un
-//! turno fallido o detenido no deja rastro. Sin red, sin keys y sin Claude.
+//! El historial del chat se acota por turnos completos (F-2 de la auditoría de la v1.1.0):
+//! un turno largo no vacía el historial, el turno siguiente recibe el anterior entero, los
+//! turnos antiguos se compactan a pregunta y respuesta antes de descartarse y un turno fallido
+//! o detenido no deja rastro. Sin red, sin keys y sin Claude.
 
 use std::collections::{HashSet, VecDeque};
 use std::future::pending;
@@ -248,14 +249,135 @@ async fn test_el_turno_de_seguimiento_recibe_el_turno_largo_anterior() {
     assert_eq!(vista[MENSAJES_TURNO_LARGO], AgentMessage::user("gracias"));
     assert_resultados_integros_y_emparejados(&vista);
 
-    // Los dos turnos juntos superan el tope: cae el antiguo entero y queda el reciente
+    // Los dos turnos juntos superan el tope: el antiguo se compacta a su pregunta y su
+    // respuesta, y el reciente queda entero
     assert_eq!(
         servicio.historial("c").await,
         vec![
+            AgentMessage::user("hola"),
+            AgentMessage::assistant("Hecho."),
             AgentMessage::user("gracias"),
             AgentMessage::assistant("De nada.")
         ]
     );
+}
+
+/// Guion de tres turnos: uno de 50 mensajes, uno de 6 con herramientas y lo que siga
+fn guion_largo_y_seguimiento_con_herramientas() -> Vec<Paso> {
+    let mut guion = guion_turno_largo("a");
+    guion.push(Paso::Salida(paso_con_llamadas("b0", 3)));
+    guion.push(final_con("Segunda respuesta."));
+    guion
+}
+
+/// Tras los dos primeros turnos del guion anterior: el largo compactado y el segundo entero
+async fn assert_largo_compactado_y_segundo_entero(servicio: &GuiChatService) -> Vec<AgentMessage> {
+    let historial = servicio.historial("c").await;
+    assert_eq!(historial.len(), 8);
+    assert_eq!(
+        historial[..3],
+        [
+            AgentMessage::user("hola"),
+            AgentMessage::assistant("Hecho."),
+            AgentMessage::user("segunda"),
+        ]
+    );
+    assert_eq!(historial[7], AgentMessage::assistant("Segunda respuesta."));
+    assert_resultados_integros_y_emparejados(&historial);
+    historial
+}
+
+#[tokio::test]
+async fn test_el_tercer_turno_recibe_el_largo_compactado_y_el_segundo_entero() {
+    let mut guion = guion_largo_y_seguimiento_con_herramientas();
+    guion.push(final_con("Tercera respuesta."));
+    let runner = RunnerQueRegistra::con_guion(guion);
+    let servicio = servicio_con(runner.clone());
+
+    enviar(&servicio, "hola", "c").await;
+    assert_eq!(servicio.historial("c").await.len(), MENSAJES_TURNO_LARGO);
+    enviar(&servicio, "segunda", "c").await;
+    // Lo que el runner vio al cerrar el segundo turno: el largo entero y el segundo sin su respuesta
+    let segundo_entero = runner.ultima_vista()[MENSAJES_TURNO_LARGO..].to_vec();
+    assert_eq!(segundo_entero.len(), 5);
+    let tras_el_segundo = assert_largo_compactado_y_segundo_entero(&servicio).await;
+    assert_eq!(tras_el_segundo[2..7], segundo_entero[..]);
+
+    enviar(&servicio, "tercera", "c").await;
+
+    let vista = runner.ultima_vista();
+    assert_eq!(vista.len(), 9);
+    // Del turno largo, la pregunta y la respuesta, sin herramientas
+    assert_eq!(vista[0], AgentMessage::user("hola"));
+    assert_eq!(vista[1], AgentMessage::assistant("Hecho."));
+    // El segundo, entero y con sus resultados íntegros
+    assert_eq!(vista[2..8], tras_el_segundo[2..]);
+    let resultados = vista.iter().filter(|m| m.role == AgentRole::Tool).count();
+    assert_eq!(resultados, 3);
+    assert!(vista.iter().all(|m| {
+        m.tool_call_id
+            .as_deref()
+            .is_none_or(|id| id.starts_with("b0_"))
+    }));
+    assert_eq!(vista[8], AgentMessage::user("tercera"));
+    assert_resultados_integros_y_emparejados(&vista);
+
+    // Nada más que compactar: el historial solo crece con el tercer turno
+    let historial = servicio.historial("c").await;
+    assert_eq!(historial.len(), 10);
+    assert_eq!(historial[..8], tras_el_segundo[..]);
+}
+
+#[tokio::test]
+async fn test_turno_con_error_sobre_un_historial_compactado_lo_deja_como_estaba() {
+    let mut guion = guion_largo_y_seguimiento_con_herramientas();
+    guion.push(Paso::Salida(paso_con_llamadas("c0", 4)));
+    guion.push(Paso::Error("fallo simulado del modelo"));
+    let servicio = servicio_con(RunnerQueRegistra::con_guion(guion));
+
+    enviar(&servicio, "hola", "c").await;
+    enviar(&servicio, "segunda", "c").await;
+    let antes = assert_largo_compactado_y_segundo_entero(&servicio).await;
+
+    let error = servicio
+        .enviar_mensaje("tercera", "c", "haiku")
+        .await
+        .expect_err("el turno falla");
+    assert!(error.contains("fallo simulado del modelo"), "{error}");
+    assert_eq!(servicio.historial("c").await, antes);
+}
+
+#[tokio::test]
+async fn test_turno_detenido_sobre_un_historial_compactado_lo_deja_como_estaba() {
+    let mut guion = guion_largo_y_seguimiento_con_herramientas();
+    guion.push(Paso::Salida(paso_con_llamadas("c0", 4)));
+    guion.push(Paso::Colgar);
+    let runner = RunnerQueRegistra::con_guion(guion);
+    let servicio = servicio_con(runner.clone());
+
+    enviar(&servicio, "hola", "c").await;
+    enviar(&servicio, "segunda", "c").await;
+    let antes = assert_largo_compactado_y_segundo_entero(&servicio).await;
+
+    let en_curso = {
+        let servicio = servicio.clone();
+        tokio::spawn(async move {
+            servicio
+                .enviar_mensaje_en_vivo("tercera", "c", "haiku", "t3", Arc::new(|_| {}))
+                .await
+        })
+    };
+    tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        runner.colgado.notified(),
+    )
+    .await
+    .expect("el turno no llegó al paso colgado");
+    assert!(servicio.detener("t3"));
+
+    let error = en_curso.await.unwrap().expect_err("detenido");
+    assert_eq!(error, MENSAJE_RESPUESTA_DETENIDA);
+    assert_eq!(servicio.historial("c").await, antes);
 }
 
 #[tokio::test]
@@ -376,8 +498,8 @@ async fn test_turno_largo_que_acaba_en_salida_segura_se_conserva_como_turno_comp
 }
 
 #[tokio::test]
-async fn test_recortar_un_centro_no_toca_el_otro() {
-    // Tres turnos de 18 mensajes en un centro: el tercero obliga a descartar el primero
+async fn test_acotar_un_centro_no_toca_el_otro() {
+    // Tres turnos de 18 mensajes en un centro: el tercero obliga a compactar el primero
     let mut guion = vec![final_con("Respuesta del otro centro.")];
     for turno in 0..3 {
         guion.push(Paso::Salida(paso_con_llamadas(&format!("t{turno}"), 15)));
@@ -391,16 +513,23 @@ async fn test_recortar_un_centro_no_toca_el_otro() {
 
     enviar(&servicio, "primera", "centro_a").await;
     enviar(&servicio, "segunda", "centro_a").await;
-    let antes_del_recorte = servicio.historial("centro_a").await;
-    assert_eq!(antes_del_recorte.len(), 36);
+    let antes_de_acotar = servicio.historial("centro_a").await;
+    assert_eq!(antes_de_acotar.len(), 36);
     enviar(&servicio, "tercera", "centro_a").await;
 
-    let recortado = servicio.historial("centro_a").await;
-    assert_eq!(recortado.len(), 36);
-    assert_eq!(recortado[0], AgentMessage::user("segunda"));
-    assert_eq!(recortado[..18], antes_del_recorte[18..]);
-    assert_eq!(recortado[18], AgentMessage::user("tercera"));
-    assert_resultados_integros_y_emparejados(&recortado);
+    // 54 mensajes: el primer turno queda en pregunta y respuesta, y el segundo entero
+    let acotado = servicio.historial("centro_a").await;
+    assert_eq!(acotado.len(), 38);
+    assert_eq!(
+        acotado[..2],
+        [
+            AgentMessage::user("primera"),
+            AgentMessage::assistant("Hecho.")
+        ]
+    );
+    assert_eq!(acotado[2..20], antes_de_acotar[18..]);
+    assert_eq!(acotado[20], AgentMessage::user("tercera"));
+    assert_resultados_integros_y_emparejados(&acotado);
 
     assert_eq!(servicio.historial("centro_b").await, otro_centro);
 }
